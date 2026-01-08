@@ -58,6 +58,7 @@ int main() {
     constexpr size_t N = 1048576;
     constexpr auto steps = make_probe_steps<N>( );
     test_int_array<N>();
+    test_int_array<1000>();
     test_string_array();
     std::cout << "All tests completed.\n";
     return 0;
