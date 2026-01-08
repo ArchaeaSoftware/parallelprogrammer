@@ -1,25 +1,34 @@
 // Modern C++17+ approach: constexpr function to generate probe steps and lambda for unrolling
+
 #include <utility>
 #include <type_traits>
 
+// C++17-compatible: helper to generate probe steps
 template <std::size_t N, std::size_t... Steps>
 constexpr auto make_probe_steps() {
-    if constexpr (((N / 2) >> sizeof...(Steps)) != 0) {
-        return make_probe_steps<N, Steps..., (N / 2) >> sizeof...(Steps)>();
-    } else {
-        return std::integer_sequence<std::size_t, Steps...>{};
-    }
+    return ((N / 2) >> sizeof...(Steps))
+        ? make_probe_steps<N, Steps..., ((N / 2) >> sizeof...(Steps))>()
+        : std::integer_sequence<std::size_t, Steps...>{};
 }
 
-template <typename T, std::size_t N>
-int bentley_binary_search(const std::array<T, N>& arr, const T& target) {
-    constexpr auto steps = make_probe_steps<N>();
-    return [&]<std::size_t... Steps>(std::integer_sequence<std::size_t, Steps...>) {
+// Helper struct to unroll the search
+template <typename T, std::size_t N, typename StepsSeq>
+struct bentley_binary_search_helper;
+
+template <typename T, std::size_t N, std::size_t... Steps>
+struct bentley_binary_search_helper<T, N, std::integer_sequence<std::size_t, Steps...>> {
+    static int search(const std::array<T, N>& arr, const T& target) {
         std::size_t idx = 0;
         ((idx += (idx + Steps < N && arr[idx + Steps] <= target ? Steps : 0)), ...);
         if (arr[idx] == target) return static_cast<int>(idx);
         return -1;
-    }(steps);
+    }
+};
+
+template <typename T, std::size_t N>
+int bentley_binary_search(const std::array<T, N>& arr, const T& target) {
+    constexpr auto steps = make_probe_steps<N>();
+    return bentley_binary_search_helper<T, N, decltype(steps)>::search(arr, target);
 }
 // Jon Bentley's optimized binary search for constant-size arrays
 // Loop unrolled, probes with descending powers of 2
