@@ -1,34 +1,37 @@
 // Modern C++17+ approach: constexpr function to generate probe steps and lambda for unrolling
 
+
 #include <utility>
 #include <type_traits>
 
-// C++17-compatible: helper to generate probe steps
+// Helper to generate descending powers of 2 for probe steps
 template <std::size_t N, std::size_t... Steps>
-constexpr auto make_probe_steps() {
-    return ((N / 2) >> sizeof...(Steps))
-        ? make_probe_steps<N, Steps..., ((N / 2) >> sizeof...(Steps))>()
-        : std::integer_sequence<std::size_t, Steps...>{};
+constexpr auto make_probe_steps_impl(std::integer_sequence<std::size_t, Steps...>) {
+    constexpr std::size_t next = (N / 2) >> sizeof...(Steps);
+    if constexpr (next > 0) {
+        return make_probe_steps_impl<N>(std::integer_sequence<std::size_t, Steps..., next>{});
+    } else {
+        return std::integer_sequence<std::size_t, Steps...>{};
+    }
 }
 
-// Helper struct to unroll the search
-template <typename T, std::size_t N, typename StepsSeq>
-struct bentley_binary_search_helper;
+template <std::size_t N>
+constexpr auto make_probe_steps() {
+    return make_probe_steps_impl<N>(std::integer_sequence<std::size_t>{});
+}
 
 template <typename T, std::size_t N, std::size_t... Steps>
-struct bentley_binary_search_helper<T, N, std::integer_sequence<std::size_t, Steps...>> {
-    static int search(const std::array<T, N>& arr, const T& target) {
-        std::size_t idx = 0;
-        ((idx += (idx + Steps < N && arr[idx + Steps] <= target ? Steps : 0)), ...);
-        if (arr[idx] == target) return static_cast<int>(idx);
-        return -1;
-    }
-};
+int bentley_binary_search_impl(const std::array<T, N>& arr, const T& target, std::integer_sequence<std::size_t, Steps...>) {
+    std::size_t idx = 0;
+    ((idx += (idx + Steps < N && arr[idx + Steps] <= target ? Steps : 0)), ...);
+    if (arr[idx] == target) return static_cast<int>(idx);
+    return -1;
+}
 
 template <typename T, std::size_t N>
 int bentley_binary_search(const std::array<T, N>& arr, const T& target) {
     constexpr auto steps = make_probe_steps<N>();
-    return bentley_binary_search_helper<T, N, decltype(steps)>::search(arr, target);
+    return bentley_binary_search_impl(arr, target, steps);
 }
 // Jon Bentley's optimized binary search for constant-size arrays
 // Loop unrolled, probes with descending powers of 2
