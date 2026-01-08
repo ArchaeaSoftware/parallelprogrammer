@@ -1,0 +1,52 @@
+// Helper to generate descending powers of 2 for probe steps (using inheritance)
+#include <type_traits>
+// Recursive case
+template <std::size_t N, std::size_t... Steps>
+struct probe_steps_generator_impl
+    : probe_steps_generator_impl<N, Steps..., ((N / 2) >> sizeof...(Steps))> {};
+// Base case: when next_step == 0
+template <std::size_t N, std::size_t... Steps>
+struct probe_steps_generator_impl<N, 0, Steps...>
+    : std::integer_sequence<std::size_t, Steps...> {};
+// Alias for ergonomic use
+template <std::size_t N>
+using probe_steps_generator = probe_steps_generator_impl<N>;
+
+// Forward declaration for ergonomic wrapper
+template <typename T, std::size_t N, std::size_t... Steps>
+int bentley_binary_search_unrolled(const std::array<T, N>& arr, const T& target, std::integer_sequence<std::size_t, Steps...>);
+
+// Wrapper function for ergonomic invocation
+template <typename T, std::size_t N>
+int bentley_binary_search(const std::array<T, N>& arr, const T& target) {
+    using steps_seq = typename probe_steps_generator<N>::type;
+    return bentley_binary_search_unrolled(arr, target, steps_seq{});
+}
+
+// Implementation that unpacks the probe steps (renamed to avoid overload ambiguity)
+template <typename T, std::size_t N, std::size_t... Steps>
+int bentley_binary_search_unrolled(const std::array<T, N>& arr, const T& target, std::integer_sequence<std::size_t, Steps...>) {
+    std::size_t idx = 0;
+    ((idx += (idx + Steps < N && arr[idx + Steps] <= target ? Steps : 0)), ...);
+    if (arr[idx] == target) return static_cast<int>(idx);
+    return -1;
+}
+// Jon Bentley's optimized binary search for constant-size arrays
+// Loop unrolled, probes with descending powers of 2
+// Templatized for any comparable type, array size, and probe steps
+#include <array>
+#include <cstddef>
+
+// Returns index of target in sorted array, or -1 if not found, with explicit probe steps
+template <typename T, std::size_t N, std::size_t... Steps>
+int bentley_binary_search_unrolled(const std::array<T, N>& arr, const T& target) {
+    std::size_t idx = 0;
+    // Unroll the loop using the probe steps
+    ((idx += (idx + Steps < N && arr[idx + Steps] <= target ? Steps : 0)), ...);
+    if (arr[idx] == target) return static_cast<int>(idx);
+    return -1;
+}
+
+// Example usage:
+// constexpr std::array<int, 16> v = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
+// int idx = bentley_binary_search<int, 16, 8, 4, 2, 1>(v, 7); // idx == 6
