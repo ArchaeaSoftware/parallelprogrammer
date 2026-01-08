@@ -25,6 +25,10 @@ int bentley_binary_search_impl(const std::array<T, N>& arr, const T& target, std
     std::size_t idx = 0;
     ((idx += (idx + Steps < N && arr[idx + Steps] <= target ? Steps : 0)), ...);
     if (arr[idx] == target) return static_cast<int>(idx);
+    // For non-power-of-two sizes, check the last element
+    if constexpr (N > 0) {
+        if (idx != N - 1 && arr[N - 1] == target) return static_cast<int>(N - 1);
+    }
     return -1;
 }
 
