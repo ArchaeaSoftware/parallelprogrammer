@@ -1,19 +1,24 @@
 #include <array>
 #include <iostream>
-#include <algorithm>
 #include <cstdlib>
 #include "bentley_binary_search.hpp"
+#include <cassert>
 
 template<size_t N>
-void init_random( std::array<int32_t, N>& arr )
+void init_random(std::array<int32_t, N>& arr)
 {
-    // Fill with unique values
-    for (std::size_t i = 0; i < arr.size(); ++i) {
-        arr[i] = static_cast<int32_t>(i);
+    // Knuth's algorithm: select N unique numbers from 1..N in sorted order
+    // For this use case, M = N
+    int im = 0;
+    for (int in = 0; in < static_cast<int>(N) && im < static_cast<int>(N); ++in) {
+        int rn = static_cast<int>(N) - in;
+        int rm = static_cast<int>(N) - im;
+        if (rand() % rn < rm) {
+            arr[im++] = in;
+        }
     }
-    // Shuffle to randomize, then sort to test search on sorted unique values
-    std::random_shuffle(arr.begin(), arr.end());
-    std::sort(arr.begin(), arr.end());
+    // Ensure all slots filled
+    assert(im == static_cast<int>(N));
 }
 
 template<size_t N>
