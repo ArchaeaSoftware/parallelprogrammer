@@ -1,0 +1,22 @@
+BasedOnStyle: Google
+IndentWidth: 4
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+ColumnLimit: 80
+NamespaceIndentation: None
+# Open brace on its own line for function definitions only; classes,
+# namespaces and control statements keep theirs on the same line.
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+  AfterClass: false
+  AfterStruct: false
+  AfterNamespace: false
+  AfterControlStatement: Never
+  AfterEnum: false
+  AfterUnion: false
+  BeforeElse: false
+  BeforeCatch: false
+# Short accessors defined inside a class may stay on one line; every other
+# function definition gets its brace on the next line.
+AllowShortFunctionsOnASingleLine: Inline

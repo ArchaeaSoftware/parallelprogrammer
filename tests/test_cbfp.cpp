@@ -1,0 +1,664 @@
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <limits>
+#include <random>
+#include <string>
+#include <vector>
+
+#include "cbfp/column_accumulator.hpp"
+
+namespace {
+
+int g_failures = 0;
+int g_checks = 0;
+
+void check(bool ok, const char* expr, const char* file, int line)
+{
+    ++g_checks;
+    if (!ok) {
+        ++g_failures;
+        std::printf("FAIL %s:%d: %s\n", file, line, expr);
+    }
+}
+
+#define CHECK(expr) check((expr), #expr, __FILE__, __LINE__)
+
+void check_eq_double(double got, double want, const char* what, int line)
+{
+    ++g_checks;
+    const bool ok = (std::isnan(got) && std::isnan(want)) ||
+                    (got == want && std::signbit(got) == std::signbit(want));
+    if (!ok) {
+        ++g_failures;
+        std::printf("FAIL %s:%d: %s: got %.17g, want %.17g\n", __FILE__, line,
+                    what, got, want);
+    }
+}
+
+#define CHECK_DOUBLE(got, want) check_eq_double((got), (want), #got, __LINE__)
+
+void check_eq_str(const std::string& got, const std::string& want,
+                  const char* what, int line)
+{
+    ++g_checks;
+    if (got != want) {
+        ++g_failures;
+        std::printf("FAIL %s:%d: %s:\n  got  %s\n  want %s\n", __FILE__, line,
+                    what, got.c_str(), want.c_str());
+    }
+}
+
+#define CHECK_STR(got, want) check_eq_str((got), (want), #got, __LINE__)
+
+// ---------------------------------------------------------------------------
+
+void test_decompose()
+{
+    auto p = cbfp::decompose(1.0);
+    CHECK(p.mantissa == 1 && p.exponent == 0 && !p.negative);
+
+    p = cbfp::decompose(-8.0);
+    CHECK(p.mantissa == 1 && p.exponent == 3 && p.negative);
+
+    p = cbfp::decompose(0.0);
+    CHECK(p.mantissa == 0);
+
+    p = cbfp::decompose(-0.0);
+    CHECK(p.mantissa == 0);
+
+    p = cbfp::decompose(0.5);
+    CHECK(p.mantissa == 1 && p.exponent == -1);
+
+    // Smallest subnormal is exactly 2^-1074.
+    p = cbfp::decompose(std::numeric_limits<double>::denorm_min());
+    CHECK(p.mantissa == 1 && p.exponent == -1074);
+
+    // Every mantissa comes back odd, and the value reconstructs exactly.
+    std::mt19937_64 rng(1234);
+    for (int n = 0; n < 2000; ++n) {
+        double v;
+        std::uint64_t bits = rng();
+        std::memcpy(&v, &bits, sizeof v);
+        if (!std::isfinite(v)) continue;
+
+        p = cbfp::decompose(v);
+        if (p.mantissa == 0) {
+            CHECK(v == 0.0);
+            continue;
+        }
+        CHECK((p.mantissa & 1) == 1);
+        const double rebuilt =
+            std::ldexp(static_cast<double>(p.mantissa), p.exponent);
+        CHECK_DOUBLE(p.negative ? -rebuilt : rebuilt, v);
+    }
+}
+
+void test_single_value_roundtrip()
+{
+    const double values[] = {
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        0.1,
+        -0.1,
+        3.14159265358979,
+        std::numeric_limits<double>::max(),
+        -std::numeric_limits<double>::max(),
+        std::numeric_limits<double>::min(),         // smallest normal
+        std::numeric_limits<double>::denorm_min(),  // smallest subnormal
+        -std::numeric_limits<double>::denorm_min(),
+        std::ldexp(1.0, 1000),
+        std::ldexp(1.0, -1000),
+        std::ldexp(4503599627370495.0, -1074),  // largest subnormal
+    };
+
+    for (double v : values) {
+        cbfp::ColumnBlockMatrix m(1, 1);
+        m.add(0, 0, v);
+        // -0.0 accumulates as an exact zero; the sign of zero is not tracked.
+        const double want = (v == 0.0) ? 0.0 : v;
+        CHECK_DOUBLE(m.to_double(0, 0), want);
+        CHECK(m.is_exactly_representable(0, 0));
+    }
+}
+
+void test_catastrophic_cancellation()
+{
+    // The classic case: naive double summation returns 0, the exact answer
+    // is 1.
+    const double terms[] = {1e300, 1.0, -1e300};
+    double naive = 0.0;
+    for (double t : terms) naive += t;
+    CHECK_DOUBLE(naive, 0.0);
+
+    cbfp::ColumnBlockMatrix m(1, 1);
+    for (double t : terms) m.add(0, 0, t);
+    CHECK_DOUBLE(m.to_double(0, 0), 1.0);
+    CHECK_STR(m.to_exact_decimal(0, 0), "1");
+}
+
+void test_repeated_tenth()
+{
+    // double(0.1) is exactly 3602879701896397 * 2^-55, so ten of them sum to
+    // exactly 1 + 2^-54 -- a quarter ulp above 1, which rounds back to 1.0.
+    // Naive summation instead drifts one ulp below.
+    cbfp::ColumnBlockMatrix m(1, 1);
+    double naive = 0.0;
+    for (int i = 0; i < 10; ++i) {
+        m.add(0, 0, 0.1);
+        naive += 0.1;
+    }
+    CHECK_DOUBLE(naive, 0.99999999999999989);
+    CHECK_DOUBLE(m.to_double(0, 0), 1.0);
+    CHECK_STR(m.to_exact_decimal(0, 0),
+              "1.000000000000000055511151231257827021181583404541015625");
+}
+
+void test_exact_decimal()
+{
+    cbfp::ColumnBlockMatrix m(1, 4);
+    m.add(0, 0, 0.1);
+    CHECK_STR(m.to_exact_decimal(0, 0),
+              "0.1000000000000000055511151231257827021181583404541015625");
+
+    m.add(0, 1, -0.3);
+    CHECK_STR(m.to_exact_decimal(0, 1),
+              "-0.299999999999999988897769753748434595763683319091796875");
+
+    m.add(0, 2, 1024.0);
+    CHECK_STR(m.to_exact_decimal(0, 2), "1024");
+
+    m.add(0, 3, std::numeric_limits<double>::denorm_min());
+    const std::string tiny = m.to_exact_decimal(0, 3);
+    CHECK(tiny.size() == 1076);  // "0." + 1074 digits
+    CHECK(tiny.compare(0, 2, "0.") == 0);
+    CHECK(tiny.back() == '5');  // 2^-1074 ends in ...625
+}
+
+void test_exponent_and_width_tracking()
+{
+    cbfp::ColumnBlockMatrix m(1, 1);
+    m.add(0, 0, 1.0);
+    CHECK(m.column_exponent(0) == 0);
+
+    // A much smaller value forces the column scale down; nothing is lost.
+    m.add(0, 0, std::ldexp(1.0, -200));
+    CHECK(m.column_exponent(0) == -200);
+    CHECK(m.column_bit_width(0) >= 201);
+
+    // A much larger value forces the block wider.
+    m.add(0, 0, std::ldexp(1.0, 200));
+    CHECK(m.column_exponent(0) == -200);
+    CHECK(m.column_bit_width(0) >= 401);
+
+    m.sub(0, 0, std::ldexp(1.0, 200));
+    m.sub(0, 0, std::ldexp(1.0, -200));
+    CHECK_DOUBLE(m.to_double(0, 0), 1.0);
+
+    m.sub(0, 0, 1.0);
+    CHECK(m.is_zero(0, 0));
+    CHECK_DOUBLE(m.to_double(0, 0), 0.0);
+}
+
+void test_full_double_range()
+{
+    // Span the entire binade range in a single column: 2^-1074 up to 2^1023.
+    cbfp::ColumnBlockMatrix m(1, 1);
+    m.add(0, 0, std::ldexp(1.0, 1023));
+    m.add(0, 0, std::numeric_limits<double>::denorm_min());
+    CHECK(m.column_bit_width(0) >= 1024 + 1074);
+
+    // The tiny term is far below the ulp of the large one, so the rounded
+    // readback is the large term, but the stored value still knows about it.
+    CHECK_DOUBLE(m.to_double(0, 0), std::ldexp(1.0, 1023));
+    CHECK(!m.is_exactly_representable(0, 0));
+
+    m.sub(0, 0, std::ldexp(1.0, 1023));
+    CHECK_DOUBLE(m.to_double(0, 0), std::numeric_limits<double>::denorm_min());
+    CHECK(m.is_exactly_representable(0, 0));
+}
+
+void test_rounding_ties_to_even()
+{
+    {  // 1 + 2^-53 is exactly halfway between 1 and nextafter(1); ties to
+       // even.
+        cbfp::ColumnBlockMatrix m(1, 1);
+        m.add(0, 0, 1.0);
+        m.add(0, 0, std::ldexp(1.0, -53));
+        CHECK_DOUBLE(m.to_double(0, 0), 1.0);
+    }
+    {  // One bit above the tie rounds up.
+        cbfp::ColumnBlockMatrix m(1, 1);
+        m.add(0, 0, 1.0);
+        m.add(0, 0, std::ldexp(1.0, -53));
+        m.add(0, 0, std::ldexp(1.0, -105));
+        CHECK_DOUBLE(m.to_double(0, 0), std::nextafter(1.0, 2.0));
+    }
+    {  // Tie with an odd mantissa rounds up (to even).
+        cbfp::ColumnBlockMatrix m(1, 1);
+        const double odd = std::nextafter(1.0, 2.0);  // 1 + 2^-52
+        m.add(0, 0, odd);
+        m.add(0, 0, std::ldexp(1.0, -53));
+        CHECK_DOUBLE(m.to_double(0, 0), std::nextafter(odd, 2.0));
+    }
+    {  // 2^-1075 is halfway between 0 and the smallest subnormal: ties to
+       // zero. It is below anything a double can hold, so it is reached by
+       // accumulating the smallest subnormal with an exact power-of-two scale.
+        cbfp::ColumnBlockMatrix m(1, 1);
+        double sub = std::numeric_limits<double>::denorm_min();  // 2^-1074
+        m.add_matrix_scaled_pow2(&sub, -1);                      // += 2^-1075
+        CHECK_DOUBLE(m.to_double(0, 0), 0.0);
+        CHECK(!m.is_zero(0, 0));  // exact value kept, only readback rounds
+        CHECK(m.column_exponent(0) == -1075);
+
+        // Just past that tie rounds up to the smallest subnormal.
+        m.add_matrix_scaled_pow2(&sub, -2);  // += 2^-1076
+        CHECK_DOUBLE(m.to_double(0, 0),
+                     std::numeric_limits<double>::denorm_min());
+    }
+    {  // Two subnormals that sum into the smallest normal.
+        cbfp::ColumnBlockMatrix m(1, 1);
+        const double largest_sub = std::ldexp(4503599627370495.0, -1074);
+        m.add(0, 0, largest_sub);
+        m.add(0, 0, std::numeric_limits<double>::denorm_min());
+        CHECK_DOUBLE(m.to_double(0, 0), std::numeric_limits<double>::min());
+        CHECK(m.is_exactly_representable(0, 0));
+    }
+    {  // Overflow of the double range on readback only.
+        cbfp::ColumnBlockMatrix m(1, 1);
+        const double big = std::numeric_limits<double>::max();
+        m.add(0, 0, big);
+        m.add(0, 0, big);
+        CHECK_DOUBLE(m.to_double(0, 0),
+                     std::numeric_limits<double>::infinity());
+        m.sub(0, 0, big);
+        CHECK_DOUBLE(m.to_double(0, 0), big);  // and it comes back exactly
+    }
+}
+
+void test_add_then_subtract_is_zero()
+{
+    // Order-independence and exactness: adding a random set and then
+    // subtracting the same values in a different order must land on exact
+    // zero.
+    std::mt19937_64 rng(20250812);
+    std::uniform_int_distribution<int> exp_dist(-300, 300);
+    std::uniform_real_distribution<double> man_dist(-1.0, 1.0);
+
+    const std::size_t rows = 7, cols = 5;
+    cbfp::ColumnBlockMatrix m(rows, cols);
+
+    std::vector<std::vector<double>> per_cell(rows * cols);
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            for (int n = 0; n < 40; ++n) {
+                const double v = std::ldexp(man_dist(rng), exp_dist(rng));
+                per_cell[i * cols + j].push_back(v);
+                m.add(i, j, v);
+            }
+        }
+    }
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            auto& cell = per_cell[i * cols + j];
+            std::shuffle(cell.begin(), cell.end(), rng);
+            for (double v : cell) m.sub(i, j, v);
+            CHECK(m.is_zero(i, j));
+        }
+    }
+}
+
+void test_matrix_accumulation()
+{
+    const std::size_t rows = 3, cols = 4;
+    // clang-format off
+    std::vector<double> b = {
+        1e300,  1.0,  0.1, -7.0,
+        1.0,    1e-8, 0.1,  2.5,
+        -1e300, 3.0,  0.1,  0.0,
+    };
+    // clang-format on
+
+    cbfp::ColumnBlockMatrix m(rows, cols);
+    m.add_matrix(b.data());
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            CHECK_DOUBLE(m.to_double(i, j), b[i * cols + j]);
+        }
+    }
+
+    // Accumulate the same matrix 1000 more times; every cell is exactly
+    // 1001x.
+    for (int n = 0; n < 1000; ++n) m.add_matrix(b.data());
+    std::vector<double> out(rows * cols);
+    m.to_matrix(out.data());
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            const double want = 1001.0 * b[i * cols + j];
+            CHECK_DOUBLE(out[i * cols + j], want);
+        }
+    }
+
+    // Power-of-two scaling is exact.
+    cbfp::ColumnBlockMatrix h(rows, cols);
+    h.add_matrix_scaled_pow2(b.data(), -3);
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            CHECK_DOUBLE(h.to_double(i, j), b[i * cols + j] / 8.0);
+        }
+    }
+}
+
+void test_reserve_avoids_rescaling()
+{
+    const std::size_t rows = 4, cols = 3;
+    // clang-format off
+    std::vector<double> b = {
+        1.0,  1e-30, 1e20,
+        2.0,  2e-30, 2e20,
+        0.5,  4e-30, 4e20,
+        0.25, 8e-30, 8e20,
+    };
+    // clang-format on
+
+    cbfp::ColumnBlockMatrix lazy(rows, cols);
+    cbfp::ColumnBlockMatrix eager(rows, cols);
+    eager.reserve_for(b.data(), 500);
+
+    for (int n = 0; n < 500; ++n) {
+        lazy.add_matrix(b.data());
+        eager.add_matrix(b.data());
+    }
+    for (std::size_t j = 0; j < cols; ++j) {
+        CHECK(lazy.column_exponent(j) == eager.column_exponent(j));
+    }
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            CHECK_STR(lazy.to_exact_decimal(i, j),
+                      eager.to_exact_decimal(i, j));
+        }
+    }
+}
+
+void test_column_independence()
+{
+    // Column 0 gets a huge dynamic range, column 1 stays cheap. The whole
+    // point of per-column scaling is that column 1 does not pay for column 0.
+    cbfp::ColumnBlockMatrix m(2, 2);
+    m.add(0, 0, std::ldexp(1.0, 900));
+    m.add(0, 0, std::ldexp(1.0, -900));
+    m.add(0, 1, 1.0);
+    m.add(1, 1, 2.0);
+
+    CHECK(m.column_bit_width(0) >= 1800);
+    CHECK(m.column_bit_width(1) <= 128);
+    CHECK(m.column_exponent(1) == 0);
+}
+
+void test_errors()
+{
+    cbfp::ColumnBlockMatrix m(2, 2);
+    bool threw = false;
+    try {
+        m.add(0, 0, std::numeric_limits<double>::infinity());
+    } catch (const std::domain_error&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    threw = false;
+    try {
+        m.add(5, 0, 1.0);
+    } catch (const std::out_of_range&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+void test_many_small_into_large()
+{
+    // A million values whose ulp is far below the running total's ulp. Naive
+    // summation stalls completely; this does not.
+    cbfp::ColumnBlockMatrix m(1, 1);
+    const double big = std::ldexp(1.0, 60);
+    const double small = 1.0;
+    m.add(0, 0, big);
+    double naive = big;
+    for (int n = 0; n < 1000000; ++n) {
+        m.add(0, 0, small);
+        naive += small;
+    }
+    CHECK_DOUBLE(naive, big);  // every increment is swallowed by rounding
+    CHECK_DOUBLE(m.to_double(0, 0), big + 1000000.0);
+    m.sub(0, 0, big);
+    CHECK_DOUBLE(m.to_double(0, 0), 1000000.0);
+}
+
+void test_reuse_after_zero()
+{
+    cbfp::ColumnBlockMatrix m(1, 1);
+    m.add(0, 0, 1.0);
+    m.set_zero();
+    CHECK(m.is_zero(0, 0));
+    m.add(0, 0, 2.5);
+    CHECK_DOUBLE(m.to_double(0, 0), 2.5);
+}
+
+// --- large / strided coverage ----------------------------------------------
+
+// A deterministic value per (row, column, batch), spanning a wide exponent
+// range with mixed signs so columns rescale and widen at different rates and
+// entries partially cancel.
+double wide_sample(std::size_t i, std::size_t j, int batch)
+{
+    const int e = static_cast<int>((i * 7 + j * 13 + batch * 3) % 120) - 60;
+    const double frac =
+        static_cast<double>((i * 31 + j * 17 + batch * 11) % 97) / 97.0;
+    const double m = 1.0 + frac;
+    return std::ldexp((batch % 2 == 0) ? m : -m, e);
+}
+
+void test_row_stride()
+{
+    const std::size_t rows = 5, cols = 3, stride = cols + 4;
+
+    // The padding is NaN, which add() rejects: if any of it is ever read as
+    // matrix data, these tests throw rather than quietly passing.
+    std::vector<double> padded(rows * stride,
+                               std::numeric_limits<double>::quiet_NaN());
+    std::vector<double> packed(rows * cols);
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            const double v = wide_sample(i, j, 0);
+            padded[i * stride + j] = v;
+            packed[i * cols + j] = v;
+        }
+    }
+
+    cbfp::ColumnBlockMatrix a(rows, cols);
+    cbfp::ColumnBlockMatrix b(rows, cols);
+    a.reserve_for(padded.data(), 4, stride);
+    b.reserve_for(packed.data(), 4);
+
+    for (int n = 0; n < 3; ++n) {
+        a.add_matrix(padded.data(), stride);
+        b.add_matrix(packed.data());
+    }
+    a.add_matrix_scaled_pow2(padded.data(), -5, stride);
+    b.add_matrix_scaled_pow2(packed.data(), -5);
+
+    for (std::size_t j = 0; j < cols; ++j) {
+        CHECK(a.column_exponent(j) == b.column_exponent(j));
+        CHECK(a.column_bit_width(j) == b.column_bit_width(j));
+    }
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            CHECK_STR(a.to_exact_decimal(i, j), b.to_exact_decimal(i, j));
+        }
+    }
+
+    // Reading back into a padded buffer must leave the padding untouched.
+    const double kFill = -12345.0;
+    std::vector<double> out(rows * stride, kFill);
+    a.to_matrix(out.data(), stride);
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            CHECK_DOUBLE(out[i * stride + j], b.to_double(i, j));
+        }
+        for (std::size_t j = cols; j < stride; ++j) {
+            CHECK_DOUBLE(out[i * stride + j], kFill);
+        }
+    }
+}
+
+void test_large_matrix_matches_scalar()
+{
+    // A column of 257 rows shares one exponent across every row, while a 1x1
+    // accumulator picks the exponent that suits its single cell. The stored
+    // integers therefore differ, but the exact values must not: this pins down
+    // both the row-stride arithmetic and the claim that a column's shared
+    // scale never changes what it holds.
+    const std::size_t rows = 257, cols = 9;
+    const int batches = 8;
+
+    cbfp::ColumnBlockMatrix big(rows, cols);
+    std::vector<double> buf(rows * cols);
+    for (int b = 0; b < batches; ++b) {
+        for (std::size_t i = 0; i < rows; ++i) {
+            for (std::size_t j = 0; j < cols; ++j) {
+                buf[i * cols + j] = wide_sample(i, j, b);
+            }
+        }
+        big.add_matrix(buf.data());
+    }
+
+    // Every column had to rescale and widen well past its first value.
+    for (std::size_t j = 0; j < cols; ++j) {
+        CHECK(big.column_bit_width(j) >= 128);
+    }
+
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            cbfp::ColumnBlockMatrix one(1, 1);
+            for (int b = 0; b < batches; ++b) {
+                one.add(0, 0, wide_sample(i, j, b));
+            }
+            CHECK_STR(big.to_exact_decimal(i, j), one.to_exact_decimal(0, 0));
+            CHECK_DOUBLE(big.to_double(i, j), one.to_double(0, 0));
+            // The shared column scale is at least as fine as the cell needs.
+            CHECK(big.column_exponent(j) <= one.column_exponent(0));
+        }
+    }
+}
+
+void test_large_matrix_cancels_to_zero()
+{
+    // Subtracting the same values back in a different order must clear every
+    // one of the 2313 cells, which no amount of cross-row bleed would survive.
+    const std::size_t rows = 257, cols = 9;
+    const int batches = 6;
+
+    cbfp::ColumnBlockMatrix m(rows, cols);
+    std::vector<double> buf(rows * cols);
+    for (int b = 0; b < batches; ++b) {
+        for (std::size_t i = 0; i < rows; ++i) {
+            for (std::size_t j = 0; j < cols; ++j) {
+                buf[i * cols + j] = wide_sample(i, j, b);
+            }
+        }
+        m.add_matrix(buf.data());
+    }
+
+    // Walk the batches back in reverse, and the cells within each batch in
+    // reverse too, so nothing is undone in the order it was applied.
+    for (int b = batches; b-- > 0;) {
+        for (std::size_t i = rows; i-- > 0;) {
+            for (std::size_t j = cols; j-- > 0;) {
+                m.sub(i, j, wide_sample(i, j, b));
+            }
+        }
+    }
+
+    std::size_t nonzero = 0;
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            if (!m.is_zero(i, j)) ++nonzero;
+        }
+    }
+    CHECK(nonzero == 0);
+}
+
+void test_large_matrix_per_column_scales()
+{
+    // 512 x 64 with a distinct power-of-two scale per column. Each cell sums
+    // integers below 2^53 at a single fixed scale, so plain double addition is
+    // itself exact here and serves as an independent reference for all 32768
+    // cells -- this test is about indexing and scale bookkeeping at size.
+    const std::size_t rows = 512, cols = 64;
+    const int batches = 16;
+
+    cbfp::ColumnBlockMatrix m(rows, cols);
+    std::vector<double> buf(rows * cols);
+    std::vector<double> reference(rows * cols, 0.0);
+
+    for (int b = 0; b < batches; ++b) {
+        for (std::size_t i = 0; i < rows; ++i) {
+            for (std::size_t j = 0; j < cols; ++j) {
+                const int n =
+                    static_cast<int>((i * 13 + j * 7 + b * 5) % 2001) - 1000;
+                const double v = std::ldexp(static_cast<double>(n),
+                                            static_cast<int>(j) - 32);
+                buf[i * cols + j] = v;
+                reference[i * cols + j] += v;
+            }
+        }
+        m.add_matrix(buf.data());
+    }
+
+    std::vector<double> out(rows * cols, 0.0);
+    m.to_matrix(out.data());
+
+    std::size_t mismatches = 0;
+    for (std::size_t k = 0; k < rows * cols; ++k) {
+        if (out[k] != reference[k]) ++mismatches;
+    }
+    CHECK(mismatches == 0);
+
+    // Integer values at a fixed per-column scale stay narrow: the column
+    // exponent should land on the column's own power of two, not drift down.
+    for (std::size_t j = 0; j < cols; ++j) {
+        CHECK(m.column_exponent(j) >= static_cast<int>(j) - 32);
+        CHECK(m.column_bit_width(j) <= 128);
+    }
+}
+
+}  // namespace
+
+int main()
+{
+    test_decompose();
+    test_single_value_roundtrip();
+    test_catastrophic_cancellation();
+    test_repeated_tenth();
+    test_exact_decimal();
+    test_exponent_and_width_tracking();
+    test_full_double_range();
+    test_rounding_ties_to_even();
+    test_add_then_subtract_is_zero();
+    test_matrix_accumulation();
+    test_reserve_avoids_rescaling();
+    test_column_independence();
+    test_errors();
+    test_many_small_into_large();
+    test_reuse_after_zero();
+    test_row_stride();
+    test_large_matrix_matches_scalar();
+    test_large_matrix_cancels_to_zero();
+    test_large_matrix_per_column_scales();
+
+    std::printf("%d checks, %d failures\n", g_checks, g_failures);
+    return g_failures == 0 ? 0 : 1;
+}
