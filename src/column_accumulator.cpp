@@ -243,17 +243,38 @@ void ColumnBlockMatrix::add_matrix(const double* b, std::size_t row_stride)
 void ColumnBlockMatrix::add_matrix_scaled_pow2(const double* b, int log2_scale,
                                                std::size_t row_stride)
 {
+    accumulate_columns(b, 1, row_stride ? row_stride : cols_, log2_scale);
+}
+
+void ColumnBlockMatrix::add_matrix_col_major(const double* b,
+                                             std::size_t col_stride)
+{
+    add_matrix_col_major_scaled_pow2(b, 0, col_stride);
+}
+
+void ColumnBlockMatrix::add_matrix_col_major_scaled_pow2(const double* b,
+                                                         int log2_scale,
+                                                         std::size_t col_stride)
+{
+    accumulate_columns(b, col_stride ? col_stride : rows_, 1, log2_scale);
+}
+
+void ColumnBlockMatrix::accumulate_columns(const double* b,
+                                           std::size_t column_step,
+                                           std::size_t row_step, int log2_scale)
+{
     if (rows_ == 0 || cols_ == 0) return;
-    const std::size_t stride = row_stride ? row_stride : cols_;
     const kernels::ScanFn scan_fn = kernels::scan();
     const kernels::AccumulateFn accumulate_fn = kernels::accumulate();
 
     for (std::size_t j = 0; j < cols_; ++j) {
-        // Stage the column contiguously so neither pass needs a gather.
-        const double* column = b + j;
-        if (stride != 1) {
+        // Both passes want the column contiguous. When the caller's layout
+        // already provides that, use it in place; otherwise stage it, because
+        // a strided vector gather costs more than the work it feeds.
+        const double* column = b + j * column_step;
+        if (row_step != 1) {
             for (std::size_t i = 0; i < rows_; ++i) {
-                column_buffer_[i] = b[i * stride + j];
+                column_buffer_[i] = column[i * row_step];
             }
             column = column_buffer_.data();
         }

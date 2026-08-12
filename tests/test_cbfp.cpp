@@ -637,6 +637,71 @@ void test_large_matrix_per_column_scales()
     }
 }
 
+void test_column_major_input()
+{
+    // The same matrix in both layouts must accumulate to the same exact
+    // values. Column-major needs no staging copy, so it takes a different
+    // path through the kernels.
+    const std::size_t rows = 133, cols = 7;
+    const int batches = 5;
+
+    std::vector<double> row_major(rows * cols);
+    std::vector<double> col_major(rows * cols);
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            const double v = wide_sample(i, j, 0);
+            row_major[i * cols + j] = v;
+            col_major[j * rows + i] = v;
+        }
+    }
+
+    cbfp::ColumnBlockMatrix a(rows, cols);
+    cbfp::ColumnBlockMatrix b(rows, cols);
+    for (int n = 0; n < batches; ++n) {
+        a.add_matrix(row_major.data());
+        b.add_matrix_col_major(col_major.data());
+    }
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            CHECK_STR(a.to_exact_decimal(i, j), b.to_exact_decimal(i, j));
+        }
+    }
+    for (std::size_t j = 0; j < cols; ++j) {
+        CHECK(a.column_exponent(j) == b.column_exponent(j));
+        CHECK(a.column_bit_width(j) == b.column_bit_width(j));
+    }
+
+    // Power-of-two scaling agrees too.
+    cbfp::ColumnBlockMatrix c(rows, cols);
+    cbfp::ColumnBlockMatrix d(rows, cols);
+    c.add_matrix_scaled_pow2(row_major.data(), -7);
+    d.add_matrix_col_major_scaled_pow2(col_major.data(), -7);
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            CHECK_STR(c.to_exact_decimal(i, j), d.to_exact_decimal(i, j));
+        }
+    }
+
+    // A padded column stride must leave the gaps unread: NaN there would be
+    // rejected if it were ever treated as data.
+    const std::size_t pad = rows + 5;
+    std::vector<double> padded(pad * cols,
+                               std::numeric_limits<double>::quiet_NaN());
+    for (std::size_t j = 0; j < cols; ++j) {
+        for (std::size_t i = 0; i < rows; ++i) {
+            padded[j * pad + i] = col_major[j * rows + i];
+        }
+    }
+    cbfp::ColumnBlockMatrix e(rows, cols);
+    for (int n = 0; n < batches; ++n)
+        e.add_matrix_col_major(padded.data(), pad);
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            CHECK_STR(e.to_exact_decimal(i, j), a.to_exact_decimal(i, j));
+        }
+    }
+}
+
 }  // namespace
 
 int main()
@@ -660,6 +725,7 @@ int main()
     test_large_matrix_matches_scalar();
     test_large_matrix_cancels_to_zero();
     test_large_matrix_per_column_scales();
+    test_column_major_input();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

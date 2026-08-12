@@ -52,6 +52,15 @@ public:
     void add_matrix_scaled_pow2(const double* b, int log2_scale,
                                 std::size_t row_stride = 0);
 
+    // A += B, where B is column-major: column j begins at b + j*col_stride and
+    // its rows are contiguous (0 means tightly packed, i.e. rows()). This is
+    // the layout the accumulator itself wants, so it avoids the staging copy
+    // that a row-major input needs.
+    void add_matrix_col_major(const double* b, std::size_t col_stride = 0);
+
+    void add_matrix_col_major_scaled_pow2(const double* b, int log2_scale,
+                                          std::size_t col_stride = 0);
+
     void set_zero();
 
     // --- readback ----------------------------------------------------------
@@ -119,6 +128,11 @@ private:
         std::vector<LimbColumn> limbs;      // limbs[k] = k-th limb of a row
         std::vector<limbs::limb_t*> bases;  // limbs[k].data(), for kernels
     };
+
+    // Column j starts at b + j*column_step, with element i at + i*row_step.
+    // Row-major is (1, row_stride); column-major is (col_stride, 1).
+    void accumulate_columns(const double* b, std::size_t column_step,
+                            std::size_t row_step, int log2_scale);
 
     void check_index(std::size_t i, std::size_t j) const;
     void rebuild_bases(Column& c);

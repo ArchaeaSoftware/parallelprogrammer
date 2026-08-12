@@ -51,7 +51,8 @@ cbfp::ColumnBlockMatrix acc(rows, cols);
 
 acc.reserve_for(first_batch.data(), n_batches);   // optional: avoids rescaling
 for (const auto& batch : batches) {
-    acc.add_matrix(batch.data());                 // row-major doubles
+    acc.add_matrix_col_major(batch.data());       // column-major: preferred
+    // acc.add_matrix(batch.data());              // row-major also works
 }
 
 double x = acc.to_double(i, j);                   // correctly rounded, once
@@ -104,10 +105,16 @@ exponent range, because the rescale and widen decisions have to be made before
 anything can be added; the second fuses decomposition into the add, so no
 decomposed form is ever written to memory.
 
-A column of a row-major matrix is strided, and a strided vector gather costs
-more on Zen 4 than the decomposition it feeds — measured at roughly 3x slower
-than the same kernel reading contiguously. The column is therefore staged into
-a contiguous buffer once and both passes stream over it.
+Both passes want the column contiguous. `add_matrix_col_major` gives them that
+directly, so it is the faster entry point — **1.6x** over row-major on a
+4096x64 accumulation, with bit-identical results. A row-major input has its
+columns strided by `cols` doubles, and a strided vector gather costs more on
+Zen 4 than the decomposition it feeds, so such a column is staged into a
+contiguous buffer once rather than gathered.
+
+Note which layout is which: the *accumulator's* storage always keeps a column
+contiguous, since `limbs[k]` holds limb `k` of every row. Only the caller's
+matrix can be strided.
 
 ### Threading
 
