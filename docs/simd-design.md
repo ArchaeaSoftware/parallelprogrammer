@@ -11,7 +11,31 @@ the two targets want the same thing — so the abstraction is driven by the radi
 choice below rather than by either machine's word size.
 
 Measurements are from a Ryzen 7 7700X (Zen 4: AVX512F/BW/DQ/VL, VBMI2,
-VPOPCNTDQ; 256-bit datapath, so AVX-512 ops are double-pumped).
+VPOPCNTDQ; 256-bit datapath, so AVX-512 ops are double-pumped) and an
+RTX 3060 (sm_86, CUDA 12.9).
+
+## Decisions of record
+
+| decision | status |
+| --- | --- |
+| **64-bit limb storage (`uint64_t`) on every target** | **settled** |
+| Limb-major layout: one array per limb position | settled |
+| 64-byte aligned allocation, skewed per limb array | settled |
+| `LimbColumn` as the type name | settled, naming may be revisited |
+| Bit-manipulation `decompose` | landed (`8565474`) |
+| Radix: 52-bit carry-save vs 64-bit canonical | **open** |
+| Whether limb arrays get separate allocations on CUDA | open |
+
+Storage width is closed: 32-bit limbs were measured slower than 64-bit on both
+targets, so `uint64_t` is the plan of record everywhere and the limb type does
+not need to be a template parameter.
+
+The **radix** is a separate question and remains open. On the GPU, a 52-bit
+carry-save radix measured 2.8x a 64-bit canonical one by removing carry
+propagation from the inner loop, at the cost of 81% memory density and a
+normalization pass before readback. The equivalent CPU measurement has not been
+run. Until it is, the CPU path stays canonical at radix 64 — which is what the
+code does today, so nothing is blocked.
 
 ## The layout: limb-major `LimbColumn`
 
@@ -98,11 +122,12 @@ deterministic outcome.
 `K=8` (offsets `(k & 7) * 64`) sufficed everywhere measured. Treat it as a
 tunable, not a derived constant — see the caveats.
 
-## Limb width: keep 64-bit storage, tune the radix
+## Limb width: 64-bit storage everywhere (settled)
 
 **Measured conclusion: limb width is not the lever; deferring carries is.**
-Storage stays `uint64_t` on both targets, and the one parameter worth exposing
-is the *radix* — how many of those 64 bits are used before headroom begins.
+Storage is `uint64_t` on both targets — the plan of record — and the only
+parameter worth exposing is the *radix*, meaning how many of those 64 bits are
+used before headroom begins.
 
 RTX 3060, 2^20 rows x 256 accumulations, ~512-bit accumulator held in
 registers, reported as accumulator bits updated per second:
