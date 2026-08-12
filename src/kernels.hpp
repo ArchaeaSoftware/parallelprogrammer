@@ -19,13 +19,22 @@ namespace kernels {
 
 // What the first pass needs to learn about a column of incoming values.
 struct Scan {
-    long long min_exponent;  // lowest true-ulp exponent among nonzero values
-    long long max_top;       // highest bit position reached, exclusive
-    bool any;                // false if every value was zero
-    bool nonfinite;          // true if any value was inf or NaN
+    // Lowest true-ulp exponent among nonzero values, or a lower bound on it
+    // when that was enough to rule out a rescale. Either way it is safe to use
+    // as a column exponent; the bound is only ever looser, never lower than
+    // the caller's floor.
+    long long min_exponent;
+    long long max_top;  // highest bit position reached, exclusive
+    bool any;           // false if every value was zero
+    bool nonfinite;     // true if any value was inf or NaN
 };
 
-using ScanFn = Scan (*)(const double*, std::size_t);
+// `floor_exponent` is the column's current exponent. The scan needs the exact
+// minimum only when the incoming values could drop below it; otherwise a cheap
+// lower bound settles that no rescale is due and the significand is never
+// touched. Pass LLONG_MAX to force the exact value, which is what a column
+// with no scale yet requires, since it adopts whatever the scan returns.
+using ScanFn = Scan (*)(const double*, std::size_t, long long);
 
 // Fused decompose-and-add. `column_exponent` already absorbs any power-of-two
 // scale, so the shift is simply value_exponent - column_exponent.
@@ -34,14 +43,16 @@ using ScanFn = Scan (*)(const double*, std::size_t);
 using AccumulateFn = void (*)(std::uint64_t* const*, std::size_t, const double*,
                               std::size_t, std::int32_t, std::size_t);
 
-Scan scan_column_scalar(const double* values, std::size_t rows);
+Scan scan_column_scalar(const double* values, std::size_t rows,
+                        long long floor_exponent);
 
 void accumulate_scalar(std::uint64_t* const* limbs, std::size_t nlimbs,
                        const double* values, std::size_t rows,
                        std::int32_t column_exponent, std::size_t first_limb);
 
 #if defined(CBFP_HAVE_AVX512)
-Scan scan_column_avx512(const double* values, std::size_t rows);
+Scan scan_column_avx512(const double* values, std::size_t rows,
+                        long long floor_exponent);
 
 void accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
                        const double* values, std::size_t rows,

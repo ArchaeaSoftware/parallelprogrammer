@@ -48,23 +48,58 @@ inline Split split(double v)
 
 }  // namespace
 
-Scan scan_column_scalar(const double* values, std::size_t rows)
+Scan scan_column_scalar(const double* values, std::size_t rows,
+                        long long floor_exponent)
 {
+    // First pass reads only the exponent field. The raw exponent is a lower
+    // bound on the true ulp, so if it clears the floor no rescale is due and
+    // the significand never has to be examined.
     Scan out{0, 0, false, false};
+    long long min_raw = 0;
+    std::uint64_t max_abs = 0;
+
     for (std::size_t i = 0; i < rows; ++i) {
-        const Split s = split(values[i]);
-        if (s.nonfinite) {
+        std::uint64_t bits;
+        std::memcpy(&bits, &values[i], sizeof bits);
+        const std::uint64_t abs_bits = bits & 0x7FFFFFFFFFFFFFFFull;
+        const std::uint64_t biased = abs_bits >> 52;
+        if (biased == 0x7FF) {
             out.nonfinite = true;
             return out;
         }
-        if (s.mantissa == 0) continue;
+        if (abs_bits == 0) continue;
+        const long long e =
+            static_cast<long long>(biased < 1 ? 1 : biased) - 1075;
         if (!out.any) {
-            out.min_exponent = s.exponent;
-            out.max_top = s.top;
+            min_raw = e;
             out.any = true;
-        } else {
-            if (s.exponent < out.min_exponent) out.min_exponent = s.exponent;
-            if (s.top > out.max_top) out.max_top = s.top;
+        } else if (e < min_raw) {
+            min_raw = e;
+        }
+        // With the sign cleared, the bit pattern orders by magnitude, so the
+        // largest pattern is the largest value.
+        if (abs_bits > max_abs) max_abs = abs_bits;
+    }
+    if (!out.any) return out;
+
+    const std::uint64_t max_biased = max_abs >> 52;
+    out.max_top = max_biased != 0 ? static_cast<long long>(max_biased) - 1022
+                                  : -1074 + (64 - __builtin_clzll(max_abs));
+
+    if (min_raw >= floor_exponent) {
+        out.min_exponent = min_raw;
+        return out;
+    }
+
+    // Only now, when the exponent could actually drop, is the exact true-ulp
+    // minimum worth computing.
+    bool first = true;
+    for (std::size_t i = 0; i < rows; ++i) {
+        const Split s = split(values[i]);
+        if (s.mantissa == 0) continue;
+        if (first || s.exponent < out.min_exponent) {
+            out.min_exponent = s.exponent;
+            first = false;
         }
     }
     return out;

@@ -74,28 +74,89 @@ inline __mmask8 tail_mask(std::size_t row, std::size_t rows)
 
 }  // namespace
 
-Scan scan_column_avx512(const double* values, std::size_t rows)
+Scan scan_column_avx512(const double* values, std::size_t rows,
+                        long long floor_exponent)
 {
+    // First pass touches only the exponent field.
+    //
+    // The maximum needs nothing more: for a normal, top = e + 53 =
+    // biased - 1022, monotonic in that field, and every normal outranks every
+    // subnormal (worst normal -1021, best subnormal -1022). With the sign
+    // cleared the whole bit pattern orders by magnitude, so one max over it
+    // yields both the exponent and, for the all-subnormal case, the
+    // significand that decides the width.
+    //
+    // The minimum is a lower bound only -- the raw exponent, not the true ulp,
+    // which sits above it by the significand's trailing zero count. That bound
+    // is enough whenever it clears the caller's floor, because then no rescale
+    // is due and the exact value would change nothing.
     __m512i vmin = _mm512_set1_epi64(std::numeric_limits<long long>::max());
-    __m512i vmax = _mm512_set1_epi64(std::numeric_limits<long long>::min());
+    __m512i vmax_abs = _mm512_setzero_si512();
     __mmask8 any = 0;
     __mmask8 bad = 0;
 
+    const __m512i kAbs = _mm512_set1_epi64(0x7FFFFFFFFFFFFFFFll);
+    const __m512i kExp = _mm512_set1_epi64(0x7FF);
+    const __m512i kOne = _mm512_set1_epi64(1);
+
     for (std::size_t row = 0; row < rows; row += 8) {
         const __mmask8 k = tail_mask(row, rows);
-        const Split8 s = split8(load_column(values, row, k));
-        bad |= s.nonfinite & k;
-        const __mmask8 live = s.live & k;
+        const __m512i bits = _mm512_castpd_si512(load_column(values, row, k));
+        const __m512i abs_bits = _mm512_and_si512(bits, kAbs);
+        const __m512i biased = _mm512_srli_epi64(abs_bits, 52);
+
+        const __mmask8 live = _mm512_test_epi64_mask(abs_bits, abs_bits) & k;
+        bad |= _mm512_cmpeq_epi64_mask(biased, kExp) & k;
         any |= live;
-        vmin = _mm512_mask_min_epi64(vmin, live, vmin, s.exponent);
-        vmax = _mm512_mask_max_epi64(vmax, live, vmax, s.top);
+
+        vmin = _mm512_mask_min_epu64(vmin, live, vmin,
+                                     _mm512_max_epu64(biased, kOne));
+        vmax_abs = _mm512_mask_max_epu64(vmax_abs, live, vmax_abs, abs_bits);
     }
 
     Scan out{0, 0, any != 0, bad != 0};
-    if (out.any && !out.nonfinite) {
-        out.min_exponent = _mm512_reduce_min_epi64(vmin);
-        out.max_top = _mm512_reduce_max_epi64(vmax);
+    if (!out.any || out.nonfinite) return out;
+
+    const long long min_raw =
+        static_cast<long long>(_mm512_reduce_min_epu64(vmin)) - 1075;
+    const std::uint64_t max_abs =
+        static_cast<std::uint64_t>(_mm512_reduce_max_epu64(vmax_abs));
+    const std::uint64_t max_biased = max_abs >> 52;
+    out.max_top = max_biased != 0 ? static_cast<long long>(max_biased) - 1022
+                                  : -1074 + (64 - __builtin_clzll(max_abs));
+
+    if (min_raw >= floor_exponent) {
+        out.min_exponent = min_raw;
+        return out;
     }
+
+    // Only now, when the exponent could actually drop, does the significand
+    // matter -- the true ulp needs its trailing zero count.
+    const __m512i kFrac = _mm512_set1_epi64(kFracMask);
+    const __m512i kImplicit = _mm512_set1_epi64(std::uint64_t{1} << 52);
+    const __m512i k1075 = _mm512_set1_epi64(1075);
+    __m512i vulp = _mm512_set1_epi64(std::numeric_limits<long long>::max());
+
+    for (std::size_t row = 0; row < rows; row += 8) {
+        const __mmask8 k = tail_mask(row, rows);
+        const __m512i bits = _mm512_castpd_si512(load_column(values, row, k));
+        const __m512i biased =
+            _mm512_and_si512(_mm512_srli_epi64(bits, 52), kExp);
+        const __m512i frac = _mm512_and_si512(bits, kFrac);
+        const __mmask8 is_normal = _mm512_test_epi64_mask(biased, biased);
+        const __m512i m =
+            _mm512_mask_or_epi64(frac, is_normal, frac, kImplicit);
+        const __mmask8 live = _mm512_test_epi64_mask(m, m) & k;
+
+        // tz = popcount((m & -m) - 1)
+        const __m512i e =
+            _mm512_sub_epi64(_mm512_max_epu64(biased, kOne), k1075);
+        const __m512i lowbit =
+            _mm512_and_si512(m, _mm512_sub_epi64(_mm512_setzero_si512(), m));
+        const __m512i tz = _mm512_popcnt_epi64(_mm512_sub_epi64(lowbit, kOne));
+        vulp = _mm512_mask_min_epi64(vulp, live, vulp, _mm512_add_epi64(e, tz));
+    }
+    out.min_exponent = _mm512_reduce_min_epi64(vulp);
     return out;
 }
 
