@@ -167,10 +167,14 @@ Scan scan_column_avx512(const double* values, std::size_t rows,
 // Decomposition is fused in: mantissa and exponent go straight from the loaded
 // doubles into the addend and are never written to memory.
 //
-// Two blocks are decomposed before either one is applied. The decomposition is
-// a long dependency chain and consecutive blocks are independent, so
-// interleaving them is worth about 15% -- roughly half from amortizing the
-// loop overhead and half from the extra instruction-level parallelism.
+// Two blocks are decomposed before either one is applied. Consecutive blocks
+// are independent and the decomposition is a long dependency chain, so this
+// lets the chains interleave. Measured in isolation it is worth nothing at one
+// limb, ~7% at two and ~10% at four; end to end it is not distinguishable from
+// one block at a time, because the accumulate is only part of the pipeline. It
+// is kept for the wide-column case, where it also cuts run-to-run variance
+// noticeably. Unrolling further does not pay: 4x matches 2x within noise and
+// 8x regresses, as the staged addends start costing registers.
 //
 // Add and subtract lanes share one loop: subtracting A is adding ~A + 1, so a
 // negative lane complements its addend and enters its first limb with carry 1.

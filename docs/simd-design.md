@@ -398,6 +398,13 @@ being caught. Both are worth remembering when re-measuring.
   contradicted the L1-set model behind them (predicted: more limbs, more need
   for skew; measured: no benefit at 16, ~5% cost at 32). Reproducible to ~3%,
   so not noise — the model was simply wrong. It was discarded.
+- An 18% speedup was attributed to interleaving two row blocks' dependency
+  chains. Rebuilding with the unrolling removed but the same prepare/apply
+  structure produced identical end-to-end throughput (1.111-1.124 against
+  1.123-1.125 Gelem/s), so the gain came from the restructure and the
+  attribution was wrong. In isolation the interleaving is worth ~7% at two
+  limbs and ~10% at four, and nothing at one; 4x matches 2x within noise and
+  8x regresses. Measure the thing you are claiming, not a proxy for it.
 - The claim that nvcc rejects `__uint128_t` in device code was asserted from
   recollection, not measured, and is false on CUDA 12.9. It had been made the
   load-bearing argument for a 32-bit radix. Benchmarking then took the
