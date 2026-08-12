@@ -62,11 +62,13 @@ void test_decompose()
     p = cbfp::decompose(-8.0);
     CHECK(p.mantissa == 1 && p.exponent == 3 && p.negative);
 
+    // Both zeros give a zero mantissa; the sign bit still comes through, but
+    // carries no meaning because accumulate() returns early on a zero mantissa.
     p = cbfp::decompose(0.0);
-    CHECK(p.mantissa == 0);
+    CHECK(p.mantissa == 0 && !p.negative);
 
     p = cbfp::decompose(-0.0);
-    CHECK(p.mantissa == 0);
+    CHECK(p.mantissa == 0 && p.negative);
 
     p = cbfp::decompose(0.5);
     CHECK(p.mantissa == 1 && p.exponent == -1);

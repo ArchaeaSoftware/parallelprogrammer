@@ -137,6 +137,8 @@ private:
 
 // Decomposes a finite double into an exact odd mantissa and exponent:
 // v == mantissa * 2^exponent, with mantissa odd (or zero, when v is +/-0).
+// For +/-0 the mantissa is 0 and the exponent carries no meaning; `negative`
+// still reflects the sign bit, so -0.0 reports negative.
 struct DoubleParts {
     std::uint64_t mantissa;  // magnitude, at most 53 significant bits, odd
     bool negative;
