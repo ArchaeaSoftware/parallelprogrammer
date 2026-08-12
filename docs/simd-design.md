@@ -253,26 +253,61 @@ array, normalize (if carry-save), bulk readback — taking
 is what limb-major with separate allocations already hands you. No virtuals, no
 CRTP, no policy types.
 
-**CPU: one translation unit, per-function target attributes.** Verified working
-on this toolchain with the file compiled at baseline — no `-march`, no
-`-mavx512f`:
+**CPU: one kernel per variant, selected once at runtime.**
 
 ```cpp
-void add_limbs_scalar(...);
-
-__attribute__((target("avx512f,avx512dq,avx512vbmi2")))
-void add_limbs_avx512(...);
-
+// kernels_scalar.cpp   compiled at baseline
+// kernels_avx512.cpp   compiled with -mavx512f -mavx512dq -mavx512vbmi2
 static const auto add_limbs =
     __builtin_cpu_supports("avx512f") ? add_limbs_avx512 : add_limbs_scalar;
 ```
 
-`zmm` codegen stays confined to the attributed function (0 occurrences in the
-scalar kernel, 8 in the AVX-512 one) and a baseline binary still selects the
-fast path at runtime. No per-file compile flags and no extra build targets.
+Two ways to keep AVX-512 codegen out of a baseline binary, both verified on
+this toolchain:
+
+- **Per-TU flags.** The AVX-512 kernels get their own translation unit with
+  its own flags and no attributes. Better codegen: inside that TU the compiler
+  may auto-vectorize everything, not only the hand-written intrinsics, and
+  inline freely. **Hazard:** `-mavx512f` licenses AVX-512 anywhere in that TU,
+  including static initializers or inlined header templates. Keep it to pure
+  leaf kernels with no static init, reached only after the CPU check.
+- **Per-function `__attribute__((target(...)))`.** Everything stays in one TU
+  compiled at baseline; `zmm` codegen stays confined to the attributed function
+  (measured: 0 occurrences in the scalar kernel, 8 in the AVX-512 one). Safer
+  by construction and needs no per-file build rules, at the cost of a more
+  constrained optimizer.
+
+Per-TU flags are the default choice; the attribute is the fallback where a
+kernel must sit next to code that runs unconditionally.
+
 Dispatch is one indirect call per *column*, not per element.
-`__attribute__((target_clones(...)))` also works if the compiler's own
-auto-vectorization is enough for a given kernel.
+
+### CRTP was considered and rejected
+
+CRTP would replace the function pointer with a compile-time-resolved call.
+Measured at column granularity (4096 rows, 200k dispatches):
+
+```
+function pointer (runtime dispatch)    366.6 ns/dispatch
+CRTP (compile-time, no indirection)    368.4 ns/dispatch
+direct call (upper bound)              367.0 ns/dispatch
+```
+
+CRTP is 0.5% *slower* — that is, indistinguishable. There is no indirection
+cost to remove when one dispatch covers 4096 elements; the hot loop lives
+entirely inside a single kernel call. CRTP earns its keep when the call sits in
+the hot loop, which is not the case here.
+
+It also does not eliminate the need for per-TU flags or target attributes:
+those come from how the compiler is invoked, not from the pattern. Plain free
+functions in a separately-compiled TU get exactly the same codegen, verified.
+
+The cost is real, though. CRTP makes the backend a *type*, and since AVX-512
+availability is a runtime property the branch still has to exist — now
+selecting between two types, which forces `ColumnBlockMatrix` to become a
+template or to be type-erased behind a vtable, the very thing CRTP was meant to
+avoid. The whole class body would also be instantiated per backend when only
+the handful of kernels differ.
 
 **CUDA is a different seam, at a different level.** Swapping a CPU kernel
 leaves the memory and the object identical, so it is a true backend swap.
