@@ -172,6 +172,13 @@ row/column layout survives formatting.
   subnormal boundary, and the `2⁻¹⁰⁷⁵` round-to-zero tie;
 - exponent-lowering and width-growth across the full 2⁻¹⁰⁷⁴…2¹⁰²³ span;
 - add-then-subtract-in-shuffled-order returning to exact zero;
+- **order independence**: double addition is commutative but not associative,
+  which is what makes a naive running total depend on arrival order. Exact
+  accumulation restores associativity, so 24 random permutations of ten
+  matrices spanning 400 binades must agree digit for digit — and the resulting
+  exponent and width must match too. Separately, six cancelling pairs must
+  reach exact zero under 20 permutations, and whole-matrix, column-major,
+  per-column and per-element accumulation must all produce the same total;
 - absorption of a million values whose ulp is far below the running total,
   where naive summation stalls completely.
 

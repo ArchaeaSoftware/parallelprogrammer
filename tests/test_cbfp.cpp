@@ -759,6 +759,184 @@ void test_streamed_columns()
     CHECK(threw);
 }
 
+// Value for matrix `m` at (i, j). Each matrix occupies a distinct magnitude
+// band, so different orderings trigger the column rescales at different points
+// and pass through different intermediate widths on the way to the same total.
+double order_sample(std::size_t i, std::size_t j, int m)
+{
+    const int band = (m * 137) % 400 - 200;
+    const int e = band + static_cast<int>((i * 5 + j * 3) % 17);
+    const double frac =
+        1.0 + static_cast<double>((i * 31 + j * 17 + m * 7) % 101) / 101.0;
+    return std::ldexp((m % 3 == 0) ? -frac : frac, e);
+}
+
+void test_order_independence()
+{
+    // Double addition is already commutative -- a + b and b + a round
+    // identically -- but it is not associative, which is what makes a naive
+    // running total depend on arrival order. Exact accumulation restores
+    // associativity, and the two together give order independence: reordering
+    // a running total needs both, since
+    //     (a+b)+c = a+(b+c) = a+(c+b) = (a+c)+b
+    // is assoc, comm, assoc. So any permutation must agree digit for digit.
+    const std::size_t rows = 23, cols = 7;
+    const int count = 10;
+
+    std::vector<std::vector<double>> mats;
+    for (int m = 0; m < count; ++m) {
+        std::vector<double> a(rows * cols);
+        for (std::size_t i = 0; i < rows; ++i) {
+            for (std::size_t j = 0; j < cols; ++j) {
+                a[i * cols + j] = order_sample(i, j, m);
+            }
+        }
+        mats.push_back(std::move(a));
+    }
+
+    cbfp::ColumnBlockMatrix ref(rows, cols);
+    for (int m = 0; m < count; ++m) ref.add_matrix(mats[m].data());
+
+    std::vector<std::string> want(rows * cols);
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            want[i * cols + j] = ref.to_exact_decimal(i, j);
+        }
+    }
+
+    std::mt19937_64 rng(31337);
+    std::vector<int> perm(count);
+    for (int m = 0; m < count; ++m) perm[m] = m;
+
+    for (int trial = 0; trial < 24; ++trial) {
+        std::shuffle(perm.begin(), perm.end(), rng);
+        cbfp::ColumnBlockMatrix t(rows, cols);
+        for (int k = 0; k < count; ++k) t.add_matrix(mats[perm[k]].data());
+
+        for (std::size_t i = 0; i < rows; ++i) {
+            for (std::size_t j = 0; j < cols; ++j) {
+                CHECK_STR(t.to_exact_decimal(i, j), want[i * cols + j]);
+            }
+        }
+        // The representation lands in the same place too, which is a stronger
+        // claim than associativity and does not follow from it: the exponent
+        // is a minimum over every value seen and the width a maximum over the
+        // same set, neither depending on arrival order. It is not guaranteed
+        // in general -- a column that passes through exact zero lets rescale
+        // reset the width bound -- but it holds wherever that does not occur.
+        for (std::size_t j = 0; j < cols; ++j) {
+            CHECK(t.column_exponent(j) == ref.column_exponent(j));
+            CHECK(t.column_bit_width(j) == ref.column_bit_width(j));
+        }
+    }
+}
+
+void test_order_independent_cancellation()
+{
+    // Matrices that cancel exactly must reach zero in any order, including
+    // orders where the huge terms arrive before the tiny ones and orders where
+    // the running total passes through values far larger than the answer.
+    const std::size_t rows = 17, cols = 5;
+    const int pairs = 6;
+
+    std::vector<std::vector<double>> mats;
+    for (int m = 0; m < pairs; ++m) {
+        std::vector<double> a(rows * cols), b(rows * cols);
+        for (std::size_t k = 0; k < rows * cols; ++k) {
+            a[k] = order_sample(k / cols, k % cols, m);
+            b[k] = -a[k];
+        }
+        mats.push_back(std::move(a));
+        mats.push_back(std::move(b));
+    }
+
+    std::mt19937_64 rng(4242);
+    std::vector<int> perm(mats.size());
+    for (std::size_t m = 0; m < mats.size(); ++m) perm[m] = static_cast<int>(m);
+
+    for (int trial = 0; trial < 20; ++trial) {
+        std::shuffle(perm.begin(), perm.end(), rng);
+        cbfp::ColumnBlockMatrix t(rows, cols);
+        for (int k : perm) t.add_matrix(mats[k].data());
+
+        std::size_t nonzero = 0;
+        for (std::size_t i = 0; i < rows; ++i) {
+            for (std::size_t j = 0; j < cols; ++j) {
+                if (!t.is_zero(i, j)) ++nonzero;
+            }
+        }
+        CHECK(nonzero == 0);
+    }
+}
+
+void test_order_independent_across_entry_points()
+{
+    // Whole-matrix, column-major, per-column and per-element accumulation are
+    // four different code paths; all must agree on the same total.
+    const std::size_t rows = 29, cols = 6;
+    const int count = 8;
+
+    std::vector<std::vector<double>> row_major, col_major;
+    for (int m = 0; m < count; ++m) {
+        std::vector<double> r(rows * cols), c(rows * cols);
+        for (std::size_t i = 0; i < rows; ++i) {
+            for (std::size_t j = 0; j < cols; ++j) {
+                const double v = order_sample(i, j, m);
+                r[i * cols + j] = v;
+                c[j * rows + i] = v;
+            }
+        }
+        row_major.push_back(std::move(r));
+        col_major.push_back(std::move(c));
+    }
+
+    cbfp::ColumnBlockMatrix by_matrix(rows, cols);
+    cbfp::ColumnBlockMatrix by_col_major(rows, cols);
+    cbfp::ColumnBlockMatrix by_column(rows, cols);
+    cbfp::ColumnBlockMatrix by_element(rows, cols);
+
+    std::mt19937_64 rng(909);
+    std::vector<int> perm(count);
+    for (int m = 0; m < count; ++m) perm[m] = m;
+
+    for (int m = 0; m < count; ++m) by_matrix.add_matrix(row_major[m].data());
+
+    std::shuffle(perm.begin(), perm.end(), rng);
+    for (int m : perm) by_col_major.add_matrix_col_major(col_major[m].data());
+
+    std::shuffle(perm.begin(), perm.end(), rng);
+    for (int m : perm) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            by_column.add_column(j, col_major[m].data() + j * rows);
+        }
+    }
+
+    std::shuffle(perm.begin(), perm.end(), rng);
+    for (int m : perm) {
+        for (std::size_t j = cols; j-- > 0;) {
+            for (std::size_t i = rows; i-- > 0;) {
+                const double v = order_sample(i, j, m);
+                // Exercise sub() as well: adding -v and subtracting v must be
+                // the same operation.
+                if ((i + j) & 1) {
+                    by_element.sub(i, j, -v);
+                } else {
+                    by_element.add(i, j, v);
+                }
+            }
+        }
+    }
+
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            const std::string want = by_matrix.to_exact_decimal(i, j);
+            CHECK_STR(by_col_major.to_exact_decimal(i, j), want);
+            CHECK_STR(by_column.to_exact_decimal(i, j), want);
+            CHECK_STR(by_element.to_exact_decimal(i, j), want);
+        }
+    }
+}
+
 }  // namespace
 
 int main()
@@ -784,6 +962,9 @@ int main()
     test_large_matrix_per_column_scales();
     test_column_major_input();
     test_streamed_columns();
+    test_order_independence();
+    test_order_independent_cancellation();
+    test_order_independent_across_entry_points();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
