@@ -138,10 +138,10 @@ private:
     std::size_t cols_;
     std::vector<Column> cols_state_;
 
-    // Per-column decomposition scratch. Makes add_matrix non-reentrant.
-    std::vector<std::uint64_t> scratch_mantissa_;
-    std::vector<std::int32_t> scratch_shift_;
-    std::vector<std::uint8_t> scratch_negative_;
+    // A column of a row-major matrix is strided, and a strided vector gather
+    // costs more than the decomposition it feeds. Staging the column here once
+    // lets both passes read contiguously. Makes add_matrix non-reentrant.
+    std::vector<double> column_buffer_;
 };
 
 // Decomposes a finite double into an exact odd mantissa and exponent:

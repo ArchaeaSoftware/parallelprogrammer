@@ -104,13 +104,7 @@ ColumnBlockMatrix::ColumnBlockMatrix(std::size_t rows, std::size_t cols)
         c.limbs.emplace_back(rows_, 0);
         rebuild_bases(c);
     }
-    // Padded to a whole vector block and zero-filled, so a vector kernel can
-    // read a full block at the tail. The padding is never written, so those
-    // lanes keep a zero mantissa and contribute nothing.
-    const std::size_t n = padded_rows(rows_);
-    scratch_mantissa_.assign(n, 0);
-    scratch_shift_.assign(n, 0);
-    scratch_negative_.assign(n, 0);
+    column_buffer_.resize(rows_);
 }
 
 void ColumnBlockMatrix::check_index(std::size_t i, std::size_t j) const
@@ -227,26 +221,8 @@ void ColumnBlockMatrix::accumulate(std::size_t i, std::size_t j, double v,
     ++c.add_count;
     fit_column(c);
 
-    const std::uint64_t mantissa = p.mantissa;
-    const std::int32_t exponent32 = static_cast<std::int32_t>(e);
-    const std::uint8_t negative = (p.negative != negate) ? 1 : 0;
-
-    // Single-element path: reuse the kernel by pointing it at one row.
-    std::uint64_t* shifted[64];
-    const std::size_t n = c.limbs.size();
-    std::vector<std::uint64_t*> heap;
-    std::uint64_t** rowbase = shifted;
-    if (n > 64) {
-        heap.resize(n);
-        rowbase = heap.data();
-    }
-    for (std::size_t k = 0; k < n; ++k) rowbase[k] = c.bases[k] + i;
-
-    const kernels::Batch batch{
-        &mantissa,         &exponent32,
-        &negative,         static_cast<std::int32_t>(c.exponent),
-        shift / kLimbBits, 1};
-    kernels::accumulate_scalar(rowbase, n, batch);
+    kernels::accumulate_one(c.bases.data(), c.limbs.size(), i, p.mantissa,
+                            shift, p.negative != negate);
 }
 
 void ColumnBlockMatrix::add(std::size_t i, std::size_t j, double v)
@@ -269,69 +245,56 @@ void ColumnBlockMatrix::add_matrix_scaled_pow2(const double* b, int log2_scale,
 {
     if (rows_ == 0 || cols_ == 0) return;
     const std::size_t stride = row_stride ? row_stride : cols_;
+    const kernels::ScanFn scan_fn = kernels::scan();
     const kernels::AccumulateFn accumulate_fn = kernels::accumulate();
 
     for (std::size_t j = 0; j < cols_; ++j) {
-        // Decompose the column, and learn its exponent range in the same pass.
-        bool any = false;
-        long long min_exponent = 0;
-        long long max_top = 0;
-
-        for (std::size_t i = 0; i < rows_; ++i) {
-            const double v = b[i * stride + j];
-            if (!std::isfinite(v)) {
-                throw std::domain_error(
-                    "cbfp: cannot accumulate a non-finite value");
+        // Stage the column contiguously so neither pass needs a gather.
+        const double* column = b + j;
+        if (stride != 1) {
+            for (std::size_t i = 0; i < rows_; ++i) {
+                column_buffer_[i] = b[i * stride + j];
             }
-            const DoubleParts p = decompose(v);
-            scratch_mantissa_[i] = p.mantissa;
-            // A zero mantissa must also clear the sign, or a vector kernel
-            // would run the ~A + 1 path on it and propagate a pointless carry.
-            scratch_negative_[i] = (p.mantissa != 0 && p.negative) ? 1 : 0;
-            if (p.mantissa == 0) {
-                scratch_shift_[i] = 0;
-                continue;
-            }
-            const long long e = static_cast<long long>(p.exponent) + log2_scale;
-            if (e < -kExponentLimit || e > kExponentLimit) {
-                throw std::domain_error(
-                    "cbfp: log2_scale puts the value out of range");
-            }
-            scratch_shift_[i] = static_cast<std::int32_t>(e);
-            const long long top =
-                e + static_cast<long long>(bit_width_u64(p.mantissa));
-            if (!any) {
-                min_exponent = e;
-                max_top = top;
-                any = true;
-            } else {
-                min_exponent = std::min(min_exponent, e);
-                max_top = std::max(max_top, top);
-            }
+            column = column_buffer_.data();
         }
-        if (!any) continue;
+
+        // First pass learns only the exponent range, because the rescale and
+        // widen decisions have to be made before any value can be added.
+        const kernels::Scan sc = scan_fn(column, 1, rows_);
+        if (sc.nonfinite) {
+            throw std::domain_error(
+                "cbfp: cannot accumulate a non-finite value");
+        }
+        if (!sc.any) continue;
+
+        const long long min_exponent = sc.min_exponent + log2_scale;
+        const long long max_top = sc.max_top + log2_scale;
+        if (min_exponent < -kExponentLimit || max_top > kExponentLimit) {
+            throw std::domain_error(
+                "cbfp: log2_scale puts the value out of range");
+        }
 
         Column& c = cols_state_[j];
         if (!c.initialized) {
             c.exponent = static_cast<int>(min_exponent);
             c.initialized = true;
         }
-        if (min_exponent < c.exponent)
+        if (min_exponent < c.exponent) {
             rescale(c, static_cast<int>(min_exponent));
+        }
 
         c.max_addend_bits = std::max(
             c.max_addend_bits, static_cast<std::size_t>(max_top - c.exponent));
         ++c.add_count;
         fit_column(c);
 
-        const kernels::Batch batch{
-            scratch_mantissa_.data(),
-            scratch_shift_.data(),
-            scratch_negative_.data(),
-            static_cast<std::int32_t>(c.exponent),
-            static_cast<std::size_t>(min_exponent - c.exponent) / kLimbBits,
-            rows_};
-        accumulate_fn(c.bases.data(), c.limbs.size(), batch);
+        // Second pass fuses decomposition into the add, so no decomposed form
+        // is ever written to memory. Folding the scale into the column
+        // exponent keeps the kernel free of it.
+        accumulate_fn(
+            c.bases.data(), c.limbs.size(), column, 1, rows_,
+            static_cast<std::int32_t>(c.exponent - log2_scale),
+            static_cast<std::size_t>(min_exponent - c.exponent) / kLimbBits);
     }
 }
 

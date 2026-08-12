@@ -21,7 +21,8 @@ add_library(cbfp
 # the rest of the library stays baseline and the binary still runs anywhere.
 # Nothing in that file may run before the CPU check in kernels_dispatch.cpp.
 include(CheckCXXCompilerFlag)
-set(CBFP_AVX512_FLAGS -mavx512f -mavx512dq -mavx512vl -mavx512bw)
+set(CBFP_AVX512_FLAGS -mavx512f -mavx512dq -mavx512vl -mavx512bw
+                      -mavx512cd -mavx512vpopcntdq)
 check_cxx_compiler_flag("${CBFP_AVX512_FLAGS}" CBFP_COMPILER_HAS_AVX512)
 if(CBFP_COMPILER_HAS_AVX512)
   target_sources(cbfp PRIVATE src/kernels_avx512.cpp)

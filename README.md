@@ -99,11 +99,21 @@ Kernels are flat free functions selected once per column from the running CPU's
 capabilities; `active_kernel()` reports which. Set `CBFP_KERNEL=scalar` to force
 the portable path, which is how the two are cross-checked in testing.
 
+Accumulating a column is two passes over its values. The first learns only the
+exponent range, because the rescale and widen decisions have to be made before
+anything can be added; the second fuses decomposition into the add, so no
+decomposed form is ever written to memory.
+
+A column of a row-major matrix is strided, and a strided vector gather costs
+more on Zen 4 than the decomposition it feeds — measured at roughly 3x slower
+than the same kernel reading contiguously. The column is therefore staged into
+a contiguous buffer once and both passes stream over it.
+
 ### Threading
 
-Columns are independent in storage, but `add_matrix` uses a shared
-decomposition scratch buffer, so a single `ColumnBlockMatrix` is **not**
-reentrant. Use one accumulator per thread and merge, or serialize calls.
+Columns are independent in storage, but `add_matrix` stages each column through
+a shared buffer, so a single `ColumnBlockMatrix` is **not** reentrant. Use one
+accumulator per thread and merge, or serialize calls.
 
 ## Build
 
