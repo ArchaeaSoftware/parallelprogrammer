@@ -937,6 +937,69 @@ void test_order_independent_across_entry_points()
     }
 }
 
+void test_zero_crossing_preserves_value()
+{
+    // A column that passes through exact zero lets rescale take its shortcut
+    // and reset the width bound, so two orderings can end with different
+    // widths. The value must be identical regardless: the width bounds what
+    // can be stored, it is never part of what is stored.
+    const std::size_t rows = 11, cols = 3;
+
+    auto fill = [rows, cols](int base) {
+        std::vector<double> a(rows * cols);
+        for (std::size_t i = 0; i < rows; ++i) {
+            for (std::size_t j = 0; j < cols; ++j) {
+                a[i * cols + j] = std::ldexp(
+                    1.0 + static_cast<double>((i * 7 + j * 5) % 37) / 37.0,
+                    base + static_cast<int>((i + j) % 5));
+            }
+        }
+        return a;
+    };
+
+    const std::vector<double> big = fill(100);
+    std::vector<double> neg_big = big;
+    for (double& x : neg_big) x = -x;             // cancels `big` exactly
+    const std::vector<double> tiny = fill(-200);  // forces a deep rescale
+    const std::vector<double> mid = fill(40);
+
+    // Order A: the column reaches exact zero, and only then does a rescale
+    // arrive -- so it takes the all-zero shortcut and resets the bound.
+    cbfp::ColumnBlockMatrix a(rows, cols);
+    a.add_matrix(big.data());
+    a.add_matrix(neg_big.data());
+    a.add_matrix(tiny.data());
+    a.add_matrix(mid.data());
+
+    // Order B: the same values, but the rescale happens while the column
+    // still holds data, so the bound is carried across it instead.
+    cbfp::ColumnBlockMatrix b(rows, cols);
+    b.add_matrix(big.data());
+    b.add_matrix(tiny.data());
+    b.add_matrix(neg_big.data());
+    b.add_matrix(mid.data());
+
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            CHECK_STR(a.to_exact_decimal(i, j), b.to_exact_decimal(i, j));
+            CHECK_DOUBLE(a.to_double(i, j), b.to_double(i, j));
+        }
+    }
+    for (std::size_t j = 0; j < cols; ++j) {
+        CHECK(a.column_exponent(j) == b.column_exponent(j));
+    }
+
+    // Whether the widths diverge is incidental; report it so the exception
+    // stays visible rather than becoming folklore.
+    std::size_t widest_a = 0, widest_b = 0;
+    for (std::size_t j = 0; j < cols; ++j) {
+        widest_a = std::max(widest_a, a.column_bit_width(j));
+        widest_b = std::max(widest_b, b.column_bit_width(j));
+    }
+    std::printf("  [zero-crossing widths: %zu vs %zu bits, values identical]\n",
+                widest_a, widest_b);
+}
+
 }  // namespace
 
 int main()
@@ -965,6 +1028,7 @@ int main()
     test_order_independence();
     test_order_independent_cancellation();
     test_order_independent_across_entry_points();
+    test_zero_crossing_preserves_value();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -178,7 +178,12 @@ row/column layout survives formatting.
   matrices spanning 400 binades must agree digit for digit — and the resulting
   exponent and width must match too. Separately, six cancelling pairs must
   reach exact zero under 20 permutations, and whole-matrix, column-major,
-  per-column and per-element accumulation must all produce the same total;
+  per-column and per-element accumulation must all produce the same total.
+  The exponent and width match across permutations too, though that is
+  incidental rather than guaranteed — a column passing through exact zero lets
+  a rescale reset the width bound, which a test pins at 320 bits against 384
+  for the same values in two orders. Width bounds what can be stored and is
+  never part of what is stored, so the value is unaffected;
 - absorption of a million values whose ulp is far below the running total,
   where naive summation stalls completely.
 
