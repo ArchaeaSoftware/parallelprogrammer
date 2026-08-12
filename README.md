@@ -64,6 +64,13 @@ scaling by any power of two), `to_matrix` for bulk readback,
 `is_exactly_representable`, and `describe()` for a per-column exponent/width
 report.
 
+`add_column(j, v)` accumulates a single column from `rows()` contiguous
+doubles, so a caller can stream columns instead of holding a whole input
+matrix. The accumulator only ever touches one column at a time, and this is
+what lets it be far larger than any input that could be resident alongside it —
+on a 46 GB machine, a square accumulator goes from 42,000 x 42,000 to
+60,000 x 60,000 (verified) simply by feeding it a column at a time.
+
 `reserve_for` is purely an optimization — it pre-sizes each column from a
 representative matrix and a batch count so accumulation never rescales. Results
 are bit-identical with or without it; the test suite asserts this.

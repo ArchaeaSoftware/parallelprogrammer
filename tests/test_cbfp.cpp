@@ -702,6 +702,63 @@ void test_column_major_input()
     }
 }
 
+void test_streamed_columns()
+{
+    // Feeding one column at a time must match feeding the whole matrix. This
+    // is what lets a caller hold an accumulator far larger than any input it
+    // could keep resident.
+    const std::size_t rows = 97, cols = 11;
+    const int batches = 4;
+
+    std::vector<double> col_major(rows * cols);
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            col_major[j * rows + i] = wide_sample(i, j, 0);
+        }
+    }
+
+    cbfp::ColumnBlockMatrix whole(rows, cols);
+    cbfp::ColumnBlockMatrix streamed(rows, cols);
+    for (int n = 0; n < batches; ++n) {
+        whole.add_matrix_col_major(col_major.data());
+        // Deliberately out of order: columns are independent.
+        for (std::size_t k = 0; k < cols; ++k) {
+            const std::size_t j = (k * 7 + 3) % cols;
+            streamed.add_column(j, col_major.data() + j * rows);
+        }
+    }
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            CHECK_STR(whole.to_exact_decimal(i, j),
+                      streamed.to_exact_decimal(i, j));
+        }
+    }
+    for (std::size_t j = 0; j < cols; ++j) {
+        CHECK(whole.column_exponent(j) == streamed.column_exponent(j));
+        CHECK(whole.column_bit_width(j) == streamed.column_bit_width(j));
+    }
+
+    // Scaled form agrees too, and a bad index is rejected.
+    cbfp::ColumnBlockMatrix a(rows, cols), b(rows, cols);
+    a.add_matrix_col_major_scaled_pow2(col_major.data(), -9);
+    for (std::size_t j = 0; j < cols; ++j) {
+        b.add_column_scaled_pow2(j, col_major.data() + j * rows, -9);
+    }
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            CHECK_STR(a.to_exact_decimal(i, j), b.to_exact_decimal(i, j));
+        }
+    }
+
+    bool threw = false;
+    try {
+        b.add_column(cols, col_major.data());
+    } catch (const std::out_of_range&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
 }  // namespace
 
 int main()
@@ -726,6 +783,7 @@ int main()
     test_large_matrix_cancels_to_zero();
     test_large_matrix_per_column_scales();
     test_column_major_input();
+    test_streamed_columns();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

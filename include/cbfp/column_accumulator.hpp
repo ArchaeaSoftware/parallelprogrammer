@@ -61,6 +61,14 @@ public:
     void add_matrix_col_major_scaled_pow2(const double* b, int log2_scale,
                                           std::size_t col_stride = 0);
 
+    // A(., j) += v, where v is rows() contiguous doubles. Lets a caller stream
+    // one column at a time, so only the accumulator has to be resident -- the
+    // difference between holding a whole input matrix and holding 8*rows()
+    // bytes of it.
+    void add_column(std::size_t j, const double* v);
+
+    void add_column_scaled_pow2(std::size_t j, const double* v, int log2_scale);
+
     void set_zero();
 
     // --- readback ----------------------------------------------------------
@@ -133,6 +141,9 @@ private:
     // Row-major is (1, row_stride); column-major is (col_stride, 1).
     void accumulate_columns(const double* b, std::size_t column_step,
                             std::size_t row_step, int log2_scale);
+
+    // Accumulates one column that is already contiguous.
+    void accumulate_column(std::size_t j, const double* column, int log2_scale);
 
     void check_index(std::size_t i, std::size_t j) const;
     void rebuild_bases(Column& c);

@@ -264,8 +264,6 @@ void ColumnBlockMatrix::accumulate_columns(const double* b,
                                            std::size_t row_step, int log2_scale)
 {
     if (rows_ == 0 || cols_ == 0) return;
-    const kernels::ScanFn scan_fn = kernels::scan();
-    const kernels::AccumulateFn accumulate_fn = kernels::accumulate();
 
     for (std::size_t j = 0; j < cols_; ++j) {
         // Both passes want the column contiguous. When the caller's layout
@@ -278,45 +276,59 @@ void ColumnBlockMatrix::accumulate_columns(const double* b,
             }
             column = column_buffer_.data();
         }
-
-        // First pass learns only the exponent range, because the rescale and
-        // widen decisions have to be made before any value can be added.
-        const kernels::Scan sc = scan_fn(column, 1, rows_);
-        if (sc.nonfinite) {
-            throw std::domain_error(
-                "cbfp: cannot accumulate a non-finite value");
-        }
-        if (!sc.any) continue;
-
-        const long long min_exponent = sc.min_exponent + log2_scale;
-        const long long max_top = sc.max_top + log2_scale;
-        if (min_exponent < -kExponentLimit || max_top > kExponentLimit) {
-            throw std::domain_error(
-                "cbfp: log2_scale puts the value out of range");
-        }
-
-        Column& c = cols_state_[j];
-        if (!c.initialized) {
-            c.exponent = static_cast<int>(min_exponent);
-            c.initialized = true;
-        }
-        if (min_exponent < c.exponent) {
-            rescale(c, static_cast<int>(min_exponent));
-        }
-
-        c.max_addend_bits = std::max(
-            c.max_addend_bits, static_cast<std::size_t>(max_top - c.exponent));
-        ++c.add_count;
-        fit_column(c);
-
-        // Second pass fuses decomposition into the add, so no decomposed form
-        // is ever written to memory. Folding the scale into the column
-        // exponent keeps the kernel free of it.
-        accumulate_fn(
-            c.bases.data(), c.limbs.size(), column, 1, rows_,
-            static_cast<std::int32_t>(c.exponent - log2_scale),
-            static_cast<std::size_t>(min_exponent - c.exponent) / kLimbBits);
+        accumulate_column(j, column, log2_scale);
     }
+}
+
+void ColumnBlockMatrix::add_column(std::size_t j, const double* v)
+{
+    add_column_scaled_pow2(j, v, 0);
+}
+
+void ColumnBlockMatrix::add_column_scaled_pow2(std::size_t j, const double* v,
+                                               int log2_scale)
+{
+    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    if (rows_ == 0) return;
+    accumulate_column(j, v, log2_scale);
+}
+
+void ColumnBlockMatrix::accumulate_column(std::size_t j, const double* column,
+                                          int log2_scale)
+{
+    // First pass learns only the exponent range, because the rescale and widen
+    // decisions have to be made before any value can be added.
+    const kernels::Scan sc = kernels::scan()(column, 1, rows_);
+    if (sc.nonfinite) {
+        throw std::domain_error("cbfp: cannot accumulate a non-finite value");
+    }
+    if (!sc.any) return;
+
+    const long long min_exponent = sc.min_exponent + log2_scale;
+    const long long max_top = sc.max_top + log2_scale;
+    if (min_exponent < -kExponentLimit || max_top > kExponentLimit) {
+        throw std::domain_error("cbfp: log2_scale puts the value out of range");
+    }
+
+    Column& c = cols_state_[j];
+    if (!c.initialized) {
+        c.exponent = static_cast<int>(min_exponent);
+        c.initialized = true;
+    }
+    if (min_exponent < c.exponent) rescale(c, static_cast<int>(min_exponent));
+
+    c.max_addend_bits = std::max(
+        c.max_addend_bits, static_cast<std::size_t>(max_top - c.exponent));
+    ++c.add_count;
+    fit_column(c);
+
+    // Second pass fuses decomposition into the add, so no decomposed form is
+    // ever written to memory. Folding the scale into the column exponent keeps
+    // the kernel free of it.
+    kernels::accumulate()(
+        c.bases.data(), c.limbs.size(), column, 1, rows_,
+        static_cast<std::int32_t>(c.exponent - log2_scale),
+        static_cast<std::size_t>(min_exponent - c.exponent) / kLimbBits);
 }
 
 void ColumnBlockMatrix::set_zero()
