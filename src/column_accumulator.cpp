@@ -298,7 +298,7 @@ void ColumnBlockMatrix::accumulate_column(std::size_t j, const double* column,
 {
     // First pass learns only the exponent range, because the rescale and widen
     // decisions have to be made before any value can be added.
-    const kernels::Scan sc = kernels::scan()(column, 1, rows_);
+    const kernels::Scan sc = kernels::scan()(column, rows_);
     if (sc.nonfinite) {
         throw std::domain_error("cbfp: cannot accumulate a non-finite value");
     }
@@ -326,7 +326,7 @@ void ColumnBlockMatrix::accumulate_column(std::size_t j, const double* column,
     // ever written to memory. Folding the scale into the column exponent keeps
     // the kernel free of it.
     kernels::accumulate()(
-        c.bases.data(), c.limbs.size(), column, 1, rows_,
+        c.bases.data(), c.limbs.size(), column, rows_,
         static_cast<std::int32_t>(c.exponent - log2_scale),
         static_cast<std::size_t>(min_exponent - c.exponent) / kLimbBits);
 }

@@ -48,12 +48,11 @@ inline Split split(double v)
 
 }  // namespace
 
-Scan scan_column_scalar(const double* values, std::size_t stride,
-                        std::size_t rows)
+Scan scan_column_scalar(const double* values, std::size_t rows)
 {
     Scan out{0, 0, false, false};
     for (std::size_t i = 0; i < rows; ++i) {
-        const Split s = split(values[i * stride]);
+        const Split s = split(values[i]);
         if (s.nonfinite) {
             out.nonfinite = true;
             return out;
@@ -113,13 +112,12 @@ void accumulate_one(std::uint64_t* const* limbs, std::size_t nlimbs,
 }
 
 void accumulate_scalar(std::uint64_t* const* limbs, std::size_t nlimbs,
-                       const double* values, std::size_t stride,
-                       std::size_t rows, std::int32_t column_exponent,
-                       std::size_t first_limb)
+                       const double* values, std::size_t rows,
+                       std::int32_t column_exponent, std::size_t first_limb)
 {
     (void)first_limb;  // the scalar path starts from each row's own limb
     for (std::size_t i = 0; i < rows; ++i) {
-        const Split s = split(values[i * stride]);
+        const Split s = split(values[i]);
         if (s.mantissa == 0) continue;
         accumulate_one(limbs, nlimbs, i, s.mantissa,
                        static_cast<std::size_t>(s.exponent - column_exponent),

@@ -13,18 +13,13 @@ namespace {
 
 constexpr std::uint64_t kFracMask = (std::uint64_t{1} << 52) - 1;
 
-// Eight doubles from one column, which is strided when the source matrix is
-// row-major. `k` masks off the tail so a partial block never reads past the
-// input.
-inline __m512d load_column(const double* values, std::size_t stride,
-                           std::size_t row, __mmask8 k)
+// Eight doubles from a contiguous column. `k` masks off the tail so a partial
+// block never reads past the input. There is deliberately no gather here: the
+// caller stages a strided column instead, because gathering costs more than
+// the decomposition it would feed.
+inline __m512d load_column(const double* values, std::size_t row, __mmask8 k)
 {
-    if (stride == 1) return _mm512_maskz_loadu_pd(k, values + row);
-    const __m512i index = _mm512_mullo_epi64(
-        _mm512_add_epi64(_mm512_set1_epi64(static_cast<long long>(row)),
-                         _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0)),
-        _mm512_set1_epi64(static_cast<long long>(stride)));
-    return _mm512_mask_i64gather_pd(_mm512_setzero_pd(), k, index, values, 8);
+    return _mm512_maskz_loadu_pd(k, values + row);
 }
 
 struct Split8 {
@@ -79,8 +74,7 @@ inline __mmask8 tail_mask(std::size_t row, std::size_t rows)
 
 }  // namespace
 
-Scan scan_column_avx512(const double* values, std::size_t stride,
-                        std::size_t rows)
+Scan scan_column_avx512(const double* values, std::size_t rows)
 {
     __m512i vmin = _mm512_set1_epi64(std::numeric_limits<long long>::max());
     __m512i vmax = _mm512_set1_epi64(std::numeric_limits<long long>::min());
@@ -89,7 +83,7 @@ Scan scan_column_avx512(const double* values, std::size_t stride,
 
     for (std::size_t row = 0; row < rows; row += 8) {
         const __mmask8 k = tail_mask(row, rows);
-        const Split8 s = split8(load_column(values, stride, row, k));
+        const Split8 s = split8(load_column(values, row, k));
         bad |= s.nonfinite & k;
         const __mmask8 live = s.live & k;
         any |= live;
@@ -117,9 +111,8 @@ Scan scan_column_avx512(const double* values, std::size_t stride,
 // Limbs below a lane's offset stay untouched because the complement is applied
 // only where the lane is active.
 void accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
-                       const double* values, std::size_t stride,
-                       std::size_t rows, std::int32_t column_exponent,
-                       std::size_t first_limb)
+                       const double* values, std::size_t rows,
+                       std::int32_t column_exponent, std::size_t first_limb)
 {
     const __m512i kOne = _mm512_set1_epi64(1);
     const __m512i kOnes = _mm512_set1_epi64(-1);
@@ -129,7 +122,7 @@ void accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
 
     for (std::size_t row = 0; row < rows; row += 8) {
         const __mmask8 k = tail_mask(row, rows);
-        const Split8 s = split8(load_column(values, stride, row, k));
+        const Split8 s = split8(load_column(values, row, k));
         const __mmask8 live = s.live & k;
         if (live == 0) continue;
 

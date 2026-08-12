@@ -5,6 +5,10 @@
 // the exponent range, because the rescale/widen decision has to be made before
 // any value can be added. The second fuses decomposition into the add, so no
 // decomposed form is ever written to memory.
+//
+// Every kernel takes a *contiguous* column. Strided input is the caller's
+// problem: a strided vector gather costs more than the work it feeds, so the
+// caller stages such a column once rather than letting the kernels gather.
 #pragma once
 
 #include <cstddef>
@@ -21,32 +25,27 @@ struct Scan {
     bool nonfinite;          // true if any value was inf or NaN
 };
 
-using ScanFn = Scan (*)(const double*, std::size_t, std::size_t);
+using ScanFn = Scan (*)(const double*, std::size_t);
 
 // Fused decompose-and-add. `column_exponent` already absorbs any power-of-two
 // scale, so the shift is simply value_exponent - column_exponent.
 // `first_limb` is a starting hint from the scan; a row block that has not
 // reached its own first limb skips the position outright.
 using AccumulateFn = void (*)(std::uint64_t* const*, std::size_t, const double*,
-                              std::size_t, std::size_t, std::int32_t,
-                              std::size_t);
+                              std::size_t, std::int32_t, std::size_t);
 
-Scan scan_column_scalar(const double* values, std::size_t stride,
-                        std::size_t rows);
+Scan scan_column_scalar(const double* values, std::size_t rows);
 
 void accumulate_scalar(std::uint64_t* const* limbs, std::size_t nlimbs,
-                       const double* values, std::size_t stride,
-                       std::size_t rows, std::int32_t column_exponent,
-                       std::size_t first_limb);
+                       const double* values, std::size_t rows,
+                       std::int32_t column_exponent, std::size_t first_limb);
 
 #if defined(CBFP_HAVE_AVX512)
-Scan scan_column_avx512(const double* values, std::size_t stride,
-                        std::size_t rows);
+Scan scan_column_avx512(const double* values, std::size_t rows);
 
 void accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
-                       const double* values, std::size_t stride,
-                       std::size_t rows, std::int32_t column_exponent,
-                       std::size_t first_limb);
+                       const double* values, std::size_t rows,
+                       std::int32_t column_exponent, std::size_t first_limb);
 #endif
 
 // Chosen once, on first use, from the running CPU's capabilities.
