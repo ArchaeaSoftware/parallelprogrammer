@@ -1,8 +1,12 @@
-# AVX-512 design record
+# SIMD and portability design record
 
-**Status: design, not implemented.** The only piece of this that has landed is
-the bit-manipulation `decompose` (commit `8565474`). Everything below the
-"Implemented" section is a decision record, not a description of the code.
+**Status: design, not implemented.** The only pieces of this that have landed
+are the bit-manipulation `decompose` (`8565474`) and the `kLimbBits` cleanup
+(`60711df`). Everything below the "Implemented" section is a decision record,
+not a description of the code.
+
+Targets both AVX-512 on the CPU and a future CUDA implementation. The CUDA
+constraint is the more restrictive one and should drive the abstraction.
 
 Measurements are from a Ryzen 7 7700X (Zen 4: AVX512F/BW/DQ/VL, VBMI2,
 VPOPCNTDQ; 256-bit datapath, so AVX-512 ops are double-pumped).
@@ -91,6 +95,87 @@ deterministic outcome.
 
 `K=8` (offsets `(k & 7) * 64`) sufficed everywhere measured. Treat it as a
 tunable, not a derived constant — see the caveats.
+
+## Limb width: separate storage from radix
+
+CUDA wants 32-bit limbs. The forcing constraint is not throughput: **nvcc has
+no `__uint128_t` in device code**, and every carry path in `limbs.cpp` goes
+through one today. A 32-bit radix makes the double-width intermediate a plain
+`uint64_t`, which device code handles natively.
+
+For AVX-512, lane count alone is *not* an argument for narrow limbs. Pushing
+`R` rows through a `W`-bit column costs `(W/64) * (R/8) = RW/512` instructions
+with 64-bit limbs and `(W/32) * (R/16) = RW/512` with 32-bit. Doubling the
+lanes also doubles the limb positions needed to span the same value width, and
+the two cancel exactly. It also doubles each row's serial carry chain.
+
+The real argument for a narrow radix is **headroom**. A 32-bit radix stored in
+64-bit lanes leaves 32 spare bits per lane, so ~2^31 values can be accumulated
+before overflow is possible. The inner loop becomes a bare `vpaddq` with no
+carry-out test, no mask op, and no dependency between limb positions; carries
+are propagated once, lazily, before readback.
+
+So parameterize two constants, not one:
+
+| storage | radix | deferred adds | density | target |
+| --- | --- | --- | --- | --- |
+| 64 | 64 | 1 (canonical) | 100% | today's CPU code |
+| 32 | 32 | 1 (canonical) | 100% | CUDA canonical |
+| 64 | 32 | 2^31 | 50% | AVX-512 carry-save |
+| 64 | 52 | 2^11 | 81% | reduced radix, better density |
+
+A redundant (non-canonical) representation stays exact — every add is still
+exact, just stored redundantly — but `to_double`, `to_exact_decimal` and
+`is_zero` must normalize first, since a nonzero encoding can denote zero.
+
+### What is limb-width-dependent, and what is not
+
+Limb-width-dependent, must be parameterized:
+
+- `limb_t`, and `p[n-1] >> 63` in `is_negative`
+- every `__uint128_t` carry/borrow/product intermediate
+- `__builtin_clzll` / `__builtin_ctzll` where the operand is a limb
+- the decimal chunk `10^19` / 19 digits (32-bit limbs want `10^9` / 9)
+- the `5^27` stride in `to_exact_decimal` (32-bit limbs want `5^13`)
+
+**Fixed at 64 bits regardless**, because these describe IEEE-754 doubles rather
+than the accumulator: everything in `decompose` (52, 1075, `0x7FF`, the sign
+shift), `DoubleParts::mantissa`, `extract_u64`'s return type, and the rounding
+path in `to_double`. Keeping this boundary clean is most of the portability
+work. `60711df` fixed the two places that had already blurred it.
+
+### One structural change beyond a typedef
+
+`add_shifted` takes the addend as two limbs (`lo`, `hi`). That holds only for a
+64-bit radix: a 53-bit mantissa offset by up to 63 bits spans 116 bits, which
+is 2 limbs. At a 32-bit radix, 53 bits offset by up to 31 spans 84 bits, which
+is **3 limbs**. The addend should become a small fixed-size array sized
+`ceil((53 + radix - 1) / radix)`.
+
+### De-risking without a GPU
+
+Template on the limb parameters and instantiate **both widths on the CPU**,
+then assert the two produce bit-identical `to_exact_decimal` output over the
+existing test corpus. Exact results must not depend on limb width, so this is a
+strict equality test, and it makes the whole portability question testable
+today. If the code is limb-width-clean, the CUDA port is a backend swap; if it
+is not, that shows up now rather than after the kernels are written.
+
+This argues for templates over a `CBFP_LIMB_BITS` macro: a macro forces one
+width per build, so the two instantiations can never be compared in a single
+test binary.
+
+### Other CUDA notes
+
+- Dynamic growth mid-kernel is impractical. `reserve_for` already exists as the
+  pre-sizing escape hatch and is what a GPU path should require.
+- Many small `cudaMalloc`s are expensive, which pushes against one allocation
+  per limb position. The append-without-touching property still argues for it;
+  a pool or arena is the likely compromise.
+- The skew concern maps to partition camping rather than L1 set conflicts, but
+  the medicine is the same: avoid power-of-two strides between limb arrays.
+- With a 32-bit radix, thread `i` handling row `i` reads `limbs[k][i]` across a
+  warp as 32 consecutive 32-bit words — 128 bytes, perfectly coalesced.
 
 ## Implemented
 
