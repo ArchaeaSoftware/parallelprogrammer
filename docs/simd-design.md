@@ -286,8 +286,11 @@ being caught. Both are worth remembering when re-measuring.
   so not noise — the model was simply wrong. It was discarded.
 - The claim that nvcc rejects `__uint128_t` in device code was asserted from
   recollection, not measured, and is false on CUDA 12.9. It had been made the
-  load-bearing argument for a 32-bit radix. The conclusion survived; the
-  reasoning did not. Check toolkit behaviour against the toolkit.
+  load-bearing argument for a 32-bit radix. Benchmarking then took the
+  conclusion as well: 32-bit limbs are slower than 64-bit on both targets. Two
+  rounds of plausible reasoning, both overturned the moment either was
+  measured — check the toolkit against the toolkit, and the hardware against
+  the hardware.
 
 The synthetic carry walk used throughout has none of the real work: no
 decompose, no per-lane variable shifts, no masked selects. Re-measure the skew
