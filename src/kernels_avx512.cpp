@@ -50,17 +50,16 @@ void accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
         const __m512i hi = _mm512_srlv_epi64(mant, _mm512_sub_epi64(k64, bit));
         const __m512i off1 = _mm512_add_epi64(off, kOne);
 
-        const std::size_t first =
-            static_cast<std::size_t>(_mm512_reduce_min_epi64(off));
-        const std::size_t last =
-            static_cast<std::size_t>(_mm512_reduce_max_epi64(off)) + 1;
-
         __m512i carry = _mm512_setzero_si512();
-        for (std::size_t p = first; p < nlimbs; ++p) {
+        for (std::size_t p = b.first_limb; p < nlimbs; ++p) {
             const __m512i pv = _mm512_set1_epi64(static_cast<long long>(p));
+            const __mmask8 active = _mm512_cmple_epi64_mask(off, pv);
+            // Below every lane's first limb there is nothing to add and no
+            // carry can exist yet, so the position costs only this compare.
+            if (active == 0) continue;
+
             const __mmask8 at_lo = _mm512_cmpeq_epi64_mask(off, pv);
             const __mmask8 at_hi = _mm512_cmpeq_epi64_mask(off1, pv);
-            const __mmask8 active = _mm512_cmple_epi64_mask(off, pv);
 
             __m512i addend = _mm512_maskz_mov_epi64(at_lo, lo);
             addend = _mm512_mask_mov_epi64(addend, at_hi, hi);
@@ -85,8 +84,14 @@ void accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
             // test differs by sign: an adding lane is done when its carry is 0,
             // a subtracting lane when its carry is 1 (carry 0 there means a
             // borrow is still propagating through the sign extension).
+            // Exact per-block termination without a shuffle reduction: stop
+            // once no lane has addend left above p and nothing is propagating.
+            // The ~A + 1 form inverts the carry's meaning, so the test differs
+            // by sign -- an adding lane is done when its carry is 0, a
+            // subtracting lane when its carry is 1.
             const __mmask8 pending = _mm512_test_epi64_mask(carry, carry);
-            if (p >= last && (pending ^ negative) == 0) break;
+            const __mmask8 more = _mm512_cmpgt_epi64_mask(off1, pv);
+            if (more == 0 && (pending ^ negative) == 0) break;
         }
     }
 }

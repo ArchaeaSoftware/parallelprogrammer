@@ -242,8 +242,10 @@ void ColumnBlockMatrix::accumulate(std::size_t i, std::size_t j, double v,
     }
     for (std::size_t k = 0; k < n; ++k) rowbase[k] = c.bases[k] + i;
 
-    const kernels::Batch batch{&mantissa, &exponent32, &negative,
-                               static_cast<std::int32_t>(c.exponent), 1};
+    const kernels::Batch batch{
+        &mantissa,         &exponent32,
+        &negative,         static_cast<std::int32_t>(c.exponent),
+        shift / kLimbBits, 1};
     kernels::accumulate_scalar(rowbase, n, batch);
 }
 
@@ -323,8 +325,11 @@ void ColumnBlockMatrix::add_matrix_scaled_pow2(const double* b, int log2_scale,
         fit_column(c);
 
         const kernels::Batch batch{
-            scratch_mantissa_.data(), scratch_shift_.data(),
-            scratch_negative_.data(), static_cast<std::int32_t>(c.exponent),
+            scratch_mantissa_.data(),
+            scratch_shift_.data(),
+            scratch_negative_.data(),
+            static_cast<std::int32_t>(c.exponent),
+            static_cast<std::size_t>(min_exponent - c.exponent) / kLimbBits,
             rows_};
         accumulate_fn(c.bases.data(), c.limbs.size(), batch);
     }

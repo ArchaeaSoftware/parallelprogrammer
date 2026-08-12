@@ -19,6 +19,10 @@ struct Batch {
         exponent;  // absolute; the kernel subtracts the column's
     const std::uint8_t* negative;  // 1 = subtract
     std::int32_t column_exponent;
+    // Lowest limb any addend can touch, from the column's exponent span. Only
+    // a starting hint: a row block that has not reached its own first limb
+    // skips the position outright.
+    std::size_t first_limb;
     std::size_t rows;
 };
 
