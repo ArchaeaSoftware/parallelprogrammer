@@ -98,10 +98,28 @@ tunable, not a derived constant — see the caveats.
 
 ## Limb width: separate storage from radix
 
-CUDA wants 32-bit limbs. The forcing constraint is not throughput: **nvcc has
-no `__uint128_t` in device code**, and every carry path in `limbs.cpp` goes
-through one today. A 32-bit radix makes the double-width intermediate a plain
-`uint64_t`, which device code handles natively.
+CUDA wants 32-bit limbs, though not for the reason first recorded here.
+
+`__uint128_t` **is** supported in device code. Verified on CUDA 12.9 / sm_86
+(RTX 3060): the exact carry shape `limbs.cpp` uses compiles, runs, and produces
+correct carry-out at the `2^64-1 + 2^64-1 + 1` boundary, lowering to
+`add.cc.s64` / `addc.cc.s64` in PTX. An earlier draft of this document claimed
+the opposite and built the case for a 32-bit radix on it; that was wrong.
+
+The actual reason is that **a 64-bit limb is a fiction on this hardware.** The
+SASS shows the ALU is 32-bit, so one 64-bit add is already two chained 32-bit
+adds:
+
+```
+IADD3   R10, P1, R2, R4, RZ           // low 32 bits, carry out to predicate P1
+IADD3.X R0,  P1, R3, R5, RZ, P1, !PT  // high 32 bits, carry in from P1
+```
+
+The full 128-bit add is about seven of these. Choosing a 64-bit limb therefore
+does not shorten the carry chain; it buries it one level below where a
+redundant representation could be applied. A 32-bit radix exposes the chain at
+the granularity the hardware actually executes, which is what makes carry-save
+available at all.
 
 For AVX-512, lane count alone is *not* an argument for narrow limbs. Pushing
 `R` rows through a `W`-bit column costs `(W/64) * (R/8) = RW/512` instructions
@@ -133,7 +151,8 @@ exact, just stored redundantly — but `to_double`, `to_exact_decimal` and
 Limb-width-dependent, must be parameterized:
 
 - `limb_t`, and `p[n-1] >> 63` in `is_negative`
-- every `__uint128_t` carry/borrow/product intermediate
+- every `__uint128_t` carry/borrow/product intermediate (portable to device
+  code as-is, but it should track the radix rather than be hard-coded)
 - `__builtin_clzll` / `__builtin_ctzll` where the operand is a limb
 - the decimal chunk `10^19` / 19 digits (32-bit limbs want `10^9` / 9)
 - the `5^27` stride in `to_exact_decimal` (32-bit limbs want `5^13`)
@@ -217,6 +236,10 @@ being caught. Both are worth remembering when re-measuring.
   contradicted the L1-set model behind them (predicted: more limbs, more need
   for skew; measured: no benefit at 16, ~5% cost at 32). Reproducible to ~3%,
   so not noise — the model was simply wrong. It was discarded.
+- The claim that nvcc rejects `__uint128_t` in device code was asserted from
+  recollection, not measured, and is false on CUDA 12.9. It had been made the
+  load-bearing argument for a 32-bit radix. The conclusion survived; the
+  reasoning did not. Check toolkit behaviour against the toolkit.
 
 The synthetic carry walk used throughout has none of the real work: no
 decompose, no per-lane variable shifts, no masked selects. Re-measure the skew
