@@ -23,6 +23,8 @@ RTX 3060 (sm_86, CUDA 12.9).
 | 64-byte aligned allocation, skewed per limb array | settled |
 | `LimbColumn` as the type name | settled, naming may be revisited |
 | Bit-manipulation `decompose` | landed (`8565474`) |
+| Flat free-function kernels; runtime dispatch via target attributes | settled |
+| No templates in the public API; radix templated in kernels only | settled |
 | Radix: 52-bit carry-save vs 64-bit canonical | **open** |
 | Whether limb arrays get separate allocations on CUDA | open |
 
@@ -241,6 +243,58 @@ offset `o` occupies bits `o .. o+52`:
 So a 52-bit radix keeps the existing two-limb addend and needs no structural
 change here, while a 32-bit radix would force a third. 52 is well matched to a
 53-bit significand.
+
+## Differentiating scalar, AVX-512 and CUDA
+
+Keep the code flat. The kernel surface is a handful of free functions over raw
+pointers — accumulate a column, shift a column left, sign-fill a new limb
+array, normalize (if carry-save), bulk readback — taking
+`std::uint64_t* const* limbs, std::size_t nlimbs, std::size_t rows, ...`, which
+is what limb-major with separate allocations already hands you. No virtuals, no
+CRTP, no policy types.
+
+**CPU: one translation unit, per-function target attributes.** Verified working
+on this toolchain with the file compiled at baseline — no `-march`, no
+`-mavx512f`:
+
+```cpp
+void add_limbs_scalar(...);
+
+__attribute__((target("avx512f,avx512dq,avx512vbmi2")))
+void add_limbs_avx512(...);
+
+static const auto add_limbs =
+    __builtin_cpu_supports("avx512f") ? add_limbs_avx512 : add_limbs_scalar;
+```
+
+`zmm` codegen stays confined to the attributed function (0 occurrences in the
+scalar kernel, 8 in the AVX-512 one) and a baseline binary still selects the
+fast path at runtime. No per-file compile flags and no extra build targets.
+Dispatch is one indirect call per *column*, not per element.
+`__attribute__((target_clones(...)))` also works if the compiler's own
+auto-vectorization is enough for a given kernel.
+
+**CUDA is a different seam, at a different level.** Swapping a CPU kernel
+leaves the memory and the object identical, so it is a true backend swap.
+CUDA's data lives in device memory, so putting it behind the same function
+pointer would disguise host/device transfers as ordinary calls. The CUDA path
+wants its own container with device-resident limb arrays; what it shares with
+the CPU is the *algorithm* — when to rescale, when to widen, how the exponent
+moves — not the memory. Unifying all three behind one dispatch table would
+produce exactly the leaky abstraction this design is trying to avoid.
+
+## Templates: only in the kernels, never in the API
+
+Settling storage at 64 bits removed the case for templating the public class —
+there is no type left to vary. Templating `ColumnBlockMatrix` would force
+header-only or explicit instantiation and make the most-read code less flat for
+no benefit.
+
+The one legitimate parameter is the radix, and it belongs on the kernel bodies
+only. Those are already isolated behind the flat function interface, so they
+can be templated and explicitly instantiated at radix 52 and 64 without a
+template ever appearing in a public header. If the radix question closes at 64,
+the parameter is deleted and nothing else changes.
 
 ### De-risking without a GPU
 
