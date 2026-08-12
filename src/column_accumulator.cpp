@@ -28,10 +28,19 @@ std::size_t trailing_zeros(const std::vector<limb_t>& v)
     return 0;
 }
 
+// Significant bits of a 64-bit quantity. Deliberately not expressed in terms
+// of kLimbBits: the callers below pass a std::size_t and a double's mantissa,
+// neither of which is a limb, so neither may follow the limb width if it ever
+// changes (a 32-bit limb build for CUDA, say).
+std::size_t bit_width_u64(std::uint64_t v)
+{
+    return v == 0 ? 0 : 64 - static_cast<std::size_t>(__builtin_clzll(v));
+}
+
 std::size_t ceil_log2(std::size_t n)
 {
     if (n <= 1) return 0;
-    return kLimbBits - __builtin_clzll(n - 1);
+    return bit_width_u64(n - 1);
 }
 
 // 5^k for k <= 27, which is the largest power of five that fits in a limb.
@@ -380,8 +389,7 @@ void ColumnBlockMatrix::reserve_for(const double* b, std::size_t count,
 
             const long long lsb = p.exponent;
             const long long msb =
-                p.exponent +
-                static_cast<long long>(kLimbBits - __builtin_clzll(p.mantissa));
+                p.exponent + static_cast<long long>(bit_width_u64(p.mantissa));
             if (!any) {
                 low = lsb;
                 high = msb;
