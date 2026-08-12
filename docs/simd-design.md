@@ -5,8 +5,10 @@ are the bit-manipulation `decompose` (`8565474`) and the `kLimbBits` cleanup
 (`60711df`). Everything below the "Implemented" section is a decision record,
 not a description of the code.
 
-Targets both AVX-512 on the CPU and a future CUDA implementation. The CUDA
-constraint is the more restrictive one and should drive the abstraction.
+Targets both AVX-512 on the CPU and a future CUDA implementation. CUDA turned
+out to impose no special constraint on the representation — measurement found
+the two targets want the same thing — so the abstraction is driven by the radix
+choice below rather than by either machine's word size.
 
 Measurements are from a Ryzen 7 7700X (Zen 4: AVX512F/BW/DQ/VL, VBMI2,
 VPOPCNTDQ; 256-bit datapath, so AVX-512 ops are double-pumped).
@@ -96,55 +98,87 @@ deterministic outcome.
 `K=8` (offsets `(k & 7) * 64`) sufficed everywhere measured. Treat it as a
 tunable, not a derived constant — see the caveats.
 
-## Limb width: separate storage from radix
+## Limb width: keep 64-bit storage, tune the radix
 
-CUDA wants 32-bit limbs, though not for the reason first recorded here.
+**Measured conclusion: limb width is not the lever; deferring carries is.**
+Storage stays `uint64_t` on both targets, and the one parameter worth exposing
+is the *radix* — how many of those 64 bits are used before headroom begins.
 
-`__uint128_t` **is** supported in device code. Verified on CUDA 12.9 / sm_86
-(RTX 3060): the exact carry shape `limbs.cpp` uses compiles, runs, and produces
-correct carry-out at the `2^64-1 + 2^64-1 + 1` boundary, lowering to
-`add.cc.s64` / `addc.cc.s64` in PTX. An earlier draft of this document claimed
-the opposite and built the case for a 32-bit radix on it; that was wrong.
+RTX 3060, 2^20 rows x 256 accumulations, ~512-bit accumulator held in
+registers, reported as accumulator bits updated per second:
 
-The actual reason is that **a 64-bit limb is a fiction on this hardware.** The
-SASS shows the ALU is 32-bit, so one 64-bit add is already two chained 32-bit
-adds:
+| scheme | limbs | storage / 512 bits | throughput |
+| --- | --- | --- | --- |
+| canonical, 64-bit limbs | 8 | 64 B (100%) | 29.1 Tbit/s |
+| canonical, 32-bit limbs | 16 | 64 B (100%) | 27.0 Tbit/s |
+| **carry-save, 52-bit radix** | 10 | 80 B (81%) | **82.2 Tbit/s** |
+| carry-save, 32-bit radix | 16 | 128 B (50%) | 49.4 Tbit/s |
+
+Two results, both against the direction this document previously took:
+
+- **32-bit limbs do not help on a 32-bit machine.** They are 8% slower than
+  64-bit canonically and 40% slower under carry-save. The 32-bit ALU implements
+  a 64-bit limb at exactly proportional cost, so there is nothing to reclaim by
+  matching the hardware width.
+- **A reduced radix beats a narrow one.** 52-in-64 wins because it carries more
+  usable bits per register and per byte moved (81% density against 50%), while
+  2^11 deferred additions is ample for a batch. Normalising every few thousand
+  accumulations is cheap amortised.
+
+Caveat on the magnitudes: the benchmark adds a full-width value, whereas the
+real kernel adds a 53-bit mantissa landing in two or three limbs with carries
+that usually die immediately. That makes canonical look worse here than it will
+be in practice, so treat 2.8x as an upper bound on the carry-save advantage.
+The ordering should hold — carry-save over canonical, 52 over 32 — because a
+53-bit mantissa spans two limbs at radix 52 and up to three at radix 32.
+
+### Why width is neutral on both targets
+
+The two architectures charge for a limb in proportion to its width, which is
+why the measurement above comes out flat.
+
+On the GPU the ALU is 32-bit, so one 64-bit add is already two chained 32-bit
+adds — visible directly in the SASS:
 
 ```
 IADD3   R10, P1, R2, R4, RZ           // low 32 bits, carry out to predicate P1
 IADD3.X R0,  P1, R3, R5, RZ, P1, !PT  // high 32 bits, carry in from P1
 ```
 
-The full 128-bit add is about seven of these. Choosing a 64-bit limb therefore
-does not shorten the carry chain; it buries it one level below where a
-redundant representation could be applied. A 32-bit radix exposes the chain at
-the granularity the hardware actually executes, which is what makes carry-save
-available at all.
+A 64-bit limb is therefore honest rather than free: it costs exactly twice a
+32-bit limb and covers exactly twice the bits. Nothing is reclaimed by matching
+the hardware width.
 
-For AVX-512, lane count alone is *not* an argument for narrow limbs. Pushing
-`R` rows through a `W`-bit column costs `(W/64) * (R/8) = RW/512` instructions
-with 64-bit limbs and `(W/32) * (R/16) = RW/512` with 32-bit. Doubling the
-lanes also doubles the limb positions needed to span the same value width, and
-the two cancel exactly. It also doubles each row's serial carry chain.
+On AVX-512 the same cancellation appears as lane arithmetic. Pushing `R` rows
+through a `W`-bit column costs `(W/64) * (R/8) = RW/512` instructions with
+64-bit limbs and `(W/32) * (R/16) = RW/512` with 32-bit. Doubling the lanes
+also doubles the limb positions needed to span the same width, and the two
+cancel — while doubling each row's serial carry chain.
 
-The real argument for a narrow radix is **headroom**. A 32-bit radix stored in
-64-bit lanes leaves 32 spare bits per lane, so ~2^31 values can be accumulated
-before overflow is possible. The inner loop becomes a bare `vpaddq` with no
-carry-out test, no mask op, and no dependency between limb positions; carries
-are propagated once, lazily, before readback.
+### Why carry-save wins
 
-So parameterize two constants, not one:
+Headroom, not width. A radix narrower than the storage leaves spare bits per
+lane, so many values can be accumulated before overflow is possible: 2^11 at
+radix 52, 2^31 at radix 32. The inner loop becomes a bare add — no carry-out
+test, no mask op, and no dependency between limb positions — with carries
+propagated once, lazily, before readback.
 
-| storage | radix | deferred adds | density | target |
-| --- | --- | --- | --- | --- |
-| 64 | 64 | 1 (canonical) | 100% | today's CPU code |
-| 32 | 32 | 1 (canonical) | 100% | CUDA canonical |
-| 64 | 32 | 2^31 | 50% | AVX-512 carry-save |
-| 64 | 52 | 2^11 | 81% | reduced radix, better density |
+The density term is what then favours 52 over 32: fewer limbs for the same
+accumulator width means fewer registers, fewer bytes moved, and a 53-bit
+mantissa landing in two limbs instead of three.
 
 A redundant (non-canonical) representation stays exact — every add is still
 exact, just stored redundantly — but `to_double`, `to_exact_decimal` and
 `is_zero` must normalize first, since a nonzero encoding can denote zero.
+
+### Historical note
+
+`__uint128_t` **is** supported in device code, verified on CUDA 12.9 / sm_86:
+the exact carry shape `limbs.cpp` uses compiles, runs, and produces correct
+carry-out at the `2^64-1 + 2^64-1 + 1` boundary, lowering to `add.cc.s64` /
+`addc.cc.s64`. An earlier draft claimed the opposite and made it the
+load-bearing argument for a 32-bit radix. Measurement then removed the
+conclusion too: 32-bit limbs are slower than 64-bit on both targets.
 
 ### What is limb-width-dependent, and what is not
 
@@ -154,8 +188,14 @@ Limb-width-dependent, must be parameterized:
 - every `__uint128_t` carry/borrow/product intermediate (portable to device
   code as-is, but it should track the radix rather than be hard-coded)
 - `__builtin_clzll` / `__builtin_ctzll` where the operand is a limb
-- the decimal chunk `10^19` / 19 digits (32-bit limbs want `10^9` / 9)
-- the `5^27` stride in `to_exact_decimal` (32-bit limbs want `5^13`)
+- the decimal chunk `10^19` / 19 digits, and the `5^27` stride in
+  `to_exact_decimal` — both sized to the largest power fitting in a limb
+
+The measured conclusion is that storage stays 64-bit everywhere, so most of
+this list is dormant. It still matters: a reduced radix means limbs are no
+longer full 64-bit values, so anything reading a limb as a whole word — the
+sign test, `bit_length`, the decimal conversion — must work in radix bits
+rather than storage bits.
 
 **Fixed at 64 bits regardless**, because these describe IEEE-754 doubles rather
 than the accumulator: everything in `decompose` (52, 1075, `0x7FF`, the sign
@@ -163,26 +203,32 @@ shift), `DoubleParts::mantissa`, `extract_u64`'s return type, and the rounding
 path in `to_double`. Keeping this boundary clean is most of the portability
 work. `60711df` fixed the two places that had already blurred it.
 
-### One structural change beyond a typedef
+### The addend span, and another reason 52 is a good radix
 
-`add_shifted` takes the addend as two limbs (`lo`, `hi`). That holds only for a
-64-bit radix: a 53-bit mantissa offset by up to 63 bits spans 116 bits, which
-is 2 limbs. At a 32-bit radix, 53 bits offset by up to 31 spans 84 bits, which
-is **3 limbs**. The addend should become a small fixed-size array sized
-`ceil((53 + radix - 1) / radix)`.
+`add_shifted` takes the addend as two limbs (`lo`, `hi`), sized
+`ceil((53 + radix - 1) / radix)` in general. A 53-bit mantissa at intra-limb
+offset `o` occupies bits `o .. o+52`:
+
+- radix 64: `o <= 63`, top bit 115, spans **2 limbs**
+- radix 52: `o <= 51`, top bit 103, spans **2 limbs**
+- radix 32: `o <= 31`, top bit 83, spans **3 limbs**
+
+So a 52-bit radix keeps the existing two-limb addend and needs no structural
+change here, while a 32-bit radix would force a third. 52 is well matched to a
+53-bit significand.
 
 ### De-risking without a GPU
 
-Template on the limb parameters and instantiate **both widths on the CPU**,
-then assert the two produce bit-identical `to_exact_decimal` output over the
-existing test corpus. Exact results must not depend on limb width, so this is a
-strict equality test, and it makes the whole portability question testable
-today. If the code is limb-width-clean, the CUDA port is a backend swap; if it
-is not, that shows up now rather than after the kernels are written.
+Template on the radix and instantiate **more than one on the CPU**, then assert
+they produce bit-identical `to_exact_decimal` output over the existing test
+corpus. Exact results must not depend on the radix, so this is a strict
+equality test, and it makes the representation question testable today —
+including carry-save against canonical, which is where a normalization bug
+would otherwise hide until it corrupted a result silently.
 
 This argues for templates over a `CBFP_LIMB_BITS` macro: a macro forces one
-width per build, so the two instantiations can never be compared in a single
-test binary.
+configuration per build, so two instantiations can never be compared in a
+single test binary.
 
 ### Other CUDA notes
 
@@ -193,8 +239,10 @@ test binary.
   a pool or arena is the likely compromise.
 - The skew concern maps to partition camping rather than L1 set conflicts, but
   the medicine is the same: avoid power-of-two strides between limb arrays.
-- With a 32-bit radix, thread `i` handling row `i` reads `limbs[k][i]` across a
-  warp as 32 consecutive 32-bit words — 128 bytes, perfectly coalesced.
+- Coalescing is fine either way: thread `i` handling row `i` reads `limbs[k][i]`
+  across a warp as 32 consecutive words — 256 bytes at 64-bit storage, 128 at
+  32-bit. Both are fully coalesced with no wasted bytes, which is part of why
+  the width comparison came out flat.
 
 ## Implemented
 
