@@ -18,9 +18,13 @@
 #include <string>
 #include <vector>
 
+#include "cbfp/limb_column.hpp"
 #include "cbfp/limbs.hpp"
 
 namespace cbfp {
+
+// Name of the kernel variant selected for this CPU ("scalar", "avx512").
+const char* active_kernel();
 
 class ColumnBlockMatrix {
 public:
@@ -77,12 +81,12 @@ public:
 
     std::size_t column_bit_width(std::size_t j) const
     {
-        return cols_state_[j].limbs * limbs::kLimbBits;
+        return cols_state_[j].limbs.size() * limbs::kLimbBits;
     }
 
     std::size_t column_limbs(std::size_t j) const
     {
-        return cols_state_[j].limbs;
+        return cols_state_[j].limbs.size();
     }
 
     // Pre-size a column so that accumulation performs no rescaling:
@@ -104,35 +108,40 @@ public:
 private:
     struct Column {
         int exponent = 0;
-        std::size_t limbs = 1;
         bool initialized = false;  // false until the first add fixes the scale
-        std::vector<limbs::limb_t> data;
+
+        // Width is derived rather than measured: no entry can exceed
+        // `count * 2^max_addend_bits`, so that bound plus a sign bit says how
+        // many limbs are needed, and the kernels can then skip overflow checks.
+        std::size_t max_addend_bits = 0;
+        std::size_t add_count = 0;
+
+        std::vector<LimbColumn> limbs;      // limbs[k] = k-th limb of a row
+        std::vector<limbs::limb_t*> bases;  // limbs[k].data(), for kernels
     };
 
     void check_index(std::size_t i, std::size_t j) const;
-    void ensure_limbs(Column& c, std::size_t limbs_needed);
+    void rebuild_bases(Column& c);
+    void ensure_limb_count(Column& c, std::size_t limbs_needed);
+    void fit_column(Column& c);
     void rescale(Column& c, int new_exponent);
+    bool column_is_zero(const Column& c) const;
     void accumulate(std::size_t i, std::size_t j, double v, bool negate,
                     int log2_scale);
 
-    limbs::limb_t* entry(Column& c, std::size_t i)
-    {
-        return c.data.data() + i * c.limbs;
-    }
-
-    const limbs::limb_t* entry(const Column& c, std::size_t i) const
-    {
-        return c.data.data() + i * c.limbs;
-    }
-
     // Absolute value of entry (i, j) as a magnitude limb vector, plus its
-    // sign.
+    // sign. Gathers across limb positions, so this is a readback path only.
     std::vector<limbs::limb_t> magnitude(std::size_t i, std::size_t j,
                                          bool* negative) const;
 
     std::size_t rows_;
     std::size_t cols_;
     std::vector<Column> cols_state_;
+
+    // Per-column decomposition scratch. Makes add_matrix non-reentrant.
+    std::vector<std::uint64_t> scratch_mantissa_;
+    std::vector<std::int32_t> scratch_shift_;
+    std::vector<std::uint8_t> scratch_negative_;
 };
 
 // Decomposes a finite double into an exact odd mantissa and exponent:

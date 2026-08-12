@@ -11,8 +11,24 @@ endif()
 
 add_library(cbfp
   src/limbs.cpp
+  src/limb_column.cpp
+  src/kernels_scalar.cpp
+  src/kernels_dispatch.cpp
   src/column_accumulator.cpp
 )
+
+# The AVX-512 kernels get their own translation unit with their own flags, so
+# the rest of the library stays baseline and the binary still runs anywhere.
+# Nothing in that file may run before the CPU check in kernels_dispatch.cpp.
+include(CheckCXXCompilerFlag)
+set(CBFP_AVX512_FLAGS -mavx512f -mavx512dq -mavx512vl -mavx512bw)
+check_cxx_compiler_flag("${CBFP_AVX512_FLAGS}" CBFP_COMPILER_HAS_AVX512)
+if(CBFP_COMPILER_HAS_AVX512)
+  target_sources(cbfp PRIVATE src/kernels_avx512.cpp)
+  set_source_files_properties(src/kernels_avx512.cpp PROPERTIES
+    COMPILE_OPTIONS "${CBFP_AVX512_FLAGS}")
+  target_compile_definitions(cbfp PRIVATE CBFP_HAVE_AVX512)
+endif()
 target_include_directories(cbfp PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )

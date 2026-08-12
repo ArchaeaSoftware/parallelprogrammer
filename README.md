@@ -31,11 +31,11 @@ Both column parameters adapt automatically, and only ever in the safe direction:
 - **The exponent only decreases.** A value whose ulp falls below the column's
   current LSB triggers a rescale: every entry in the column is shifted left and
   the exponent drops to match. Existing bits move, none are discarded.
-- **The width only increases.** Signed overflow on an add is detected, undone
-  (two's complement addition is exactly invertible), the block is widened by a
-  limb, and the add is redone. This is a single retry rather than a loop: with
-  `n` limbs both operands are bounded by `2^(64n-1)`, so their sum needs at
-  most `64n+1` bits and one extra limb is always enough.
+- **The width only increases.** Rather than detect overflow, the required width
+  is *derived*: no entry can exceed `count · 2^max_addend_bits`, so that bound
+  plus a sign bit says how many limbs are needed before a batch is applied. The
+  kernels can then skip overflow checks entirely, which is what makes them
+  vectorizable.
 
 Incoming mantissas are normalized to odd before use, so the column exponent
 tracks each value's *true* ulp rather than its `frexp` exponent. This matters a
@@ -86,11 +86,24 @@ terminating decimal expansion, since `V · 2⁻ᵏ = (V · 5ᵏ) / 10ᵏ`.
 - `set_zero()` clears the values but keeps each column's learned scale, so a
   reused accumulator does not re-pay for rescaling.
 
+### Storage layout
+
+Storage is **limb-major**: one allocation per limb position, holding that limb
+of every row (`limbs[k][i]` is entry `i`'s `k`-th limb). Rows are the vector
+axis and limb positions the sequential one, so a carry chain runs inside a lane
+and never crosses lanes. Widening is then a pure append — existing limb arrays
+are untouched — and each allocation is 64-byte aligned and skewed off cache-set
+congruence. See [docs/simd-design.md](docs/simd-design.md).
+
+Kernels are flat free functions selected once per column from the running CPU's
+capabilities; `active_kernel()` reports which. Set `CBFP_KERNEL=scalar` to force
+the portable path, which is how the two are cross-checked in testing.
+
 ### Threading
 
-Columns are entirely independent — separate scale, separate allocation, no
-shared state. Accumulating distinct columns concurrently is safe as written;
-two threads writing the same column are not (a rescale reallocates the block).
+Columns are independent in storage, but `add_matrix` uses a shared
+decomposition scratch buffer, so a single `ColumnBlockMatrix` is **not**
+reentrant. Use one accumulator per thread and merge, or serialize calls.
 
 ## Build
 
