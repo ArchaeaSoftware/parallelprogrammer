@@ -103,6 +103,15 @@ and never crosses lanes. Widening is then a pure append — existing limb arrays
 are untouched — and each allocation is 64-byte aligned and skewed off cache-set
 congruence. See [docs/simd-design.md](docs/simd-design.md).
 
+On the GPU, input is read once and never re-read, because the survey runs on
+the host. That is what lets the kernel stream it straight out of mapped host
+memory instead of copying it to the device first — measured at 65536x64,
+copying 33.6 MB and then reading it from device memory takes 1768 us against
+1257 us to read it in place, and 1257 is exactly what the transfer alone costs,
+so the arithmetic hides entirely behind the bus. Allocate input with
+`CudaColumnBlockMatrix::allocate_input` and it is used where it lies; ordinary
+host memory still works and is staged through a mapped buffer.
+
 Kernels are flat free functions selected once per column from the running CPU's
 capabilities; `active_kernel()` reports which. Set `CBFP_KERNEL=scalar` to force
 the portable path, which is how the two are cross-checked in testing.

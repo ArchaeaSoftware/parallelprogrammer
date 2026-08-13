@@ -84,6 +84,18 @@ public:
     void reserve_for_device(const double *b, std::size_t count = 1,
                             std::size_t col_stride = 0);
 
+    // --- input memory ------------------------------------------------------
+
+    // Host memory the device can read directly. Filling one of these and
+    // handing it to add_matrix_col_major skips the staging copy entirely: the
+    // kernel streams it over PCIe as it works, so the transfer costs one pass
+    // and the arithmetic hides behind it.
+    //
+    // Ordinary host memory still works and is staged through an internal
+    // buffer; this only removes that copy.
+    static double *allocate_input(std::size_t count);
+    static void free_input(double *p);
+
     // --- accumulation ------------------------------------------------------
 
     // A += B, where B is column-major on the host: column j begins at
@@ -154,23 +166,26 @@ private:
     };
 
     // Two staging slots, so the host can prepare batch N+1 while the device is
-    // still accumulating batch N. Each owns a pinned host buffer -- measured,
-    // an async copy from pageable memory blocks the host for the whole
-    // transfer and there is no window to survey in -- the device buffer the
-    // kernel reads, and an event marking when the last kernel to read that
-    // buffer finished, so a slot is only reused once it is genuinely free.
+    // still accumulating batch N.
+    //
+    // The buffer is mapped rather than merely pinned, and there is no device
+    // copy of it: the kernel reads host memory directly. Measured at 65536x64,
+    // copying 33.6 MB and then reading it from device memory takes 1768 us,
+    // while reading it in place takes 1257 -- exactly what the transfer alone
+    // costs, so the accumulator work hides entirely behind the bus. That only
+    // holds because the input is read once: the host survey is what means the
+    // device never needs a second look at it.
     struct Slot {
-        double *pinned = nullptr;
-        double *device = nullptr;
-        CUevent_st *ev_copied = nullptr;  // H2D into `device` finished
-        CUevent_st *ev_done = nullptr;    // last kernel to read it finished
+        double *mapped = nullptr;
+        CUevent_st *ev_done = nullptr;  // last kernel to read it finished
         bool in_flight = false;
     };
 
     void check_index(std::size_t i, std::size_t j) const;
     void accumulate_device(const double *b, std::size_t col_stride);
     void launch_accumulate(const double *b, std::size_t col_stride);
-    void validate_host_survey(const double *packed);
+    void validate_host_survey(const double *b, std::size_t col_stride);
+    static bool device_readable(const double *p);
     void sync_descriptors();
     void harvest_occupancy();
     void reserve_from_extents(const long long *low, const long long *high,
@@ -192,10 +207,8 @@ private:
     // what coalescing actually needs, comes for free.
     std::vector<Column> cols_state_;
 
-    // Copy and compute are separate streams so batch N+1's transfer runs on
-    // the copy engine while batch N is still accumulating. On one stream they
-    // serialize, and the transfer is the longer of the two.
-    CUstream_st *st_copy_ = nullptr;
+    // One stream. There is no longer a transfer to overlap with compute --
+    // the kernel does the transfer, by reading host memory as it goes.
     CUstream_st *st_compute_ = nullptr;
     // These two stay void*: they point at types defined inside the .cu, which
     // is where they belong -- the descriptor layout is not this header's

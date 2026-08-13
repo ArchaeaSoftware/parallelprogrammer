@@ -481,6 +481,49 @@ test_rescale()
     }
 }
 
+// Input the device can read directly skips the staging copy and is streamed
+// over PCIe by the kernel itself. It is a different route into the same
+// arithmetic, so it must land on the same bits.
+void
+test_mapped_input()
+{
+    const std::size_t rows = 301, cols = 6;
+    const int nbatches = 3;
+    const std::size_t n = rows * cols;
+
+    std::vector<double> plain(n);
+    double *mapped = cbfp::CudaColumnBlockMatrix::allocate_input(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const double v = random_value(150);
+        plain[i] = v;
+        mapped[i] = v;
+    }
+
+    cbfp::ColumnBlockMatrix cpu(rows, cols);
+    cbfp::CudaColumnBlockMatrix staged(rows, cols), direct(rows, cols);
+    for (int b = 0; b < nbatches; ++b) cpu.add_matrix_col_major(plain.data());
+    staged.reserve_like(cpu);
+    direct.reserve_like(cpu);
+    for (int b = 0; b < nbatches; ++b) {
+        staged.add_matrix_col_major(plain.data());
+        direct.add_matrix_col_major(mapped);
+    }
+
+    std::size_t differ = 0, wrong = 0;
+    for (std::size_t j = 0; j < cols; ++j) {
+        for (std::size_t i = 0; i < rows; ++i) {
+            const std::vector<std::uint64_t> a = staged.entry_limbs(i, j);
+            const std::vector<std::uint64_t> b = direct.entry_limbs(i, j);
+            const std::vector<std::uint64_t> h = cpu.entry_limbs(i, j);
+            if (a != b) ++differ;
+            if (b != h) ++wrong;
+        }
+    }
+    check(0 == differ, "mapped input matches staged input bit for bit");
+    check(0 == wrong, "and both match the CPU");
+    cbfp::CudaColumnBlockMatrix::free_input(mapped);
+}
+
 void
 test_errors()
 {
@@ -577,6 +620,7 @@ main()
     test_reserve_for();
     test_accumulated_bound();
     test_rescale();
+    test_mapped_input();
     test_errors();
 
     std::printf("%d checks, %d failures\n", checks, failures);

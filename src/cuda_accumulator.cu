@@ -455,7 +455,6 @@ CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t rows, std::size_t cols)
            << "limit of " << max_grid_y;
         throw std::runtime_error(os.str());
     }
-    cuda(StreamCreate(&st_copy_));
     cuda(StreamCreate(&st_compute_));
 
     if (0 != cols_) {
@@ -485,12 +484,9 @@ CudaColumnBlockMatrix::~CudaColumnBlockMatrix()
     cudaFreeHost(occupancy_host_);
     cudaFree(ticket_);
     for (Slot &s : slots_) {
-        if (s.pinned) cudaFreeHost(s.pinned);
-        if (s.device) cudaFree(s.device);
-        if (s.ev_copied) cudaEventDestroy(s.ev_copied);
+        if (s.mapped) cudaFreeHost(s.mapped);
         if (s.ev_done) cudaEventDestroy(s.ev_done);
     }
-    if (st_copy_) cudaStreamDestroy(st_copy_);
     if (st_compute_) {
         cudaStreamDestroy(st_compute_);
     }
@@ -782,16 +778,11 @@ CudaColumnBlockMatrix::ensure_slots(std::size_t words)
     if (slot_words_ >= words) return;
     synchronize();
     for (Slot &s : slots_) {
-        if (s.pinned) cudaFreeHost(s.pinned);
-        if (s.device) cudaFree(s.device);
-        s.pinned = nullptr;
-        s.device = nullptr;
-        cuda(
-            HostAlloc(&s.pinned, words * sizeof(double), cudaHostAllocDefault));
-        cuda(Malloc(&s.device, words * sizeof(double)));
+        if (s.mapped) cudaFreeHost(s.mapped);
+        s.mapped = nullptr;
+        cuda(HostAlloc(&s.mapped, words * sizeof(double), cudaHostAllocMapped));
         if (!s.ev_done) {
             cuda(EventCreateWithFlags(&s.ev_done, cudaEventDisableTiming));
-            cuda(EventCreateWithFlags(&s.ev_copied, cudaEventDisableTiming));
         }
         s.in_flight = false;
     }
@@ -802,7 +793,8 @@ CudaColumnBlockMatrix::ensure_slots(std::size_t words)
 // CPU accumulator uses -- which is the AVX-512 one where available, at ~0.12
 // ns/elem. Cheap enough to hide entirely behind the transfer it runs against.
 void
-CudaColumnBlockMatrix::validate_host_survey(const double *packed)
+CudaColumnBlockMatrix::validate_host_survey(const double *b,
+                                            std::size_t col_stride)
 {
     for (std::size_t j = 0; j < cols_; ++j) {
         const Column &c = cols_state_[j];
@@ -815,7 +807,7 @@ CudaColumnBlockMatrix::validate_host_survey(const double *packed)
         // at a lower bound whenever no rescale could be due, and only pay for
         // the exact true-ulp minimum when it might be.
         const kernels::Survey sc =
-            kernels::survey()(packed + j * rows_, rows_, c.exponent);
+            kernels::survey()(b + j * col_stride, rows_, c.exponent);
         if (sc.nonfinite) {
             throw std::domain_error(
                 "cbfp: cannot accumulate a non-finite value");
@@ -839,33 +831,66 @@ CudaColumnBlockMatrix::add_matrix_col_major(const double *b,
 {
     if (0 == rows_ || 0 == cols_) return;
     const std::size_t stride = col_stride ? col_stride : rows_;
-    ensure_slots(rows_ * cols_);
 
+    // Memory the device can already read is read where it is. Otherwise it is
+    // staged through a mapped slot -- one host copy, and then the kernel
+    // streams it over PCIe rather than a separate transfer doing so first.
+    if (device_readable(b)) {
+        validate_host_survey(b, stride);
+        launch_accumulate(b, stride);
+        return;
+    }
+
+    ensure_slots(rows_ * cols_);
     Slot &s = slots_[slot_];
-    // A slot cannot be refilled until the kernel that last read it is done.
+    // A slot cannot be refilled until the kernel reading it has finished. With
+    // two of them the host stages and surveys batch N+1 while the device is
+    // still streaming batch N.
     if (s.in_flight) {
         cuda(EventSynchronize(s.ev_done));
         s.in_flight = false;
     }
-
     for (std::size_t j = 0; j < cols_; ++j) {
-        std::memcpy(s.pinned + j * rows_, b + j * stride,
+        std::memcpy(s.mapped + j * rows_, b + j * stride,
                     rows_ * sizeof(double));
     }
-    cuda(MemcpyAsync(s.device, s.pinned, rows_ * cols_ * sizeof(double),
-                     cudaMemcpyHostToDevice, st_copy_));
-    cuda(EventRecord(s.ev_copied, st_copy_));
 
-    // Runs against the copy above, not after it.
-    validate_host_survey(s.pinned);
-
-    // The accumulate waits on this slot's copy, but nothing else does, so the
-    // next batch's transfer proceeds on the copy engine meanwhile.
-    cuda(StreamWaitEvent(st_compute_, s.ev_copied, 0));
-    launch_accumulate(s.device, rows_);
+    validate_host_survey(s.mapped, rows_);
+    launch_accumulate(s.mapped, rows_);
     cuda(EventRecord(s.ev_done, st_compute_));
     s.in_flight = true;
     slot_ ^= 1;
+}
+
+// True if the device can dereference this pointer: mapped host memory, or
+// device memory. Unregistered host memory has to be staged.
+bool
+CudaColumnBlockMatrix::device_readable(const double *p)
+{
+    cudaPointerAttributes attr{};
+    const cudaError_t st = cudaGetLastError();  // clear, then probe
+    (void)st;
+    if (cudaSuccess != cudaPointerGetAttributes(&attr, p)) {
+        cudaGetLastError();  // an unregistered pointer is not an error here
+        return false;
+    }
+    if (cudaMemoryTypeDevice == attr.type) return true;
+    return cudaMemoryTypeHost == attr.type && nullptr != attr.devicePointer;
+}
+
+double *
+CudaColumnBlockMatrix::allocate_input(std::size_t count)
+{
+    cudaSetDeviceFlags(cudaDeviceMapHost);
+    double *p = nullptr;
+    cuda(HostAlloc(&p, count * sizeof(double), cudaHostAllocMapped));
+    return p;
+}
+
+void
+CudaColumnBlockMatrix::free_input(double *p)
+{
+    cudaFreeHost(p);
 }
 
 void
@@ -879,7 +904,6 @@ CudaColumnBlockMatrix::add_matrix_col_major_device(const double *b,
 void
 CudaColumnBlockMatrix::synchronize() const
 {
-    cuda(StreamSynchronize(st_copy_));
     cuda(StreamSynchronize(st_compute_));
 }
 
