@@ -156,13 +156,15 @@ on `PATH`):
 
 Naming conventions the formatter cannot enforce:
 
-- **A trailing underscore marks class state, not every member.** Classes that
-  carry invariants — `ColumnBlockMatrix`, `CudaColumnBlockMatrix`,
-  `LimbColumn` — suffix their data members. Aggregates that are plain data or a
-  return value — `Survey`, `DoubleParts`, `Split`, `Split8`, `Addend8`,
-  `Column`, `Slot`, `ColumnDesc` — do not. The distinction is deliberate: the
-  underscore says "this is guarded", and `Survey::min_exponent_` would be
-  noise on what is really a function result.
+- **A trailing underscore marks a private member.** Every private data member
+  in the library takes one and every public member goes without, which is why
+  `ColumnBlockMatrix::rows_` has it while `Survey::any` and `Slot::ev_done` do
+  not. The test is the member's own access, not its enclosing type's:
+  `Column` and `Slot` are nested inside a `private:` section, but their own
+  members are public and so stay bare. The underscore is what says "reaching
+  for this from outside is a mistake"; a public aggregate has nothing to
+  guard, and `Survey::min_exponent_` would be noise on what is a function
+  result.
 - **`v_` and `m_` in the AVX-512 kernels**, for `__m512i`/`__m512d` and
   `__mmask8` respectively, on locals, parameters and struct members. Intrinsic
   code is full of names that could equally be a scalar, and the pair
