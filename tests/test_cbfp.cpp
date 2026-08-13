@@ -1163,6 +1163,124 @@ test_public_survey()
     }
 }
 
+// An accumulator given the surveys of every matrix it will receive must reach
+// exactly the same limbs as one that worked them out for itself -- otherwise
+// pre-sizing is a different algorithm rather than the same one told in advance.
+static void
+test_presized_matches_adaptive()
+{
+    const std::size_t rows = 211, cols = 9;
+    const int nbatches = 6;
+    std::mt19937_64 rng(56789);
+    std::vector<std::vector<double>> batch(nbatches,
+                                           std::vector<double>(rows * cols));
+    for (auto &b : batch) {
+        for (auto &x : b) {
+            const std::uint64_t m = (rng() | (std::uint64_t{1} << 52)) &
+                                    ((std::uint64_t{1} << 53) - 1);
+            x = std::ldexp(static_cast<double>(m),
+                           static_cast<int>(rng() % 260) - 130);
+            if (rng() & 1) x = -x;
+        }
+    }
+
+    // What a producer would hand forward.
+    std::vector<std::vector<cbfp::Survey>> surveys(
+        nbatches, std::vector<cbfp::Survey>(cols));
+    for (int b = 0; b < nbatches; ++b) {
+        cbfp::survey_matrix_col_major(batch[b].data(), rows, cols,
+                                      surveys[b].data());
+    }
+
+    cbfp::ColumnBlockMatrix adaptive(rows, cols);
+    cbfp::ColumnBlockMatrix presized(rows, cols, surveys);
+    for (int b = 0; b < nbatches; ++b) {
+        adaptive.add_matrix_col_major(batch[b].data());
+        presized.add_matrix_col_major(batch[b].data());
+    }
+
+    for (std::size_t j = 0; j < cols; ++j) {
+        CHECK(presized.column_exponent(j) == adaptive.column_exponent(j));
+        for (std::size_t i = 0; i < rows; ++i) {
+            // Widths may differ -- the adaptive one grows as it learns -- so
+            // compare the value, sign-extending the narrower.
+            const std::vector<std::uint64_t> a = adaptive.entry_limbs(i, j);
+            const std::vector<std::uint64_t> p = presized.entry_limbs(i, j);
+            const std::size_t n = std::max(a.size(), p.size());
+            const std::uint64_t fa =
+                0 != (a.back() >> 63) ? ~std::uint64_t{0} : 0;
+            const std::uint64_t fp =
+                0 != (p.back() >> 63) ? ~std::uint64_t{0} : 0;
+            for (std::size_t k = 0; k < n; ++k) {
+                CHECK((k < a.size() ? a[k] : fa) == (k < p.size() ? p[k] : fp));
+            }
+        }
+    }
+
+    // Submitting in a different order must land in the same place, since the
+    // reservation is an aggregate and knows nothing about which matrix is
+    // which.
+    {
+        cbfp::ColumnBlockMatrix reversed(rows, cols, surveys);
+        for (int b = nbatches; b-- > 0;) {
+            reversed.add_matrix_col_major(batch[b].data());
+        }
+        for (std::size_t j = 0; j < cols; ++j) {
+            for (std::size_t i = 0; i < rows; ++i) {
+                CHECK(reversed.entry_limbs(i, j) == presized.entry_limbs(i, j));
+            }
+        }
+    }
+
+    // A matrix outside what was declared is detected and reported rather than
+    // quietly producing a wrong sum. The accumulator is not usable afterwards,
+    // which is the point: the contract was broken, not accommodated.
+    {
+        std::vector<std::vector<cbfp::Survey>> one(
+            1, std::vector<cbfp::Survey>(1));
+        std::vector<double> modest(rows, 1.0);
+        cbfp::survey_matrix_col_major(modest.data(), rows, 1, one[0].data());
+
+        // ...then hand it something far outside those extents.
+        std::vector<double> huge(rows, std::ldexp(1.0, 400));
+        cbfp::ColumnBlockMatrix lied(rows, 1, one);
+        bool threw = false;
+        try {
+            lied.add_matrix_col_major(huge.data());
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        CHECK(threw);
+
+        // And a value below the declared exponent, which is the other
+        // direction and the one that silently dropped values before.
+        std::vector<double> tiny(rows, std::ldexp(1.0, -400));
+        cbfp::ColumnBlockMatrix lied2(rows, 1, one);
+        threw = false;
+        try {
+            lied2.add_matrix_col_major(tiny.data());
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+
+    // The count is the one part of the contract that is enforced, because it
+    // costs nothing: the width bound holds for that many matrices, not more.
+    {
+        cbfp::ColumnBlockMatrix full(rows, cols, surveys);
+        for (int b = 0; b < nbatches; ++b)
+            full.add_matrix_col_major(batch[0].data());
+        bool threw = false;
+        try {
+            full.add_matrix_col_major(batch[0].data());
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+}
+
 int
 main()
 {
@@ -1193,6 +1311,7 @@ main()
     test_zero_crossing_preserves_value();
     test_threaded_matches_serial();
     test_public_survey();
+    test_presized_matches_adaptive();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

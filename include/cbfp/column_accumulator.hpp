@@ -21,6 +21,7 @@
 
 #include "cbfp/limb_column.hpp"
 #include "cbfp/limbs.hpp"
+#include "cbfp/survey.hpp"
 
 namespace cbfp {
 
@@ -35,6 +36,19 @@ class ThreadPool;
 class ColumnBlockMatrix {
 public:
     ColumnBlockMatrix(std::size_t rows, std::size_t cols);
+
+    // Pre-sized from the surveys of every matrix that will be accumulated:
+    // `surveys` is indexed by matrix and then by column, so its outer size is
+    // how many will arrive and supplies the headroom term that would otherwise
+    // come from counting them.
+    //
+    // Sized this way the accumulator never rescales, never widens, and never
+    // surveys an incoming batch, because it already knows what is in one. The
+    // metadata is taken on trust: a matrix reaching outside what was declared,
+    // or more matrices than were described, voids the sizing and the sums are
+    // then simply wrong. Only the count is checked, because that costs nothing.
+    ColumnBlockMatrix(std::size_t rows, std::size_t cols,
+                      const std::vector<std::vector<Survey>> &surveys);
 
     // Declared, not implicit: the worker pool is held by unique_ptr to an
     // incomplete type, so the destructor has to be defined where that type is.
@@ -188,6 +202,7 @@ private:
     void accumulate_column(std::size_t j, const double *column, int log2_scale);
 
     void check_index(std::size_t i, std::size_t j) const;
+    void report_contradiction(std::size_t j, unsigned flags) const;
     void rebuild_bases(Column &c);
     void ensure_limb_count(Column &c, std::size_t limbs_needed);
     void fit_column(Column &c);
@@ -204,6 +219,13 @@ private:
     std::size_t rows_;
     std::size_t cols_;
     std::vector<Column> cols_state_;
+
+    // Set when the constructor was given surveys. The accumulation path then
+    // skips the survey, the rescale, the widen and the running width
+    // bookkeeping -- all of which exist to discover what it was already told.
+    bool presized_ = false;
+    std::size_t declared_matrices_ = 0;
+    std::size_t submitted_matrices_ = 0;
 
     // A column of a row-major matrix is strided, and a strided vector gather
     // costs more than the decomposition it feeds. Staging the column here once

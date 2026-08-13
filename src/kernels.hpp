@@ -33,9 +33,19 @@ using SurveyFn = Survey (*)(const double *, std::size_t, long long);
 // scale, so the shift is simply value_exponent - column_exponent.
 // `first_limb` is a starting hint from the survey; a row block that has not
 // reached its own first limb skips the position outright.
+// `flags` reports where the batch contradicted what the column was sized for:
+// 1 a non-finite value, 2 an exponent below the column's, 4 an addend reaching
+// past its width. Bits are OR-ed in, never cleared. A column sized from its own
+// survey cannot raise any of them, so checking it there costs nothing and
+// asserts the survey agreed with the accumulate; a column sized from metadata
+// supplied by a producer is where they earn their keep.
 using AccumulateFn = void (*)(std::uint64_t *const *, std::size_t,
                               const double *, std::size_t, std::int32_t,
-                              std::size_t);
+                              std::size_t, unsigned *);
+
+inline constexpr unsigned kBadNonFinite = 1;
+inline constexpr unsigned kBadExponent = 2;
+inline constexpr unsigned kBadWidth = 4;
 
 Survey
 survey_column_scalar(const double *values, std::size_t rows,
@@ -44,7 +54,8 @@ survey_column_scalar(const double *values, std::size_t rows,
 void
 accumulate_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
                   const double *values, std::size_t rows,
-                  std::int32_t column_exponent, std::size_t first_limb);
+                  std::int32_t column_exponent, std::size_t first_limb,
+                  unsigned *flags);
 
 #if defined(CBFP_HAVE_AVX512)
 Survey
@@ -54,7 +65,8 @@ survey_column_avx512(const double *values, std::size_t rows,
 void
 accumulate_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
                   const double *values, std::size_t rows,
-                  std::int32_t column_exponent, std::size_t first_limb);
+                  std::int32_t column_exponent, std::size_t first_limb,
+                  unsigned *flags);
 #endif
 
 // Chosen once, on first use, from the running CPU's capabilities.

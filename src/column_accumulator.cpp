@@ -142,6 +142,69 @@ ColumnBlockMatrix::threads() const
     return static_cast<unsigned>(column_buffers_.size());
 }
 
+ColumnBlockMatrix::ColumnBlockMatrix(
+    std::size_t rows, std::size_t cols,
+    const std::vector<std::vector<Survey>> &surveys)
+    : ColumnBlockMatrix(rows, cols)
+{
+    if (surveys.empty()) {
+        throw std::invalid_argument(
+            "cbfp: pre-sizing needs the surveys of at least one matrix");
+    }
+    for (const auto &one : surveys) {
+        if (one.size() != cols_) {
+            throw std::invalid_argument(
+                "cbfp: each survey must have one entry per column");
+        }
+    }
+
+    // One reservation per column: the minimum of the minima for the exponent,
+    // the maximum of the maxima for the top, and the count from the outer
+    // size. Reducing to an aggregate is what makes submission order
+    // irrelevant -- any matrix inside these extents fits the reservation, so
+    // the accumulator never needs to know which one it is being handed.
+    const std::size_t headroom = ceil_log2(surveys.size() + 1) + 1;
+    for (std::size_t j = 0; j < cols_; ++j) {
+        bool any = false;
+        long long low = 0, high = 0;
+        for (const auto &one : surveys) {
+            if (!one[j].any) continue;
+            if (!any) {
+                low = one[j].min_exponent;
+                high = one[j].max_top;
+                any = true;
+            } else {
+                low = std::min(low, one[j].min_exponent);
+                high = std::max(high, one[j].max_top);
+            }
+        }
+        if (!any) continue;
+        reserve_column(j, static_cast<int>(low),
+                       static_cast<std::size_t>(high - low) + headroom);
+    }
+
+    presized_ = true;
+    declared_matrices_ = surveys.size();
+}
+
+// A batch reached outside what its column was sized for. With surveys supplied
+// by a producer that means the metadata was wrong; with surveys computed here
+// it means the survey and the accumulate disagree, which is a bug. Either way
+// the sums are already wrong, so this reports rather than recovers.
+void
+ColumnBlockMatrix::report_contradiction(std::size_t j, unsigned flags) const
+{
+    std::ostringstream os;
+    os << "cbfp: column " << j << " received values it was not sized for:";
+    if (0 != (flags & kernels::kBadNonFinite)) os << " a non-finite value;";
+    if (0 != (flags & kernels::kBadExponent)) {
+        os << " an exponent below the column's;";
+    }
+    if (0 != (flags & kernels::kBadWidth)) os << " an addend past its width;";
+    os << " the accumulator is no longer consistent";
+    throw std::runtime_error(os.str());
+}
+
 void
 ColumnBlockMatrix::check_index(std::size_t i, std::size_t j) const
 {
@@ -334,6 +397,11 @@ ColumnBlockMatrix::accumulate_columns(const double *b, std::size_t column_step,
                                       std::size_t row_step, int log2_scale)
 {
     if (0 == rows_ || 0 == cols_) return;
+    if (presized_ && ++submitted_matrices_ > declared_matrices_) {
+        throw std::runtime_error(
+            "cbfp: more matrices accumulated than were described to the "
+            "constructor; the width bound holds for that many and no more");
+    }
 
     const unsigned n = threads();
     if (1 == n || cols_ < 2) {
@@ -375,6 +443,18 @@ ColumnBlockMatrix::accumulate_column(std::size_t j, const double *column,
     // Once the column has a scale, a lower bound on the incoming exponents is
     // enough to rule out a rescale, and the survey can skip the significand.
     Column &c = cols_state_[j];
+    if (presized_) {
+        // Nothing to learn: the extents were supplied, so no rescale or widen
+        // can be due and the survey would only confirm what is already known.
+        // first_limb is 0 because the column exponent is the aggregate
+        // minimum, so every addend starts at or above limb 0.
+        unsigned flags = 0;
+        kernels::accumulate()(
+            c.bases.data(), c.limbs.size(), column, rows_,
+            static_cast<std::int32_t>(c.exponent - log2_scale), 0, &flags);
+        if (0 != flags) report_contradiction(j, flags);
+        return;
+    }
     // A column with no scale yet takes whatever the survey returns as its
     // exponent, so there the exact value is always required -- a floor nothing
     // can clear.
@@ -407,10 +487,15 @@ ColumnBlockMatrix::accumulate_column(std::size_t j, const double *column,
     // Second pass fuses decomposition into the add, so no decomposed form is
     // ever written to memory. Folding the scale into the column exponent keeps
     // the kernel free of it.
+    unsigned flags = 0;
     kernels::accumulate()(
         c.bases.data(), c.limbs.size(), column, rows_,
         static_cast<std::int32_t>(c.exponent - log2_scale),
-        static_cast<std::size_t>(min_exponent - c.exponent) / kLimbBits);
+        static_cast<std::size_t>(min_exponent - c.exponent) / kLimbBits,
+        &flags);
+    // Sized from its own survey, this column cannot contradict itself; the
+    // check is free and asserts the survey and the accumulate agree.
+    if (0 != flags) report_contradiction(j, flags);
 }
 
 void

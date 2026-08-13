@@ -151,16 +151,30 @@ accumulate_one(std::uint64_t *const *limbs, std::size_t nlimbs, std::size_t row,
 void
 accumulate_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
                   const double *values, std::size_t rows,
-                  std::int32_t column_exponent, std::size_t first_limb)
+                  std::int32_t column_exponent, std::size_t first_limb,
+                  unsigned *flags)
 {
     (void)first_limb;  // the scalar path starts from each row's own limb
+    unsigned bad = 0;
     for (std::size_t i = 0; i < rows; ++i) {
         const Split s = split(values[i]);
+        if (s.nonfinite) bad |= kBadNonFinite;
         if (0 == s.mantissa) continue;
+        const long long shift =
+            s.exponent - static_cast<long long>(column_exponent);
+        if (shift < 0) {
+            bad |= kBadExponent;
+            continue;
+        }
+        const std::size_t off = static_cast<std::size_t>(shift) / 64;
+        if (off >= nlimbs) {
+            bad |= kBadWidth;
+            continue;
+        }
         accumulate_one(limbs, nlimbs, i, s.mantissa,
-                       static_cast<std::size_t>(s.exponent - column_exponent),
-                       s.negative);
+                       static_cast<std::size_t>(shift), s.negative);
     }
+    *flags |= bad;
 }
 
 void

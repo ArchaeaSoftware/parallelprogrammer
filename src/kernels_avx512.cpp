@@ -234,8 +234,15 @@ struct Addend8 {
 void
 accumulate_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
                   const double *values, std::size_t rows,
-                  std::int32_t column_exponent, std::size_t first_limb)
+                  std::int32_t column_exponent, std::size_t first_limb,
+                  unsigned *flags)
 {
+    // Where the batch contradicted what the column was sized for. Each is one
+    // compare on a value prepare already has in a register, and the results
+    // stay in mask registers until the end.
+    __mmask8 m_bad_nonfinite = 0, m_bad_low = 0, m_bad_high = 0;
+    const __m512i v_zero = _mm512_setzero_si512();
+    const __m512i v_nlimbs = _mm512_set1_epi64(static_cast<long long>(nlimbs));
     const __m512i kOne = _mm512_set1_epi64(1);
     const __m512i kOnes = _mm512_set1_epi64(-1);
     const __m512i k63 = _mm512_set1_epi64(63);
@@ -252,7 +259,10 @@ accumulate_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
         // Dead lanes get shift 0 so their limb offset cannot go negative.
         const __m512i v_shift =
             _mm512_maskz_sub_epi64(q.m_live, s.v_exponent, kColExp);
+        m_bad_nonfinite |= s.m_nonfinite & m_k;
+        m_bad_low |= _mm512_cmplt_epi64_mask(v_shift, v_zero) & q.m_live;
         q.v_off = _mm512_srli_epi64(v_shift, 6);
+        m_bad_high |= _mm512_cmpge_epu64_mask(q.v_off, v_nlimbs) & q.m_live;
         const __m512i v_bit = _mm512_and_si512(v_shift, k63);
         // The 53-bit mantissa lands in at most two limbs. srlv by 64 yields 0,
         // which is exactly what the v_bit == 0 case wants.
@@ -326,6 +336,10 @@ accumulate_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
         const __mmask8 m_k = tail_mask(row, rows);
         apply(prepare(row, load_column_tail(values, row, m_k), m_k));
     }
+
+    *flags |= (0 != m_bad_nonfinite ? kBadNonFinite : 0u) |
+              (0 != m_bad_low ? kBadExponent : 0u) |
+              (0 != m_bad_high ? kBadWidth : 0u);
 }
 
 }  // namespace kernels
