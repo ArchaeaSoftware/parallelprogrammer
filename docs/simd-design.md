@@ -469,25 +469,67 @@ Two escapes were measured and both are closed:
   `cudaDeviceSynchronize` does not merely warn on CUDA 12.9, it does not
   compile. A kernel cannot launch a child to grow a column and wait for it.
 
-### The host-pointer pipeline
+### The host-input path: read in place, do not copy
 
-Staging into pinned memory, then starting the transfer, leaves a window to
-survey that same buffer on the host while the DMA is in flight — 32.8 us of
-staging and 31.4 us of survey inside a 79.6 us transfer, so the survey is free.
-Pinning is not optional for this: `cudaMemcpyAsync` from pageable memory
-returns only after 3.92 ms of a 3.96 ms transfer, leaving no window at all,
-while pinned returns in 0.01 ms of 2.51 and is 58% faster besides.
+Input always arrives from host memory, and is read exactly once — the survey
+runs on the host, so the device never needs a second look at it. That single
+fact is what licenses the whole design: the kernel reads the host buffer
+directly over PCIe as it works, rather than a transfer copying it to device
+memory first and the kernel reading it from there.
 
-Copy and compute then go on separate streams, so batch N+1's transfer runs on
-the copy engine while batch N is still accumulating; on one stream they
-serialize and the copy engine idles for half of every batch. Together:
-1.477 -> ~3.1 Gelem/s at 4096x64, where the path is now bound by PCIe rather
-than by scheduling.
+Measured at 65536x64 from a pinned host buffer, copying 33.6 MB and then
+reading it from device memory takes 1768 us; reading it in place takes 1257.
+The transfer alone costs 1258, so the accumulator arithmetic hides entirely
+behind the bus instead of queueing after it.
+
+| | 4096x64 | 16384x64 | 65536x64 |
+| --- | --- | --- | --- |
+| staged into pinned, copied, read from device | 2.94 | 2.70 | 1.48 |
+| read in place from mapped host memory | **3.11** | **3.26** | **3.23** |
+
+3.2 Gelem/s is 25.8 GB/s of doubles against the 26.7 this link achieves, so
+the path sits at 97% of PCIe — and flat, where the copying version fell off as
+batches outgrew whatever was hiding the copy. **PCIe is therefore the floor for
+this path.** Eight bytes an element have to cross it, so no kernel change can
+beat ~3.3 Gelem/s while the input starts on the host. If that assumption ever
+breaks it will be through GPUDirect from a network adapter, not through a
+faster staging path.
+
+Ordinary host memory still works and is staged through a mapped buffer, which
+is why the middle column above improves least: that host copy then becomes the
+limit. `allocate_input` hands back memory the device can read directly, and
+`add_matrix_col_major` recognises it and skips staging.
+
+The pinning measurement that justified the earlier design still stands and
+still matters, because the staged path uses it: `cudaMemcpyAsync` from pageable
+memory returns only after 3.92 ms of a 3.96 ms transfer, leaving no window to
+survey in, while pinned returns in 0.01 ms of 2.51 and is 58% faster besides.
 
 Validation stays fail-fast and costs nothing. The host survey finishes before
 the accumulate is launched, so a batch that does not fit is rejected without
 having touched the accumulator — which a device-side survey can only promise
 by draining the pipeline to ask.
+
+**Design intent: ping-pong buffers.** Reading in place means the kernel is
+still streaming a buffer after the call returns, so a caller that refills that
+buffer for the next batch is writing into memory the device is reading. The
+only tool available today is `synchronize()`, which drains and gives back the
+serialisation the design just removed. The measured 3.2 Gelem/s therefore
+holds for a benchmark that reuses one buffer without rewriting it, and *not*
+for a real producer.
+
+The fix is for the container to hand the caller its buffers rather than take
+them: two or more mapped slots, `acquire` blocking only until the device has
+finished reading the one it returns, so the host fills slot B while the device
+streams slot A. The machinery for this already exists — the staged path has
+per-slot `ev_done` events and an `in_flight` flag, and does exactly this
+internally. What is missing is that the `device_readable` fast path returns
+early without recording the event, so a caller-supplied buffer has no
+lifecycle at all.
+
+Note this is a correctness requirement, not a throughput one. The bus is
+already saturated; ping-pong is what lets a real workload sustain that instead
+of alternating between saturation and a drain.
 
 ### The grid rule: cap the whole grid, not its x extent
 
@@ -600,48 +642,83 @@ for padding the caller's column: with the mask out of the loop there is
 essentially nothing left to buy, and a zero-padding contract on
 `add_matrix_col_major` would fail silently on the last column.
 
+### Threading across columns
+
+`set_threads(n)` partitions columns across workers. Columns are independent in
+storage and each is touched by exactly one worker, so the hot path takes no
+locks and results are bit-identical to a serial run — same exponent, same
+width, same limbs, asserted at 2, 4 and 8 threads and clean under
+ThreadSanitizer, which is the check that matters and which ASan and UBSan do
+not make.
+
+The only state the columns shared was the staging buffer the row-major path
+gathers each strided column through; that is now one per worker.
+
+Workers are parked between calls rather than created per call. Spawning per
+batch measured 2.73 Gelem/s at 4096x64 against 4.64 for a pool, because a
+batch is only about a hundred microseconds and thread creation is a real
+fraction of that.
+
+## What limits each target
+
+Both are now bound by moving bytes rather than by arithmetic, but at different
+points, which is the whole shape of the comparison.
+
+| | 4096x64 | 16384x64 | 65536x64 |
+| --- | --- | --- | --- |
+| CPU, 1 thread | 0.80 | 0.77 | 0.67 |
+| CPU, 8 threads | **4.31** | **4.65** | 1.11 |
+| GPU, host input | 3.11 | 3.26 | **3.23** |
+| GPU, input already resident | 4.40 | 6.07 | 6.65 |
+
+**The CPU is issue-bound while its working set fits in cache, and scales
+almost linearly there** — 2.32 IPC at a 1% miss rate, 6.0x over eight cores.
+At 65536x64 the input alone is 33.6 MB against 32 MiB of L3 and eight cores
+queue on DRAM at about 58 GB/s of the 83 available, so threading buys 1.7x
+instead of 6.
+
+**The GPU is bandwidth-bound everywhere.** With input resident the kernel
+moves about 48 bytes an element at 330 GB/s, which is 100% of what the card
+streams in a plain copy loop. With input on the host it is PCIe-bound at 97%.
+
+So the crossover is cache capacity, not compute: below it the CPU wins, above
+it the GPU does, and the ratio at the top is just the bandwidth ratio.
+
 ## Remaining work, in order
 
-The first two items of the previous list -- the column-at-a-time bulk path and
-the limb-major layout with SIMD kernels -- have landed, along with the whole
-CUDA path. What is left:
+Widening, rescaling, `reserve_for` and threading have all landed since the
+last revision of this list.
 
-1. **Statistics from the accumulate, and a device `reserve_for`.** Per "Design
-   intent" above. The container cannot presently be used without a CPU
-   accumulator to size it from: `reserve_like` needs one that has already seen
-   the data, and `reserve_column` needs the caller to know the bounds. The CPU
-   has `reserve_for`, which sizes every column from one representative batch;
-   the device has no equivalent, though the survey kernel that would implement
-   it is already written and validated.
-2. ~~**Device-side widening and rescaling.**~~ Both have landed. A column that
-   outgrows its reservation appends limb arrays and sign-fills them; one that
-   needs a lower exponent has every entry shifted left in place. In place is
-   safe because each thread owns a row, so the ordering is within a thread:
-   walking limb positions downward, position `k` reads `k-word` and
-   `k-word-1`, both at or below `k`, and when `word == 0` the read of `k`
-   precedes its own write. `reserve_for` is now an optimization on the device
-   exactly as on the CPU.
-3. **Carry-save at radix 52 on the CPU.** The largest measured win outstanding:
-   deleting the carry chain outright is worth 25-36% at 1-4 limbs and 45-52% at
-   eight with divergent exponents. The bound is generous -- at radix 52 a
-   block's offsets span ~23% further, and that range drives the AVX-512 loop's
-   trip count -- so expect less. De-risk as prescribed above: instantiate both
+1. **Ping-pong input buffers**, per "The host-input path" above. A correctness
+   gap rather than an optimization: a caller cannot currently know when it is
+   safe to refill a buffer the device is reading.
+2. **Multi-batch accumulation, on the CPU.** Folding K batches into one
+   accumulator read-modify-write takes traffic from ~40 bytes an element to
+   8 + 32/K. Measured on the GPU as an upper bound — 8.25 to 27.2 Gelem/s at
+   K=8, with implied bandwidth flat at ~330 GB/s throughout, which is what
+   proves the kernel bandwidth-bound. The lever belongs on the **CPU**, whose
+   65536x64 case is DRAM-bound at 1.11 Gelem/s; on the GPU's host-input path
+   the bus carries the input regardless, so batching cannot reduce what
+   crosses it.
+3. **Carry-save at radix 52 on the CPU.** The largest measured win for the
+   cache-resident sizes, where the CPU is issue-bound and every instruction
+   removed is time removed: deleting the carry chain outright is worth 25-36%
+   at 1-4 limbs and 45-52% at eight with divergent exponents. Expect less --
+   at radix 52 a block's offsets span ~23% further, and that range drives the
+   AVX-512 loop's trip count. De-risk as prescribed above: instantiate both
    radices and assert bit-identical `to_exact_decimal` over the corpus.
-4. **Threading across columns.** Columns are independent in storage, but
-   `add_matrix` stages each through one shared buffer, so the accumulator is
-   not reentrant. Less work than intrinsics and composes with them.
+4. **The device path's 19.9 us fixed cost.** Only affects input that is
+   already resident, and only small batches -- 79% of a 1024-row batch, 3% of
+   a 65536-row one. The survey's verdict has to come back before the
+   accumulate may launch, which drains the pipeline; surveying batch N+1
+   while batch N accumulates would hide it, since the two do not depend on
+   each other.
 
-Smaller, known, unmeasured: `reserve_column` issues a `cudaMemsetAsync` per
-limb position, which the driver implements as a kernel -- `cols * nlimbs` of
-them, one-time at reserve rather than per batch, but thousands for a wide
-matrix.
-
-A 16-wide AVX-512 `decompose` prototype exists and verifies against the scalar
-version on ~2M inputs (specials, random bit patterns including subnormals and
-non-finite, random finite values across exponents -1080..1020). It runs at
-0.275 ns/elem versus 0.689 for the scalar bit-twiddle, so ~2.5x. The bulk path
-that would consume 16-wide output now exists, so this is once again worth
-picking up.
+Smaller, known: `reserve_column` issues a `cudaMemsetAsync` per limb position,
+`cols * nlimbs` of them, one-time at reserve rather than per batch. And
+measured occupancy could relax the derived width bound where cancellation has
+kept a column small, which is worth under a limb in the ordinary case and is
+the lowest-value item here.
 
 ## Measurement caveats
 
@@ -691,16 +768,28 @@ resting on it as unsettled.
 
 ## Current baseline
 
-4096x64, 32 batches, after the `decompose` change:
+Ryzen 7 7700X (8 cores, 32 MiB L3, AVX-512 double-pumped) and an RTX 3060
+(12 GB, 192-bit, 328.8 GB/s measured in a copy loop, 26.7 GB/s over PCIe).
+Gelem/s, exact accumulations per second, mixed signs.
 
-| case | ns/elem | column width |
-| --- | --- | --- |
-| narrow (1 binade) | 8.8 | 192 bits |
-| wide (120 binades) | 10.6 | 512 bits |
-| wide, pre-reserved | 10.2 | 512 bits |
-| rescale every batch | 30.5 | 2048 bits |
-| widen every batch | 10.9 | 1024 bits |
+| | 4096x64 | 16384x64 | 65536x64 |
+| --- | --- | --- | --- |
+| CPU, 1 thread | 0.80 | 0.77 | 0.67 |
+| CPU, 8 threads | 4.31 | 4.65 | 1.11 |
+| GPU, host input | 3.11 | 3.26 | 3.23 |
+| GPU, input resident | 4.40 | 6.07 | 6.65 |
 
-Marginal cost of an extra limb is ~0.42 ns (~2 cycles), so at 3 limbs the limb
-arithmetic is only ~10% of runtime. That is why the per-element overhead in
-step 1 comes before the SIMD work in step 2.
+The CPU reaches 1.22 Gelem/s single-threaded on one-limb columns, which is the
+narrowest case and the one the pre-threading figure of 1.122 was measured on.
+
+Per-element costs behind those numbers, single-threaded CPU:
+
+| case | ns/elem |
+| --- | --- |
+| 1-limb columns | 0.82 |
+| 2-limb columns | 1.27 |
+| 8 limbs, exponents spread 400 binades | 5.2 |
+
+and on the device, 19.88 us fixed per batch plus 0.1456 ns/elem marginal,
+the marginal rate being 6.87 Gelem/s or 330 GB/s — the card's full streaming
+bandwidth.
