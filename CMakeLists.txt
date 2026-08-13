@@ -37,6 +37,25 @@ target_compile_options(cbfp PRIVATE -Wall -Wextra)
 
 enable_testing()
 
+# CUDA is optional and lives in its own target: the device path is a separate
+# container with device-resident storage, not a third kernel behind the CPU
+# dispatch, so nothing in libcbfp depends on it.
+include(CheckLanguage)
+check_language(CUDA)
+if(CMAKE_CUDA_COMPILER)
+  enable_language(CUDA)
+  set(CMAKE_CUDA_STANDARD 17)
+  set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+  add_library(cbfp_cuda src/cuda_accumulator.cu)
+  set_target_properties(cbfp_cuda PROPERTIES CUDA_ARCHITECTURES "70;80;86")
+  target_link_libraries(cbfp_cuda PUBLIC cbfp)
+
+  add_executable(test_cuda tests/test_cuda.cu)
+  set_target_properties(test_cuda PROPERTIES CUDA_ARCHITECTURES "70;80;86")
+  target_link_libraries(test_cuda PRIVATE cbfp_cuda)
+  add_test(NAME cbfp_cuda COMMAND test_cuda)
+endif()
+
 add_executable(test_cbfp tests/test_cbfp.cpp)
 target_link_libraries(test_cbfp PRIVATE cbfp)
 target_compile_options(test_cbfp PRIVATE -Wall -Wextra)

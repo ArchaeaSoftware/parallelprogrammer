@@ -368,11 +368,33 @@ single test binary.
 
 - Dynamic growth mid-kernel is impractical. `reserve_for` already exists as the
   pre-sizing escape hatch and is what a GPU path should require.
-- Many small `cudaMalloc`s are expensive, which pushes against one allocation
-  per limb position. The append-without-touching property still argues for it;
-  a pool or arena is the likely compromise.
-- The skew concern maps to partition camping rather than L1 set conflicts, but
-  the medicine is the same: avoid power-of-two strides between limb arrays.
+- Many small `cudaMalloc`s are expensive, which pushed against one allocation
+  per limb position. **Resolved: the stream-ordered pool is the compromise.**
+  `cudaMallocAsync` makes per-limb-position allocation affordable, so the
+  device keeps the append-without-touching property rather than packing a
+  column into one strided arena. A first cut did use a single arena per column
+  with limb `k` at `base + k*pitch`, which is smaller and simpler to address
+  but makes widening copy the whole column — surrendering the one structural
+  win limb-major exists for.
+
+  The extra indirection this costs the inner loop — a `limb_t* const*` load per
+  limb position instead of a multiply-add — measured as nothing: 4.394 against
+  4.402 Gelem/s at 4096x64, and every other shape within 2% with no systematic
+  direction. A warp's threads all work different rows of the *same* limb
+  column, so the load is a broadcast of one value, and the whole pointer array
+  is `nlimbs * 8` bytes — 128 for a 16-limb column — hence L1-resident for the
+  life of the kernel.
+- **The skew does not carry over, and the device path deliberately omits it.**
+  An earlier draft assumed the concern maps to partition camping and that the
+  medicine was the same. It does not: the CPU needs the skew because eight
+  lanes touch `nlimbs` arrays at the same row offset in succession and collide
+  in an 8-way L1 set. A warp instead reads 32 consecutive rows of *one* limb
+  column as a single coalesced transaction, and visits limb positions
+  sequentially within a thread, so there is no equivalent collision — and
+  Ampere hashes physical addresses across channels precisely so software need
+  not. What the device does need is 256-byte alignment for coalescing, which
+  the allocator gives for free and which a mis-sized skew would break. This was
+  a decision not to add unmeasured complexity, not a measurement.
 - Coalescing is fine either way: thread `i` handling row `i` reads `limbs[k][i]`
   across a warp as 32 consecutive words — 256 bytes at 64-bit storage, 128 at
   32-bit. Both are fully coalesced with no wasted bytes, which is part of why

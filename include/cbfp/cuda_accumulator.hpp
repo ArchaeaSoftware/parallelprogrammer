@@ -1,0 +1,121 @@
+// Device-resident sibling of ColumnBlockMatrix.
+//
+// This is deliberately not a third kernel variant behind the CPU's dispatch.
+// Swapping a CPU kernel leaves the memory and the object identical, so that is
+// a true backend swap; CUDA's limb arrays live in device memory, and putting
+// them behind the same function pointer would disguise host/device transfers
+// as ordinary calls. What the two implementations share is the *algorithm* --
+// when to rescale, when to widen, how the exponent moves -- not the memory.
+// See docs/simd-design.md.
+//
+// Pre-sizing is mandatory here, where it is only an optimization on the CPU.
+// Growing a column mid-kernel would mean reallocating device memory from
+// inside a launch, so a column's exponent and width are fixed before any
+// accumulation touches it, and values that would not fit are an error rather
+// than a silent rescale.
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+#include "cbfp/limbs.hpp"
+
+namespace cbfp {
+
+class ColumnBlockMatrix;
+
+// True if a CUDA device is present and usable. Everything below throws
+// std::runtime_error if it is not.
+bool cuda_available();
+
+class CudaColumnBlockMatrix {
+public:
+    CudaColumnBlockMatrix(std::size_t rows, std::size_t cols);
+    ~CudaColumnBlockMatrix();
+
+    CudaColumnBlockMatrix(const CudaColumnBlockMatrix&) = delete;
+    CudaColumnBlockMatrix& operator=(const CudaColumnBlockMatrix&) = delete;
+
+    std::size_t rows() const { return rows_; }
+
+    std::size_t cols() const { return cols_; }
+
+    // --- pre-sizing --------------------------------------------------------
+
+    // Fix column j's scale and width, and allocate its limb arrays. `exponent`
+    // is the lowest bit weight that will be needed and `bits` the total width.
+    // May be called once per column, before anything is accumulated into it.
+    void reserve_column(std::size_t j, int exponent, std::size_t bits);
+
+    // Take every column's scale and width from a CPU accumulator that has
+    // already seen the data. This is the natural way to drive the device path
+    // and what makes the two directly comparable: given the same exponent and
+    // width, both must hold bit-identical limbs.
+    void reserve_like(const ColumnBlockMatrix& cpu);
+
+    // --- accumulation ------------------------------------------------------
+
+    // A += B, where B is column-major on the host: column j begins at
+    // b + j*col_stride and its rows are contiguous (0 means tightly packed).
+    // Throws std::domain_error on inf/NaN, and std::runtime_error if a column
+    // was reserved too narrow or at too high an exponent for these values.
+    void add_matrix_col_major(const double* b, std::size_t col_stride = 0);
+
+    // The same, for input already resident in device memory.
+    void add_matrix_col_major_device(const double* b,
+                                     std::size_t col_stride = 0);
+
+    // --- readback ----------------------------------------------------------
+
+    int column_exponent(std::size_t j) const;
+
+    std::size_t column_limbs(std::size_t j) const;
+
+    // Entry (i, j)'s stored two's complement limbs, copied back from the
+    // device. The counterpart of ColumnBlockMatrix::entry_limbs.
+    std::vector<limbs::limb_t> entry_limbs(std::size_t i, std::size_t j) const;
+
+    // Column j's limb arrays in bulk: out[k*rows() + i] is entry i's k-th
+    // limb. One copy per limb position rather than one per entry, which is
+    // what makes a whole-matrix comparison practical.
+    std::vector<limbs::limb_t> download_column(std::size_t j) const;
+
+    std::size_t memory_bytes() const;
+
+private:
+    struct Column {
+        int exponent = 0;
+        bool reserved = false;
+        std::size_t nlimbs = 0;
+        // One device allocation per limb position, mirroring the CPU's
+        // vector<LimbColumn>. Widening is then an append: the existing
+        // allocations are not touched at all.
+        std::vector<limbs::limb_t*> bases;
+        limbs::limb_t** dev_bases = nullptr;  // the same array, device-side
+    };
+
+    void check_index(std::size_t i, std::size_t j) const;
+    void accumulate_device(const double* b, std::size_t col_stride);
+    void sync_descriptors();
+
+    std::size_t rows_;
+    std::size_t cols_;
+
+    // Deliberately no skew between limb columns, unlike the CPU. The CPU needs
+    // it because eight lanes touch nlimbs arrays at the same row offset in
+    // succession and collide in an 8-way L1 set. A warp instead reads 32
+    // consecutive rows of one limb column as a single coalesced transaction,
+    // and visits limb positions sequentially within a thread, so there is no
+    // equivalent collision -- and the allocator's 256-byte alignment, which is
+    // what coalescing actually needs, comes for free.
+    std::vector<Column> cols_state_;
+
+    void* descriptors_ = nullptr;  // device array of per-column descriptors
+    bool descriptors_stale_ = true;
+    void* scan_out_ = nullptr;  // device scan results, one per column
+    double* values_ = nullptr;  // device staging for an uploaded matrix
+    std::size_t values_words_ = 0;
+};
+
+}  // namespace cbfp
