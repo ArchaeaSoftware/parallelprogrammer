@@ -62,7 +62,30 @@ inline void cuda_check(cudaError_t status, const char* call, const char* file,
 #define cuda(call) cuda_check(cuda##call, "cuda" #call, __FILE__, __LINE__)
 
 constexpr unsigned kBlock = 256;  // a power of two; the reductions rely on it
-constexpr unsigned kMaxGridX = 1024;
+
+// Blocks in the whole grid, not just its x extent. Both kernels grid-stride,
+// so any smaller grid stays correct -- it only gives each thread more rows.
+//
+// Capping the total is what makes the survey's reduction pay for itself. Left
+// uncapped, 65536 rows over 64 columns launches 16384 blocks, each folding a
+// single value per thread and then paying a full eight-step shared-memory tree
+// to do it. Capped, each thread folds sixteen rows serially first and the tree
+// is amortised across them: measured 195 -> 113 us at that shape, and
+// 746 -> 423 us at 262144 rows.
+constexpr unsigned kMaxBlocks = 1024;
+
+// A grid that covers `rows` a thread at a time, then shrunk to kMaxBlocks.
+// Subsumes the old separate cap on the x extent: with one column the two are
+// the same bound.
+dim3 launch_grid(std::size_t rows, std::size_t cols)
+{
+    unsigned gx = static_cast<unsigned>((rows + kBlock - 1) / kBlock);
+    const unsigned per_column =
+        0 == cols ? kMaxBlocks : static_cast<unsigned>(kMaxBlocks / cols);
+    if (gx > per_column) gx = per_column;
+    if (0 == gx) gx = 1;
+    return dim3(gx, static_cast<unsigned>(cols));
+}
 
 // What the first pass learns about a column, mirroring kernels::Survey. Reduced
 // across the whole column with atomics, so every field is an atomic-friendly
@@ -547,11 +570,7 @@ void CudaColumnBlockMatrix::accumulate_device(const double* b,
     }
     sync_descriptors();
 
-    const unsigned gx =
-        static_cast<unsigned>((rows_ + kBlock - 1) / kBlock > kMaxGridX
-                                  ? kMaxGridX
-                                  : (rows_ + kBlock - 1) / kBlock);
-    const dim3 grid(0 == gx ? 1 : gx, static_cast<unsigned>(cols_));
+    const dim3 grid = launch_grid(rows_, cols_);
 
     // First pass: learn each column's exponent range, and reject anything the
     // reservation cannot hold. The decisions the CPU makes by rescaling and
@@ -612,11 +631,7 @@ void CudaColumnBlockMatrix::launch_accumulate(const double* b,
     }
     sync_descriptors();
 
-    const unsigned gx =
-        static_cast<unsigned>((rows_ + kBlock - 1) / kBlock > kMaxGridX
-                                  ? kMaxGridX
-                                  : (rows_ + kBlock - 1) / kBlock);
-    const dim3 grid(0 == gx ? 1 : gx, static_cast<unsigned>(cols_));
+    const dim3 grid = launch_grid(rows_, cols_);
 
     accumulate_kernel<64><<<grid, kBlock, 0, st_compute_>>>(
         static_cast<const ColumnDesc*>(descriptors_), b, rows_, col_stride);
