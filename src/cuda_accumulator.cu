@@ -34,9 +34,13 @@ inline void cuda_check(cudaError_t status, const char* call, const char* file,
 // extra parenthesis: cuda(Malloc(&p, bytes)) is cudaMalloc(&p, bytes). The
 // macro pastes the prefix back on for the call and stringizes it for the
 // diagnostic, so a failure names the function rather than an opaque
-// expression. A launch is checked with cuda(GetLastError()) and a blocking
-// wait with cuda(DeviceSynchronize()), which paste the same way, so there is
-// one mechanism rather than three.
+// expression. A blocking wait is cuda(StreamSynchronize(s)), which pastes the
+// same way, so there is one mechanism rather than several.
+//
+// Launches are not separately checked. Every launch parameter here is either a
+// compile-time constant or bounded at construction, so cudaGetLastError after
+// one has nothing to report; a genuine fault is sticky and surfaces at the
+// next stream synchronize, which readback does implicitly.
 //
 // Being function-like, the macro only fires on `cuda` followed by `(`, which
 // leaves every ordinary cudaXxx token -- cudaError_t, cudaSuccess, the
@@ -283,6 +287,17 @@ CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t rows, std::size_t cols)
 {
     if (!cuda_available()) {
         throw std::runtime_error("cbfp: no usable CUDA device");
+    }
+    // Columns become the grid's y dimension, the only launch parameter here
+    // that is not fixed at compile time or clamped. Bounding it once, by name,
+    // is what lets every launch below go unchecked.
+    int max_grid_y = 0;
+    cuda(DeviceGetAttribute(&max_grid_y, cudaDevAttrMaxGridDimY, 0));
+    if (cols_ > static_cast<std::size_t>(max_grid_y)) {
+        std::ostringstream os;
+        os << "cbfp: " << cols_ << " columns exceeds this device's grid y "
+           << "limit of " << max_grid_y;
+        throw std::runtime_error(os.str());
     }
     cudaStream_t cs, ks;
     cuda(StreamCreate(&cs));
@@ -552,7 +567,6 @@ void CudaColumnBlockMatrix::accumulate_device(const double* b,
     scan_kernel<<<grid, kBlock, 0,
                   static_cast<cudaStream_t>(compute_stream_)>>>(
         b, rows_, col_stride, static_cast<DeviceScan*>(scan_out_));
-    cuda(GetLastError());
     // This is the drain the host path avoids: with the input already on the
     // device there is nothing to scan on the host, so the verdict has to come
     // back before the accumulate can be allowed to run.
@@ -612,7 +626,6 @@ void CudaColumnBlockMatrix::launch_accumulate(const double* b,
     accumulate_kernel<64>
         <<<grid, kBlock, 0, static_cast<cudaStream_t>(compute_stream_)>>>(
             static_cast<const ColumnDesc*>(descriptors_), b, rows_, col_stride);
-    cuda(GetLastError());
 }
 
 std::vector<limb_t> CudaColumnBlockMatrix::entry_limbs(std::size_t i,
