@@ -3,7 +3,8 @@
 **Status: largely implemented.** The limb-major layout, the skewed aligned
 allocation and the AVX-512 survey and accumulate kernels have all landed, and
 the measurements below are from the real kernels unless a section says
-otherwise. What remains open is the radix (see the table) and threading. This
+otherwise. What remains open is the radix (see the table — the CPU, not the
+GPU, is where it would pay) and threading. This
 header previously read "design, not implemented", which stopped being true at
 `fdc8b75`.
 
@@ -27,19 +28,51 @@ RTX 3060 (sm_86, CUDA 12.9).
 | Bit-manipulation `decompose` | landed (`8565474`) |
 | Flat free-function kernels; runtime dispatch via target attributes | settled |
 | No templates in the public API; radix templated in kernels only | settled |
-| Radix: 52-bit carry-save vs 64-bit canonical | **open** |
+| Radix: 52-bit carry-save vs 64-bit canonical | **open, but on the CPU** |
 | Whether limb arrays get separate allocations on CUDA | open |
 
 Storage width is closed: 32-bit limbs were measured slower than 64-bit on both
 targets, so `uint64_t` is the plan of record everywhere and the limb type does
 not need to be a template parameter.
 
-The **radix** is a separate question and remains open. On the GPU, a 52-bit
-carry-save radix measured 2.8x a 64-bit canonical one by removing carry
-propagation from the inner loop, at the cost of 81% memory density and a
-normalization pass before readback. The equivalent CPU measurement has not been
-run. Until it is, the CPU path stays canonical at radix 64 — which is what the
-code does today, so nothing is blocked.
+The **radix** is a separate question and remains open — but on the opposite
+target from the one this document spent its time on.
+
+An earlier draft had it that carry-save was a GPU win (2.8x, below) and that
+the CPU was simply unmeasured. Bounding it on both targets says the reverse.
+The bound is the cheap version of the experiment: take the real kernel and
+delete the carry chain outright — two limb positions written unconditionally,
+no carry-out test, no break, no dependency between them. That is
+arithmetically wrong and is not an implementation; it is the *shape*
+carry-save would have, so whatever it saves is the most carry-save could ever
+save.
+
+| target | what deleting the carry chain buys |
+| --- | --- |
+| CUDA, 2-limb columns, 4096–65536 rows | −2.4% to −0.3% |
+| CUDA, 8-limb columns, spread 0–400 | −5.2% to +2.8% |
+| AVX-512, 1–4 limbs | **25–36%** |
+| AVX-512, 8 limbs, spread 200–400 | **45–52%** |
+
+**On the GPU the carry chain is free.** Removing it entirely is worth nothing
+outside noise, and the sign is not even consistent. That kernel is bound by
+memory, so the arithmetic hides behind it.
+
+**On the CPU it is a third to a half of the kernel.** AVX-512 runs at ~2.3 IPC
+against a double-pumped 256-bit datapath, so the six extra 512-bit ops a
+carrying limb position costs — the complement, the carry seed, two `cmplt`
+compares, the second add, the `pending` test — are all paid at full price.
+
+Two things the bound does not charge, so the real figure is lower than 52%:
+at radix 52 a block's offsets are `shift/52` rather than `shift/64`, so the
+*range* a block spans grows ~23%, and that range is exactly what drives the
+AVX-512 loop's trip count — it bites hardest in the divergent case where the
+bound looks best. Normalization before readback is not charged either.
+
+So the CPU path stays canonical at radix 64 for now, which is what the code
+does, but the reason has changed: it is no longer "the measurement has not
+been run" but "the measurement says this is where the win is, and collecting
+it means implementing carry-save properly.
 
 ## The layout: limb-major `LimbColumn`
 
@@ -171,6 +204,13 @@ Two results, both against the direction this document previously took:
   usable bits per register and per byte moved (81% density against 50%), while
   2^11 deferred additions is ample for a batch. Normalising every few thousand
   accumulations is cheap amortised.
+
+**This benchmark held the accumulator in registers, and that is what makes it
+misleading.** With no memory traffic the carry chain is the only cost, so
+removing it is the whole game. The real kernel keeps the accumulator in global
+memory, where traffic dominates and the chain is free — measured, and recorded
+under the radix decision above. Treat the table below as a statement about
+register-resident accumulation, not about this workload.
 
 Caveat on the magnitudes: the benchmark adds a full-width value, whereas the
 real kernel adds a 53-bit mantissa landing in two or three limbs with carries
@@ -473,6 +513,13 @@ being caught. Both are worth remembering when re-measuring.
   measured — check the toolkit against the toolkit, and the hardware against
   the hardware.
 
+- Carry-save was recorded as a 2.8x GPU win, from a benchmark holding the
+  accumulator in registers and adding a full-width value. Bounding it against
+  the real kernels says the GPU gains nothing at all — it is bandwidth-bound,
+  so the arithmetic is free — while the CPU, dismissed here as unmeasured,
+  gains 25-52%. The same claim was wrong about the size of the effect *and*
+  about which machine it was on. A microbenchmark that changes where the
+  accumulator lives is not measuring the same question.
 - The skew was claimed at 2.8x from a synthetic carry walk. Re-measured
   against the real kernel it is 5-9%, and only when the column is wide and its
   exponents diverge. The walk was bandwidth-bound; the real kernel is
