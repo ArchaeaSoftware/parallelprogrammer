@@ -1032,6 +1032,78 @@ test_zero_crossing_preserves_value()
 
 }  // namespace
 
+// Threading partitions by column, and columns are independent in storage, so a
+// threaded run must produce not merely the same value but the same bits: the
+// same exponent, the same width, the same limbs. Anything else would mean the
+// partitioning had leaked.
+static void
+test_threaded_matches_serial()
+{
+    const std::size_t rows = 257, cols = 33;
+    std::mt19937_64 rng(90210);
+    const int nbatches = 4;
+    std::vector<std::vector<double>> batch(nbatches,
+                                           std::vector<double>(rows * cols));
+    for (auto &b : batch) {
+        for (auto &x : b) {
+            const std::uint64_t m = (rng() | (std::uint64_t{1} << 52)) &
+                                    ((std::uint64_t{1} << 53) - 1);
+            x = std::ldexp(static_cast<double>(m),
+                           static_cast<int>(rng() % 300) - 150);
+            if (rng() & 1) x = -x;
+        }
+    }
+
+    cbfp::ColumnBlockMatrix serial(rows, cols);
+    for (const auto &b : batch) serial.add_matrix_col_major(b.data());
+
+    for (unsigned n : {2u, 4u, 8u}) {
+        cbfp::ColumnBlockMatrix threaded(rows, cols);
+        threaded.set_threads(n);
+        CHECK(threaded.threads() == n);
+        for (const auto &b : batch) threaded.add_matrix_col_major(b.data());
+
+        std::size_t differing = 0;
+        for (std::size_t j = 0; j < cols; ++j) {
+            if (threaded.column_exponent(j) != serial.column_exponent(j) ||
+                threaded.column_limbs(j) != serial.column_limbs(j)) {
+                ++differing;
+                continue;
+            }
+            for (std::size_t i = 0; i < rows; ++i) {
+                if (threaded.entry_limbs(i, j) != serial.entry_limbs(i, j)) {
+                    ++differing;
+                }
+            }
+        }
+        CHECK(0 == differing);  // bit-identical to the serial run
+    }
+
+    // The row-major path stages each column through a buffer; with threads
+    // that buffer has to be per worker, which is the one piece of state the
+    // columns used to share.
+    {
+        std::vector<double> rowmajor(rows * cols);
+        for (std::size_t i = 0; i < rows; ++i) {
+            for (std::size_t j = 0; j < cols; ++j) {
+                rowmajor[i * cols + j] = batch[0][j * rows + i];
+            }
+        }
+        cbfp::ColumnBlockMatrix one(rows, cols), many(rows, cols);
+        many.set_threads(8);
+        one.add_matrix(rowmajor.data());
+        many.add_matrix(rowmajor.data());
+        std::size_t differing = 0;
+        for (std::size_t j = 0; j < cols; ++j) {
+            for (std::size_t i = 0; i < rows; ++i) {
+                if (one.entry_limbs(i, j) != many.entry_limbs(i, j))
+                    ++differing;
+            }
+        }
+        CHECK(0 == differing);  // per-worker staging, not shared
+    }
+}
+
 int
 main()
 {
@@ -1060,6 +1132,7 @@ main()
     test_order_independent_cancellation();
     test_order_independent_across_entry_points();
     test_zero_crossing_preserves_value();
+    test_threaded_matches_serial();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

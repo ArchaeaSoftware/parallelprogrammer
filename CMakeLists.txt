@@ -33,6 +33,10 @@ endif()
 target_include_directories(cbfp PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
+# The accumulator can spread its columns over worker threads. Standard C++17,
+# but the linker still wants pthreads; PUBLIC so consumers inherit it.
+find_package(Threads REQUIRED)
+target_link_libraries(cbfp PUBLIC Threads::Threads)
 target_compile_options(cbfp PRIVATE -Wall -Wextra)
 
 enable_testing()

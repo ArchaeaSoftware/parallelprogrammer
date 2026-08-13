@@ -15,6 +15,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,14 @@ active_kernel();
 class ColumnBlockMatrix {
 public:
     ColumnBlockMatrix(std::size_t rows, std::size_t cols);
+
+    // Declared, not implicit: the worker pool is held by unique_ptr to an
+    // incomplete type, so the destructor has to be defined where that type is.
+    // The moves are spelled out because declaring a destructor would otherwise
+    // suppress them.
+    ~ColumnBlockMatrix();
+    ColumnBlockMatrix(ColumnBlockMatrix &&) noexcept;
+    ColumnBlockMatrix &operator=(ColumnBlockMatrix &&) noexcept;
 
     std::size_t rows() const { return rows_; }
 
@@ -71,6 +80,20 @@ public:
     void add_column_scaled_pow2(std::size_t j, const double *v, int log2_scale);
 
     void set_zero();
+
+    // --- threading ---------------------------------------------------------
+
+    // Spread accumulation across `n` worker threads, partitioned by column.
+    // Columns are independent in storage, so this needs no locking and gives
+    // bit-identical results -- exact accumulation is order independent, and
+    // each column is touched by exactly one thread besides.
+    //
+    // 1 is the default and runs everything on the calling thread. Threads are
+    // created here and kept, because creating them per call costs more than it
+    // saves on small matrices.
+    void set_threads(unsigned n);
+
+    unsigned threads() const;
 
     // --- readback ----------------------------------------------------------
 
@@ -150,6 +173,13 @@ private:
     void accumulate_columns(const double *b, std::size_t column_step,
                             std::size_t row_step, int log2_scale);
 
+    // The columns in [begin, end) of one such matrix, staged through the
+    // buffer belonging to worker `slot`.
+    void accumulate_column_range(const double *b, std::size_t column_step,
+                                 std::size_t row_step, int log2_scale,
+                                 std::size_t begin, std::size_t end,
+                                 unsigned slot);
+
     // Accumulates one column that is already contiguous.
     void accumulate_column(std::size_t j, const double *column, int log2_scale);
 
@@ -173,8 +203,14 @@ private:
 
     // A column of a row-major matrix is strided, and a strided vector gather
     // costs more than the decomposition it feeds. Staging the column here once
-    // lets both passes read contiguously. Makes add_matrix non-reentrant.
-    std::vector<double> column_buffer_;
+    // lets both passes read contiguously. One buffer per worker, since that
+    // was the only state the columns shared.
+    std::vector<std::vector<double>> column_buffers_;
+
+    // Workers, parked between calls. Defined in the .cpp so this header does
+    // not drag in <thread> and friends.
+    struct Pool;
+    std::unique_ptr<Pool> pool_;
 };
 
 // Decomposes a finite double into an exact odd mantissa and exponent:
