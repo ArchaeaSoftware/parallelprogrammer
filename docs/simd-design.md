@@ -501,10 +501,16 @@ bus-bound, and was measuring the harness. What is timed now is the library:
 for a borrowed buffer, the survey and the kernel; for a staged one, those plus
 the copy the library itself performs.
 
+3.27 Gelem/s is 26.1 GB/s of doubles against the 26.7 this link achieves, so
+**PCIe is the floor for this path**: eight bytes an element must cross it, and
+no kernel change beats ~3.3 Gelem/s while input starts on the host. If that
+ever stops being true it will be through GPUDirect from a network adapter, not
+a faster staging path.
+
 Ordinary host memory still works and is staged through a mapped buffer, which
-is why the middle column above improves least: that host copy then becomes the
-limit. `allocate_input` hands back memory the device can read directly, and
-`add_matrix_col_major` recognises it and skips staging.
+is why the staged row falls off as batches grow: that host copy becomes the
+limit. `acquire_input` lends out a buffer the device can read directly, which
+`add_matrix_col_major` recognises and reads in place.
 
 The pinning measurement that justified the earlier design still stands and
 still matters, because the staged path uses it: `cudaMemcpyAsync` from pageable
@@ -515,6 +521,31 @@ Validation stays fail-fast and costs nothing. The host survey finishes before
 the accumulate is launched, so a batch that does not fit is rejected without
 having touched the accumulator — which a device-side survey can only promise
 by draining the pipeline to ask.
+
+**Why threading that survey buys nothing, stated carefully because the obvious
+summary is wrong.** The survey reads every element of a batch, and looks like
+exposed serial host work now that reading in place has removed the transfer it
+used to hide behind. Threading it changes end-to-end throughput not at all —
+but not because it resists threading:
+
+| survey, ms per batch | 1 thread | 2 | 4 | 8 | kernel streams it in |
+| --- | --- | --- | --- | --- | --- |
+| 4096x64 | 0.055 | 0.031 | 0.029 | 0.055 | 0.079 |
+| 16384x64 | 0.160 | 0.078 | 0.055 | 0.069 | 0.314 |
+| 65536x64 | 0.729 | 0.356 | 0.188 | 0.150 | 1.257 |
+
+It threads well, 4.9x at the largest shape. It is that the single-threaded
+survey already fits inside the kernel at every shape, and two slots in rotation
+put it there: batch N+1 is surveyed while batch N streams. Making hidden work
+faster moves nothing, and end to end it measured flat on this path, +24% on the
+staged path at 16384x64 and -8% at 65536x64.
+
+So the conclusion is conditional. The survey is free *because PCIe is slow*.
+The margin is thinnest at 4096x64 — 0.055 against 0.079 — and a slower host, or
+a column wide enough to need the survey's second pass, could cross it. And if
+input ever reaches the device faster than the bus, the survey becomes the
+critical path and the 4.9x is there to collect. It is absent from the code
+because today it would buy nothing, not because it does not work.
 
 **Ping-pong buffers, and why the alternative was a trap.** Reading in place
 means the kernel is still streaming a buffer after the call that submitted it
