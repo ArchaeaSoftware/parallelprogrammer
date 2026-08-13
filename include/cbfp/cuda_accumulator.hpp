@@ -8,15 +8,15 @@
 // when to rescale, when to widen, how the exponent moves -- not the memory.
 // See docs/simd-design.md.
 //
-// A column's *exponent* is fixed before anything is accumulated into it, and
-// values needing a lower one are an error rather than a silent rescale:
-// lowering it means shifting every entry, which cannot be done from inside a
-// launch. Its *width* is not fixed -- a column that needs more limbs grows
-// between launches, which in a limb-major layout is an allocation and a sign
-// fill with nothing already allocated moved.
+// Both column parameters adapt, as they do on the CPU, but between launches
+// rather than inside one. A column that needs more limbs appends them and
+// sign-fills them, with nothing already allocated moved; a column that needs a
+// lower exponent has every entry shifted left to match. Neither can happen
+// from inside a kernel, so both are driven from the host once the survey has
+// said what the pending batch needs.
 //
-// So reserve_for is an optimization here as it is on the CPU, not a
-// requirement, except in the one direction the device cannot repair.
+// reserve_for is therefore an optimization here exactly as it is on the CPU:
+// results are the same without it, it just avoids the growing and shifting.
 #pragma once
 
 #include <cstddef>
@@ -177,6 +177,7 @@ private:
                               const char *any, std::size_t count);
     void require_fit(std::size_t j, long long min_exponent, long long max_top);
     void grow_column(std::size_t j, std::size_t needed);
+    void rescale_column(std::size_t j, int new_exponent);
     void ensure_slots(std::size_t words);
 
     std::size_t rows_;

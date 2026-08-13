@@ -375,6 +375,112 @@ test_accumulated_bound()
                                " limb mismatches)");
 }
 
+// Compares one entry by value across two containers that may have settled on
+// different exponents and widths: the device holds V * 2^egpu, the CPU
+// V * 2^ecpu, so the CPU's limbs shifted left by the difference must match.
+bool
+same_value(const cbfp::ColumnBlockMatrix &cpu,
+           const cbfp::CudaColumnBlockMatrix &gpu, std::size_t i, std::size_t j)
+{
+    const std::vector<std::uint64_t> h = cpu.entry_limbs(i, j);
+    const std::vector<std::uint64_t> d = gpu.entry_limbs(i, j);
+    const long ecpu = cpu.column_exponent(j);
+    const long egpu = gpu.column_exponent(j);
+    if (egpu > ecpu) return false;  // the device must never end up coarser
+    const unsigned long sh = static_cast<unsigned long>(ecpu - egpu);
+    const bool neg = 0 != (h.back() >> 63);
+
+    const unsigned long word = sh / 64;
+    const unsigned bit = static_cast<unsigned>(sh % 64);
+    for (std::size_t k = 0; k < d.size(); ++k) {
+        const long src = static_cast<long>(k) - static_cast<long>(word);
+        auto at = [&](long q) -> std::uint64_t {
+            if (q < 0) return 0;
+            if (q < static_cast<long>(h.size())) return h[q];
+            return neg ? ~std::uint64_t{0} : 0;
+        };
+        std::uint64_t want;
+        if (src < 0) {
+            want = 0;
+        } else if (0 == bit) {
+            want = at(src);
+        } else {
+            want = (at(src) << bit) | (at(src - 1) >> (64 - bit));
+        }
+        if (want != d[k]) return false;
+    }
+    return true;
+}
+
+// Lowering a column's exponent shifts every entry rather than appending to
+// them, so it is the half that cannot be repaired inside a launch. Done
+// between launches it must still land on exactly the value the CPU holds.
+void
+test_rescale()
+{
+    const std::size_t rows = 131, cols = 4;
+    std::mt19937_64 r(4242);
+
+    // Batches whose ulps descend, so each one forces the exponent lower.
+    const int nbatches = 5;
+    std::vector<std::vector<double>> b(nbatches,
+                                       std::vector<double>(rows * cols));
+    for (int k = 0; k < nbatches; ++k) {
+        for (auto &x : b[k]) {
+            std::uint64_t m = (r() | (std::uint64_t{1} << 52)) &
+                              ((std::uint64_t{1} << 53) - 1);
+            x = std::ldexp(static_cast<double>(m), 40 - 20 * k);
+            if (r() & 1) x = -x;
+        }
+    }
+
+    cbfp::ColumnBlockMatrix cpu(rows, cols);
+    cbfp::CudaColumnBlockMatrix gpu(rows, cols);
+    // Deliberately sized for the first batch only, so every later batch
+    // forces both a rescale and a widen.
+    gpu.reserve_for(b[0].data(), 1);
+
+    for (int k = 0; k < nbatches; ++k) {
+        cpu.add_matrix_col_major(b[k].data());
+        gpu.add_matrix_col_major(b[k].data());
+    }
+
+    std::size_t coarse = 0, wrong = 0;
+    for (std::size_t j = 0; j < cols; ++j) {
+        if (gpu.column_exponent(j) > cpu.column_exponent(j)) ++coarse;
+        for (std::size_t i = 0; i < rows; ++i) {
+            if (!same_value(cpu, gpu, i, j)) ++wrong;
+        }
+    }
+    check(0 == coarse,
+          "rescale reached an exponent at least as low as the CPU");
+    check(0 == wrong, "rescale kept every entry exact (" +
+                          std::to_string(wrong) + " of " +
+                          std::to_string(rows * cols) + " wrong)");
+
+    // A shift that is a whole number of limbs, and one that is not, both
+    // exercise the in-place walk differently.
+    for (unsigned sh : {64u, 3u, 130u}) {
+        cbfp::ColumnBlockMatrix c2(8, 1);
+        cbfp::CudaColumnBlockMatrix g2(8, 1);
+        std::vector<double> hi(8), lo(8);
+        for (std::size_t i = 0; i < 8; ++i) {
+            hi[i] = std::ldexp(1.0 + i, 0);
+            lo[i] = std::ldexp(1.0 + i, -static_cast<int>(sh));
+        }
+        c2.add_matrix_col_major(hi.data());
+        g2.reserve_for(hi.data(), 2);
+        g2.add_matrix_col_major(hi.data());
+        c2.add_matrix_col_major(lo.data());
+        g2.add_matrix_col_major(lo.data());
+        std::size_t bad = 0;
+        for (std::size_t i = 0; i < 8; ++i) {
+            if (!same_value(c2, g2, i, 0)) ++bad;
+        }
+        check(0 == bad, "rescale by " + std::to_string(sh) + " bits is exact");
+    }
+}
+
 void
 test_errors()
 {
@@ -418,7 +524,9 @@ test_errors()
         } catch (const std::runtime_error &) {
             threw = true;
         }
-        check(threw, "an under-reserved exponent is an error");
+        check(!threw, "an under-reserved exponent rescales instead of failing");
+        check(gpu.column_exponent(0) < 0,
+              "and the column exponent came down to fit");
     }
 
     // A width that is too small is no longer an error -- the column grows.
@@ -468,6 +576,7 @@ main()
     test_occupancy();
     test_reserve_for();
     test_accumulated_bound();
+    test_rescale();
     test_errors();
 
     std::printf("%d checks, %d failures\n", checks, failures);

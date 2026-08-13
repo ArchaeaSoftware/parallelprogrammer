@@ -375,6 +375,41 @@ sign_fill_kernel(limb_t *__restrict__ dst, const limb_t *__restrict__ src,
     }
 }
 
+// Shifts every entry of a column left by `shift` bits, in place.
+//
+// In place is safe because each thread owns one row, so the ordering that
+// matters is within a thread rather than across them. Walking limb positions
+// downward, position k reads k-word and k-word-1, both at or below k: strictly
+// below when word >= 1, and when word == 0 the read of k happens before its
+// own write. Nothing a thread still needs has been overwritten.
+//
+// The caller widens first, so every position in [0, nlimbs) already holds a
+// valid sign-extended limb and there is no special case above the old top.
+__global__ void
+shift_left_kernel(limb_t *const *__restrict__ bases, unsigned nlimbs,
+                  std::size_t rows, unsigned shift)
+{
+    const unsigned word = shift / 64;
+    const unsigned bit = shift % 64;
+    const std::size_t step = static_cast<std::size_t>(gridDim.x) * blockDim.x;
+    for (std::size_t i =
+             static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         i < rows; i += step) {
+        for (int k = static_cast<int>(nlimbs) - 1; k >= 0; --k) {
+            const int hi = k - static_cast<int>(word);
+            limb_t v = 0;
+            if (hi >= 0) {
+                v = bases[hi][i];
+                if (0 != bit) {
+                    v <<= bit;
+                    if (hi >= 1) v |= bases[hi - 1][i] >> (64 - bit);
+                }
+            }
+            bases[k][i] = v;
+        }
+    }
+}
+
 std::size_t
 ceil_log2(std::size_t n)
 {
@@ -553,6 +588,37 @@ CudaColumnBlockMatrix::grow_column(std::size_t j, std::size_t needed)
     descriptors_stale_ = true;
 }
 
+// Lowers a column's exponent, shifting every entry left to match. Mirrors
+// ColumnBlockMatrix::rescale: widen enough to hold the shifted value, then
+// shift. Unlike widening this moves every bit in the column, which is why the
+// exponent is the half worth pre-sizing correctly.
+void
+CudaColumnBlockMatrix::rescale_column(std::size_t j, int new_exponent)
+{
+    Column &c = cols_state_[j];
+    if (new_exponent >= c.exponent) return;
+    const unsigned shift = static_cast<unsigned>(
+        static_cast<long long>(c.exponent) - new_exponent);
+
+    const std::size_t widened =
+        c.max_addend_bits + shift + ceil_log2(c.add_count + 1) + 1;
+    const std::size_t ndst =
+        std::max(limbs_for_bits(widened), c.nlimbs + shift / limbs::kLimbBits);
+    grow_column(j, ndst);  // synchronizes, and sign-fills what it appends
+
+    shift_left_kernel<<<launch_grid(rows_, 1), kBlock, 0, st_compute_>>>(
+        c.dev_bases, static_cast<unsigned>(c.nlimbs), rows_, shift);
+
+    c.max_addend_bits += shift;
+    c.exponent = new_exponent;
+    // The exponent lives in the device descriptor, and grow_column only marks
+    // it stale when it actually appends. A rescale that needed no new limbs
+    // would otherwise leave the kernel computing shifts against the old
+    // exponent -- which goes negative, makes `off` enormous, and drops every
+    // value in the batch without a word.
+    descriptors_stale_ = true;
+}
+
 // The derived bound ColumnBlockMatrix::fit_column applies, checked against
 // what the column was actually reserved for. Called once per column per batch,
 // after the survey has established that batch's extent.
@@ -560,14 +626,10 @@ void
 CudaColumnBlockMatrix::require_fit(std::size_t j, long long min_exponent,
                                    long long max_top)
 {
-    Column &c = cols_state_[j];
-    if (min_exponent < c.exponent) {
-        std::ostringstream os;
-        os << "cbfp: column " << j << " was reserved at exponent " << c.exponent
-           << " but these values need " << min_exponent
-           << "; pre-size it with reserve_for or reserve_column";
-        throw std::runtime_error(os.str());
+    if (min_exponent < cols_state_[j].exponent) {
+        rescale_column(j, static_cast<int>(min_exponent));
     }
+    Column &c = cols_state_[j];
     c.max_addend_bits = std::max(
         c.max_addend_bits, static_cast<std::size_t>(max_top - c.exponent));
     ++c.add_count;
