@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <climits>
 #include <cstring>
 #include <limits>
@@ -500,6 +501,37 @@ CudaColumnBlockMatrix::reserve_column(std::size_t j, int exponent,
     descriptors_stale_ = true;
 }
 
+// The derived bound ColumnBlockMatrix::fit_column applies, checked against
+// what the column was actually reserved for. Called once per column per batch,
+// after the survey has established that batch's extent.
+void
+CudaColumnBlockMatrix::require_fit(std::size_t j, long long min_exponent,
+                                   long long max_top)
+{
+    Column &c = cols_state_[j];
+    if (min_exponent < c.exponent) {
+        std::ostringstream os;
+        os << "cbfp: column " << j << " was reserved at exponent " << c.exponent
+           << " but these values need " << min_exponent
+           << "; pre-size it with reserve_for or reserve_column";
+        throw std::runtime_error(os.str());
+    }
+    c.max_addend_bits = std::max(
+        c.max_addend_bits, static_cast<std::size_t>(max_top - c.exponent));
+    ++c.add_count;
+
+    const std::size_t needed =
+        c.max_addend_bits + ceil_log2(c.add_count + 1) + 1;
+    if (needed > c.nlimbs * limbs::kLimbBits) {
+        std::ostringstream os;
+        os << "cbfp: column " << j << " was reserved at "
+           << c.nlimbs * limbs::kLimbBits << " bits, but " << c.add_count
+           << " batches reaching " << c.max_addend_bits << " bits need "
+           << needed << "; reserve_for a larger count";
+        throw std::runtime_error(os.str());
+    }
+}
+
 // Shared tail of both reserve_for entry points: turn per-column exponent
 // extents into reservations. Mirrors ColumnBlockMatrix::reserve_for, with one
 // deliberate difference -- a column with nothing in it is still reserved,
@@ -676,21 +708,7 @@ CudaColumnBlockMatrix::validate_host_survey(const double *packed)
                 "cbfp: cannot accumulate a non-finite value");
         }
         if (!sc.any) continue;
-        if (sc.min_exponent < c.exponent) {
-            std::ostringstream os;
-            os << "cbfp: column " << j << " was reserved at exponent "
-               << c.exponent << " but these values need " << sc.min_exponent
-               << "; pre-size it with reserve_column or reserve_like";
-            throw std::runtime_error(os.str());
-        }
-        const long long width = sc.max_top - c.exponent;
-        if (width > static_cast<long long>(c.nlimbs * limbs::kLimbBits)) {
-            std::ostringstream os;
-            os << "cbfp: column " << j << " was reserved at "
-               << c.nlimbs * limbs::kLimbBits << " bits but these values reach "
-               << width;
-            throw std::runtime_error(os.str());
-        }
+        require_fit(j, sc.min_exponent, sc.max_top);
     }
 }
 
@@ -790,23 +808,7 @@ CudaColumnBlockMatrix::accumulate_device(const double *b,
                 "cbfp: cannot accumulate a non-finite value");
         }
         if (!surveys[j].any) continue;
-        const Column &c = cols_state_[j];
-        if (surveys[j].min_exponent < c.exponent) {
-            std::ostringstream os;
-            os << "cbfp: column " << j << " was reserved at exponent "
-               << c.exponent << " but these values need "
-               << surveys[j].min_exponent
-               << "; pre-size it with reserve_column or reserve_like";
-            throw std::runtime_error(os.str());
-        }
-        const long long width = surveys[j].max_top - c.exponent;
-        if (width > static_cast<long long>(c.nlimbs * limbs::kLimbBits)) {
-            std::ostringstream os;
-            os << "cbfp: column " << j << " was reserved at "
-               << c.nlimbs * limbs::kLimbBits << " bits but these values reach "
-               << width;
-            throw std::runtime_error(os.str());
-        }
+        require_fit(j, surveys[j].min_exponent, surveys[j].max_top);
     }
 
     launch_accumulate(b, col_stride);

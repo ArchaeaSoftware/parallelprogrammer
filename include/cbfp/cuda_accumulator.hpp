@@ -133,6 +133,15 @@ private:
         std::vector<limbs::limb_t *> bases;
         limbs::limb_t **dev_bases = nullptr;  // the same array, device-side
 
+        // The same derived width bound ColumnBlockMatrix keeps, and for the
+        // same reason: no entry can exceed count * 2^max_addend_bits, so that
+        // bound plus a sign bit says how wide the column must be. Checking
+        // only the incoming addend is not enough -- an addend does not grow
+        // with the batch count but the sum does, and a column accumulated past
+        // what it was reserved for wraps silently.
+        std::size_t max_addend_bits = 0;
+        std::size_t add_count = 0;
+
         // Highest limb position the accumulate has ever disturbed, reported
         // by the kernel rather than derived. -1 until something is added.
         // Monotonic: cancellation can shrink the value but not this, so it
@@ -162,6 +171,7 @@ private:
     void harvest_occupancy();
     void reserve_from_extents(const long long *low, const long long *high,
                               const char *any, std::size_t count);
+    void require_fit(std::size_t j, long long min_exponent, long long max_top);
     void ensure_slots(std::size_t words);
 
     std::size_t rows_;

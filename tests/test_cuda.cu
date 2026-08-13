@@ -330,6 +330,49 @@ test_reserve_for()
     }
 }
 
+// An addend does not grow with the batch count but the accumulated sum does,
+// so checking only the incoming values against the reservation is not enough.
+// Before this was caught, twenty batches of 2^60 into a one-limb column wrapped
+// modulo 2^64 and reported nothing.
+void
+test_accumulated_bound()
+{
+    const std::size_t rows = 8, cols = 1;
+    std::vector<double> b(rows * cols);
+    for (std::size_t i = 0; i < rows; ++i) b[i] = std::ldexp(1.0, 60);
+
+    cbfp::ColumnBlockMatrix cpu(rows, cols);
+    cbfp::CudaColumnBlockMatrix gpu(rows, cols);
+    gpu.reserve_column(0, 0, 64);  // one limb, exponent 0
+
+    int applied = 0;
+    bool threw = false;
+    try {
+        for (int k = 0; k < 20; ++k) {
+            gpu.add_matrix_col_major(b.data());
+            cpu.add_matrix_col_major(b.data());
+            ++applied;
+        }
+    } catch (const std::runtime_error &) {
+        threw = true;
+    }
+    check(threw, "accumulating past the reserved count is rejected");
+    check(applied < 20, "rejected before the sum could wrap");
+
+    // Everything applied before the rejection must still be exact: the check
+    // has to refuse the batch, not corrupt what came before it.
+    std::size_t mismatches = 0;
+    for (std::size_t i = 0; i < rows; ++i) {
+        const std::vector<std::uint64_t> host = cpu.entry_limbs(i, 0);
+        const std::vector<std::uint64_t> dev = gpu.entry_limbs(i, 0);
+        // cpu picks exponent 60 and gpu was forced to 0, so compare values
+        const std::uint64_t want = static_cast<std::uint64_t>(host[0])
+                                   << 60;  // V * 2^60
+        if (want != dev[0]) ++mismatches;
+    }
+    check(0 == mismatches, "the batches that were applied are still exact");
+}
+
 void
 test_errors()
 {
@@ -419,6 +462,7 @@ main()
     test_edge_values();
     test_occupancy();
     test_reserve_for();
+    test_accumulated_bound();
     test_errors();
 
     std::printf("%d checks, %d failures\n", checks, failures);
