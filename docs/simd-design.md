@@ -484,16 +484,32 @@ behind the bus instead of queueing after it.
 
 | | 4096x64 | 16384x64 | 65536x64 |
 | --- | --- | --- | --- |
-| staged into pinned, copied, read from device | 2.94 | 2.70 | 1.48 |
-| read in place from mapped host memory | **3.11** | **3.26** | **3.23** |
+| staged, buffer refilled each batch | 2.74 | 2.36 | 1.46 |
+| borrowed, refilled each batch | 2.29 | 2.24 | 1.55 |
 
-3.2 Gelem/s is 25.8 GB/s of doubles against the 26.7 this link achieves, so
-the path sits at 97% of PCIe — and flat, where the copying version fell off as
-batches outgrew whatever was hiding the copy. **PCIe is therefore the floor for
-this path.** Eight bytes an element have to cross it, so no kernel change can
-beat ~3.3 Gelem/s while the input starts on the host. If that assumption ever
-breaks it will be through GPUDirect from a network adapter, not through a
-faster staging path.
+**These are not bus-bound, and an earlier revision of this section said they
+were.** That claim came from a benchmark that filled one mapped buffer once and
+resubmitted it, so the producer cost nothing; it read 3.11 / 3.26 / 3.23 and
+was quoted as 97% of PCIe. It was also, not coincidentally, the unsafe reuse
+pattern -- the same benchmark shape that corrupts 63% of entries once the
+buffer is actually refilled.
+
+Measured against the producer that a real caller has to run:
+
+| | 33.6 MB batch |
+| --- | --- |
+| host writing the batch, any buffer kind | 1.6-1.7 ms (~20 GB/s) |
+| host surveying it | ~0.5 ms |
+| PCIe streaming it | 1.26 ms |
+
+Writing a batch costs more than transferring it. The path is therefore bound by
+the host producing and surveying the data, not by the bus, and reading in place
+buys only the staging copy back -- which is real but is one of three comparable
+costs rather than the whole of it. Zero-copy measures at 0.84-1.06x against
+staging, not 2.2x.
+
+What it does buy unconditionally is the device-side input buffer: 33.6 MB at
+this shape, returned to the accumulator, which is what wants it.
 
 Ordinary host memory still works and is staged through a mapped buffer, which
 is why the middle column above improves least: that host copy then becomes the
@@ -510,26 +526,18 @@ the accumulate is launched, so a batch that does not fit is rejected without
 having touched the accumulator — which a device-side survey can only promise
 by draining the pipeline to ask.
 
-**Design intent: ping-pong buffers.** Reading in place means the kernel is
-still streaming a buffer after the call returns, so a caller that refills that
-buffer for the next batch is writing into memory the device is reading. The
-only tool available today is `synchronize()`, which drains and gives back the
-serialisation the design just removed. The measured 3.2 Gelem/s therefore
-holds for a benchmark that reuses one buffer without rewriting it, and *not*
-for a real producer.
+**Ping-pong buffers, and why the alternative was a trap.** Reading in place
+means the kernel is still streaming a buffer after the call that submitted it
+returned. The first version chose the in-place path by probing the pointer's
+memory type, which gave one function two lifetime contracts: ordinary memory
+was copied and could be reused at once, mapped memory could not, and nothing
+said so. Switching allocator for speed silently corrupted 63% of entries.
 
-The fix is for the container to hand the caller its buffers rather than take
-them: two or more mapped slots, `acquire` blocking only until the device has
-finished reading the one it returns, so the host fills slot B while the device
-streams slot A. The machinery for this already exists — the staged path has
-per-slot `ev_done` events and an `in_flight` flag, and does exactly this
-internally. What is missing is that the `device_readable` fast path returns
-early without recording the event, so a caller-supplied buffer has no
-lifecycle at all.
-
-Note this is a correctness requirement, not a throughput one. The bus is
-already saturated; ping-pong is what lets a real workload sustain that instead
-of alternating between saturation and a drain.
+`acquire_input` lends out a buffer the accumulator owns and blocks only until
+the device has finished with the one being handed back, so the host fills one
+while the device streams the other. Ownership rather than memory type decides
+whether a buffer is read in place, so a pointer the caller passes is theirs
+again on return whatever kind of memory it is.
 
 ### The grid rule: cap the whole grid, not its x extent
 
