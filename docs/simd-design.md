@@ -671,6 +671,46 @@ Reported through the mapped channel the occupancy figure already uses and
 checked at the next readback, that turns a silent wrong answer into a loud one
 without putting a second read on the critical path.
 
+**The interface.** The metadata arrives as a vector of per-column surveys per
+matrix — `vector<vector<Survey>>`, outer indexed by matrix and inner by column
+— given to the constructor. The outer size *is* the count, so nothing separate
+has to be passed to derive the headroom, and preallocation is offered only when
+both are available. A caller who does not know how many matrices are coming, or
+what is in them, gets exactly the code paths that exist today: survey the
+pending batch, grow the limb columns from running statistics.
+
+The constructor reduces it to one reservation per column — the minimum of the
+minima for the exponent, the maximum of the maxima for the top, and the count
+from the outer size — which is `reserve_for`'s arithmetic with the extents
+supplied rather than inferred. Note what that reduction implies: the
+accumulator never needs to know *which* matrix it is being handed, because any
+matrix inside the aggregate extents fits the reservation. Submitting them in
+any order therefore falls out rather than having to be arranged, which suits a
+structure whose exactness already makes accumulation order-independent.
+
+Three consequences beyond the survey disappearing:
+
+- **No rescaling and no widening, ever.** Both exist to react to a batch that
+  did not fit; nothing will not fit. That is the expensive half of adaptive
+  sizing and the half that has to happen between launches.
+- **No running bookkeeping.** `require_fit` maintains `max_addend_bits` and
+  `add_count` solely to derive a width that is now given, so the whole path
+  shortens rather than merely speeding up.
+- **The device path stops asking the host anything mid-batch**, which is what
+  its 19.9 us of fixed cost is: a survey kernel and the round-trip carrying its
+  verdict. That is 79% of a 1024-row batch, so small matrices gain most.
+
+Two constraints the interface has to state rather than imply. Submissions must
+not exceed the declared count, because the width bound holds for that many and
+no more; fewer is fine, and merely over-allocated. And *any order* does not
+mean *concurrently* — two batches read-modify-write the same limbs of the same
+rows, so they still serialize, whatever order they arrive in.
+
+`Survey` presently lives in `src/kernels.hpp` and would have to become public
+vocabulary, shared between whoever produces a matrix and both accumulators.
+That argues for a small header of its own rather than exposing the kernel
+surface around it.
+
 **If the producer cannot supply it**, the fallback is to keep the survey on the
 device but stop asking the host about it. Survey and accumulate launch back to
 back, and the accumulate reads the verdict first: if the batch fits — the
