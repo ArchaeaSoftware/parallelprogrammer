@@ -176,6 +176,81 @@ test_edge_values()
                 });
 }
 
+// The accumulate reports, per column, the highest limb position holding
+// anything but sign extension. The fit test that will consume it needs one
+// property above all: nothing significant may live above the reported figure,
+// or a column would be judged to fit when it does not.
+void
+test_occupancy()
+{
+    // A borrow out of a negative addend writes all-ones every limb to the top
+    // of a column. Counting written limbs rather than significant ones would
+    // report the full width for any column that has ever gone negative --
+    // which is exactly the cancellation-heavy case the figure exists for.
+    {
+        const std::size_t rows = 64, cols = 3;
+        std::vector<double> v(rows * cols, 0.0);
+        for (std::size_t i = 0; i < rows; ++i) {
+            v[0 * rows + i] = 1.0;
+            v[1 * rows + i] = (7 == i) ? -1.0 : 1.0;
+            v[2 * rows + i] = -1.0;
+        }
+        cbfp::CudaColumnBlockMatrix gpu(rows, cols);
+        for (std::size_t j = 0; j < cols; ++j) gpu.reserve_column(j, 0, 256);
+        gpu.add_matrix_col_major(v.data());
+        check(0 == gpu.column_occupancy(0), "occupancy: all positive, limb 0");
+        check(0 == gpu.column_occupancy(1),
+              "occupancy: one negative does not saturate to nlimbs-1");
+        check(-1 == gpu.column_occupancy(2),
+              "occupancy: -1 in every limb is pure sign, so nothing is "
+              "significant");
+    }
+
+    // Nothing significant above the reported occupancy, over random shapes,
+    // spreads and batch counts -- including columns wide enough for a
+    // high-water mark set by one batch to be missed by a later one.
+    {
+        std::size_t checked = 0, violations = 0;
+        for (int trial = 0; trial < 12; ++trial) {
+            const std::size_t rows = 97, cols = 5;
+            const int spread = static_cast<int>(rng() % 400);
+            const int nbatches = 1 + static_cast<int>(rng() % 4);
+            std::vector<std::vector<double>> b(
+                nbatches, std::vector<double>(rows * cols));
+            for (auto& one : b) {
+                for (auto& x : one) x = random_value(spread);
+            }
+            cbfp::ColumnBlockMatrix cpu(rows, cols);
+            for (auto& one : b) cpu.add_matrix_col_major(one.data());
+            cbfp::CudaColumnBlockMatrix gpu(rows, cols);
+            gpu.reserve_like(cpu);
+            for (auto& one : b) gpu.add_matrix_col_major(one.data());
+
+            for (std::size_t j = 0; j < cols; ++j) {
+                const int occ = gpu.column_occupancy(j);
+                const std::size_t n = cpu.column_limbs(j);
+                for (std::size_t i = 0; i < rows; ++i) {
+                    const std::vector<std::uint64_t> l = cpu.entry_limbs(i, j);
+                    const std::uint64_t fill =
+                        0 != (l[n - 1] >> 63) ? ~std::uint64_t{0} : 0;
+                    int top = -1;
+                    for (int k = static_cast<int>(n) - 1; k >= 0; --k) {
+                        if (l[k] != fill) {
+                            top = k;
+                            break;
+                        }
+                    }
+                    ++checked;
+                    if (top > occ) ++violations;
+                }
+            }
+        }
+        check(0 == violations, "occupancy bounds every significant limb (" +
+                                   std::to_string(checked) + " entries, " +
+                                   std::to_string(violations) + " above)");
+    }
+}
+
 void
 test_errors()
 {
@@ -263,6 +338,7 @@ main()
 
     test_shapes();
     test_edge_values();
+    test_occupancy();
     test_errors();
 
     std::printf("%d checks, %d failures\n", checks, failures);

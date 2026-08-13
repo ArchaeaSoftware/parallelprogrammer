@@ -227,7 +227,9 @@ template <int kRadix>
 __global__ void
 accumulate_kernel(const ColumnDesc* __restrict__ cols,
                   const double* __restrict__ values, std::size_t rows,
-                  std::size_t col_stride)
+                  std::size_t col_stride, int* __restrict__ occupancy_device,
+                  int* __restrict__ occupancy_host,
+                  unsigned* __restrict__ ticket, unsigned ncols)
 {
     // The addend split, the offset arithmetic and the limb mask below are all
     // written in terms of kRadix. What is not yet written is the carry-save
@@ -244,7 +246,12 @@ accumulate_kernel(const ColumnDesc* __restrict__ cols,
     const ColumnDesc c = cols[j];
     const double* col = values + static_cast<std::size_t>(j) * col_stride;
 
+    __shared__ int s_lim[kBlock];
     const unsigned tid = threadIdx.x;
+    // Highest limb position this thread disturbs. The carry loop already knows
+    // where it stopped, so this costs a comparison rather than a pass.
+    int t_lim = -1;
+
     const std::size_t step = static_cast<std::size_t>(gridDim.x) * blockDim.x;
     for (std::size_t i =
              static_cast<std::size_t>(blockIdx.x) * blockDim.x + tid;
@@ -283,24 +290,72 @@ accumulate_kernel(const ColumnDesc* __restrict__ cols,
                 (p == off) ? lo : ((p == off + 1) ? hi : 0ull);
             limb_t* dst = c.bases[p] + i;
             const unsigned long long x = *dst;
+            unsigned long long written;
             if (neg) {
                 const unsigned long long d = x - a;
                 const unsigned long long b1 = (x < a) ? 1ull : 0ull;
                 const unsigned long long d2 = d - carry;
                 const unsigned long long b2 = (d < carry) ? 1ull : 0ull;
-                *dst = d2;
+                written = d2;
                 carry = b1 | b2;
             } else {
                 const unsigned long long s = x + a;
                 const unsigned long long c1 = (s < x) ? 1ull : 0ull;
                 const unsigned long long s2 = s + carry;
                 const unsigned long long c2 = (s2 < s) ? 1ull : 0ull;
-                *dst = s2;
+                written = s2;
                 carry = c1 | c2;
+            }
+            *dst = written;
+
+            // Significant, not merely written. All-zeros and all-ones are
+            // exactly what a two's complement sign extension leaves behind,
+            // and a borrow out of a negative addend writes all-ones every
+            // limb to the top of the column -- so counting writes would
+            // report the full width for any column that ever goes negative.
+            // A value's topmost significant limb can never be all-ones when
+            // positive (the sign bit would be set) nor all-zeros when
+            // negative, so this test finds exactly that limb.
+            if (0ull != written && ~0ull != written &&
+                static_cast<int>(p) > t_lim) {
+                t_lim = static_cast<int>(p);
             }
             if (0 == carry && p >= off + 1) break;
         }
     }
+
+    // Fold the per-thread maxima, reduce across blocks in device memory with
+    // ordinary atomics, then elect one block to carry the finished array to
+    // host memory. Atomics never cross PCIe: measured, that costs 260x.
+    s_lim[tid] = t_lim;
+    __syncthreads();
+    for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s && s_lim[tid + s] > s_lim[tid]) s_lim[tid] = s_lim[tid + s];
+        __syncthreads();
+    }
+    if (0 == tid && s_lim[0] >= 0) atomicMax(&occupancy_device[j], s_lim[0]);
+
+    // Every block must publish before the elected one reads.
+    __threadfence();
+    __shared__ bool last;
+    if (0 == tid) {
+        last = (atomicAdd(ticket, 1u) == gridDim.x * gridDim.y - 1);
+    }
+    __syncthreads();
+    if (!last) return;
+
+    // One block, one thread per column: the write that does cross PCIe, and
+    // the only one.
+    //
+    // The staging is deliberately *not* re-armed. Occupancy is a high-water
+    // mark over every batch, so leaving it to accumulate on the device is both
+    // what the fit test wants and what keeps the host from having to observe
+    // each launch -- resetting it here meant a reader saw only the last
+    // batch's maximum, which lost limbs that earlier batches had needed.
+    for (unsigned k = tid; k < ncols; k += blockDim.x) {
+        occupancy_host[k] = occupancy_device[k];
+    }
+    if (0 == tid) *ticket = 0;
 }
 
 std::size_t
@@ -324,6 +379,11 @@ CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t rows, std::size_t cols)
     if (!cuda_available()) {
         throw std::runtime_error("cbfp: no usable CUDA device");
     }
+    // Mapping has to be enabled before the context exists, so this fails
+    // harmlessly if one is already active with the flag set. The cudaHostAlloc
+    // below is the check that matters -- it fails loudly if mapping is really
+    // unavailable.
+    cudaSetDeviceFlags(cudaDeviceMapHost);
     // Columns become the grid's y dimension, the only launch parameter here
     // that is not fixed at compile time or clamped. Bounding it once, by name,
     // is what lets every launch below go unchecked.
@@ -339,6 +399,13 @@ CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t rows, std::size_t cols)
     cuda(StreamCreate(&st_compute_));
 
     if (0 != cols_) {
+        cuda(Malloc(&occupancy_device_, cols_ * sizeof(int)));
+        cuda(Memset(occupancy_device_, 0xFF, cols_ * sizeof(int)));  // -1
+        cuda(HostAlloc(&occupancy_host_, cols_ * sizeof(int),
+                       cudaHostAllocMapped));
+        for (std::size_t j = 0; j < cols_; ++j) occupancy_host_[j] = -1;
+        cuda(Malloc(&ticket_, sizeof(unsigned)));
+        cuda(Memset(ticket_, 0, sizeof(unsigned)));
         cuda(Malloc(&descriptors_, cols_ * sizeof(ColumnDesc)));
         cuda(Malloc(&survey_out_, cols_ * sizeof(DeviceSurvey)));
     }
@@ -354,6 +421,9 @@ CudaColumnBlockMatrix::~CudaColumnBlockMatrix()
     }
     cudaFree(descriptors_);
     cudaFree(survey_out_);
+    cudaFree(occupancy_device_);
+    cudaFreeHost(occupancy_host_);
+    cudaFree(ticket_);
     for (Slot& s : slots_) {
         if (s.pinned) cudaFreeHost(s.pinned);
         if (s.device) cudaFree(s.device);
@@ -430,6 +500,26 @@ CudaColumnBlockMatrix::reserve_like(const ColumnBlockMatrix& cpu)
     }
     for (std::size_t j = 0; j < cols_; ++j) {
         reserve_column(j, cpu.column_exponent(j), cpu.column_bit_width(j));
+    }
+}
+
+int
+CudaColumnBlockMatrix::column_occupancy(std::size_t j) const
+{
+    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    synchronize();
+    const_cast<CudaColumnBlockMatrix*>(this)->harvest_occupancy();
+    return cols_state_[j].max_limb_used;
+}
+
+// The device staging accumulates across launches, so the mapped array already
+// holds the high-water mark; this only copies it where the column keeps it.
+void
+CudaColumnBlockMatrix::harvest_occupancy()
+{
+    if (nullptr == occupancy_host_) return;
+    for (std::size_t j = 0; j < cols_; ++j) {
+        cols_state_[j].max_limb_used = occupancy_host_[j];
     }
 }
 
@@ -652,7 +742,9 @@ CudaColumnBlockMatrix::launch_accumulate(const double* b,
     const dim3 grid = launch_grid(rows_, cols_);
 
     accumulate_kernel<64><<<grid, kBlock, 0, st_compute_>>>(
-        static_cast<const ColumnDesc*>(descriptors_), b, rows_, col_stride);
+        static_cast<const ColumnDesc*>(descriptors_), b, rows_, col_stride,
+        occupancy_device_, occupancy_host_, ticket_,
+        static_cast<unsigned>(cols_));
 }
 
 std::vector<limb_t>

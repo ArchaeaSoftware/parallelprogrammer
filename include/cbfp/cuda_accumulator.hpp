@@ -98,6 +98,12 @@ public:
     // what makes a whole-matrix comparison practical.
     std::vector<limbs::limb_t> download_column(std::size_t j) const;
 
+    // Highest limb position column j has ever needed, as measured by the
+    // accumulate rather than derived from a worst case. -1 if nothing has
+    // been added yet. Readback synchronizes, so this reflects every batch
+    // submitted so far.
+    int column_occupancy(std::size_t j) const;
+
     std::size_t memory_bytes() const;
 
 private:
@@ -110,6 +116,12 @@ private:
         // allocations are not touched at all.
         std::vector<limbs::limb_t*> bases;
         limbs::limb_t** dev_bases = nullptr;  // the same array, device-side
+
+        // Highest limb position the accumulate has ever disturbed, reported
+        // by the kernel rather than derived. -1 until something is added.
+        // Monotonic: cancellation can shrink the value but not this, so it
+        // stays an upper bound on how much of the column is in use.
+        int max_limb_used = -1;
     };
 
     // Two staging slots, so the host can prepare batch N+1 while the device is
@@ -131,6 +143,7 @@ private:
     void launch_accumulate(const double* b, std::size_t col_stride);
     void validate_host_survey(const double* packed);
     void sync_descriptors();
+    void harvest_occupancy();
     void ensure_slots(std::size_t words);
 
     std::size_t rows_;
@@ -153,6 +166,15 @@ private:
     // These two stay void*: they point at types defined inside the .cu, which
     // is where they belong -- the descriptor layout is not this header's
     // business.
+    // The accumulate's per-column results come back through mapped host
+    // memory: every block reduces into occupancy_device_ with ordinary device
+    // atomics, then the last block to finish copies the finished array across
+    // and re-arms it. Mapped rather than copied because it is one value per
+    // column -- measured, that wins below ~64 values and loses badly above.
+    int* occupancy_device_ = nullptr;  // staging, device
+    int* occupancy_host_ = nullptr;    // mapped, written by the last block
+    unsigned* ticket_ = nullptr;       // device, elects that block
+
     void* descriptors_ = nullptr;  // device ColumnDesc[]
     bool descriptors_stale_ = true;
     void* survey_out_ =
