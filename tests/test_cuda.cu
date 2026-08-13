@@ -9,6 +9,8 @@
 // implementations that are wrong in the same way at readback.
 //
 // Same assertion-runner style as tests/test_cbfp.cpp, no dependencies.
+#include <cuda_runtime.h>
+
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -251,6 +253,83 @@ test_occupancy()
     }
 }
 
+// reserve_for is what lets the device container stand on its own. Its contract
+// is the CPU's: pre-size from a representative batch about to be accumulated
+// `count` times, and accumulation then never needs to grow a column.
+void
+test_reserve_for()
+{
+    const std::size_t rows = 251, cols = 7;
+    const int nbatches = 5;
+    std::vector<double> batch(rows * cols);
+    for (auto &x : batch) x = random_value(120);
+    // one column entirely zero: it must still be reserved, since an
+    // unreserved column is an error on the device rather than something that
+    // can grow on first use
+    for (std::size_t i = 0; i < rows; ++i) batch[3 * rows + i] = 0.0;
+
+    cbfp::ColumnBlockMatrix cpu(rows, cols);
+    cbfp::CudaColumnBlockMatrix gpu(rows, cols);
+    gpu.reserve_for(batch.data(), nbatches);
+
+    bool threw = false;
+    try {
+        for (int b = 0; b < nbatches; ++b) {
+            cpu.add_matrix_col_major(batch.data());
+            gpu.add_matrix_col_major(batch.data());
+        }
+    } catch (const std::exception &) {
+        threw = true;
+    }
+    check(!threw, "reserve_for holds for the count it was given");
+
+    std::size_t mismatches = 0;
+    for (std::size_t j = 0; j < cols; ++j) {
+        const std::vector<std::uint64_t> dev = gpu.download_column(j);
+        for (std::size_t i = 0; i < rows; ++i) {
+            const std::vector<std::uint64_t> host = cpu.entry_limbs(i, j);
+            // The two may hold different widths -- the CPU grows as it goes,
+            // reserve_for sizes up front -- so compare the value, not the
+            // representation, over the limbs they share plus sign extension.
+            const std::size_t n = gpu.column_limbs(j);
+            if (gpu.column_exponent(j) != cpu.column_exponent(j)) {
+                ++mismatches;
+                break;
+            }
+            for (std::size_t k = 0; k < n; ++k) {
+                const std::uint64_t h =
+                    k < host.size()
+                        ? host[k]
+                        : (0 != (host.back() >> 63) ? ~std::uint64_t{0} : 0);
+                if (h != dev[k * rows + i]) ++mismatches;
+            }
+        }
+    }
+    check(0 == mismatches,
+          "reserve_for gives bit-identical values to the CPU (" +
+              std::to_string(mismatches) + " limb mismatches)");
+
+    // Surveying the same batch on the device must reserve identically.
+    {
+        double *dev = nullptr;
+        cudaMalloc(&dev, batch.size() * sizeof(double));
+        cudaMemcpy(dev, batch.data(), batch.size() * sizeof(double),
+                   cudaMemcpyHostToDevice);
+        cbfp::CudaColumnBlockMatrix g2(rows, cols);
+        g2.reserve_for_device(dev, nbatches);
+        std::size_t differ = 0;
+        for (std::size_t j = 0; j < cols; ++j) {
+            if (g2.column_exponent(j) != gpu.column_exponent(j) ||
+                g2.column_limbs(j) != gpu.column_limbs(j)) {
+                ++differ;
+            }
+        }
+        check(0 == differ,
+              "reserve_for_device reserves the same as reserve_for");
+        cudaFree(dev);
+    }
+}
+
 void
 test_errors()
 {
@@ -339,6 +418,7 @@ main()
     test_shapes();
     test_edge_values();
     test_occupancy();
+    test_reserve_for();
     test_errors();
 
     std::printf("%d checks, %d failures\n", checks, failures);

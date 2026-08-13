@@ -64,6 +64,22 @@ public:
     // width, both must hold bit-identical limbs.
     void reserve_like(const ColumnBlockMatrix &cpu);
 
+    // Pre-size every column from a representative batch about to be
+    // accumulated `count` times, the same arithmetic as
+    // ColumnBlockMatrix::reserve_for. This is what lets the device container
+    // stand on its own: reserve_like needs a CPU accumulator that has already
+    // seen the data, which means doing the whole computation twice.
+    //
+    // `b` is column-major on the host. A column that is entirely zero still
+    // gets a minimal reservation, because an unreserved column is an error
+    // here rather than something that can grow on first use.
+    void reserve_for(const double *b, std::size_t count = 1,
+                     std::size_t col_stride = 0);
+
+    // The same, for a representative batch already resident on the device.
+    void reserve_for_device(const double *b, std::size_t count = 1,
+                            std::size_t col_stride = 0);
+
     // --- accumulation ------------------------------------------------------
 
     // A += B, where B is column-major on the host: column j begins at
@@ -144,6 +160,8 @@ private:
     void validate_host_survey(const double *packed);
     void sync_descriptors();
     void harvest_occupancy();
+    void reserve_from_extents(const long long *low, const long long *high,
+                              const char *any, std::size_t count);
     void ensure_slots(std::size_t words);
 
     std::size_t rows_;

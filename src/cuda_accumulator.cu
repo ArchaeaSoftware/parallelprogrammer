@@ -2,6 +2,7 @@
 
 #include <climits>
 #include <cstring>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <type_traits>
@@ -359,6 +360,14 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols,
 }
 
 std::size_t
+ceil_log2(std::size_t n)
+{
+    std::size_t b = 0;
+    while ((std::size_t{1} << b) < n) ++b;
+    return b;
+}
+
+std::size_t
 limbs_for_bits(std::size_t bits)
 {
     return (bits + limbs::kLimbBits - 1) / limbs::kLimbBits;
@@ -489,6 +498,85 @@ CudaColumnBlockMatrix::reserve_column(std::size_t j, int exponent,
                     cudaMemcpyHostToDevice));
     }
     descriptors_stale_ = true;
+}
+
+// Shared tail of both reserve_for entry points: turn per-column exponent
+// extents into reservations. Mirrors ColumnBlockMatrix::reserve_for, with one
+// deliberate difference -- a column with nothing in it is still reserved,
+// since the device cannot grow one later.
+void
+CudaColumnBlockMatrix::reserve_from_extents(const long long *low,
+                                            const long long *high,
+                                            const char *any, std::size_t count)
+{
+    const std::size_t headroom =
+        ceil_log2(count < 1 ? 1 : count) + 1;  // +1 for the sign
+    for (std::size_t j = 0; j < cols_; ++j) {
+        if (!any[j]) {
+            reserve_column(j, 0, limbs::kLimbBits);
+            continue;
+        }
+        reserve_column(j, static_cast<int>(low[j]),
+                       static_cast<std::size_t>(high[j] - low[j]) + headroom);
+    }
+}
+
+void
+CudaColumnBlockMatrix::reserve_for(const double *b, std::size_t count,
+                                   std::size_t col_stride)
+{
+    if (0 == cols_) return;
+    const std::size_t stride = col_stride ? col_stride : rows_;
+    std::vector<long long> low(cols_, 0), high(cols_, 0);
+    std::vector<char> any(cols_, 0);
+
+    for (std::size_t j = 0; j < cols_; ++j) {
+        // A column with no scale yet needs the exact true-ulp minimum, so the
+        // floor is one nothing can clear.
+        const kernels::Survey sv = kernels::survey()(
+            b + j * stride, rows_, std::numeric_limits<long long>::max());
+        if (sv.nonfinite) {
+            throw std::domain_error(
+                "cbfp: cannot reserve from a non-finite value");
+        }
+        if (!sv.any) continue;
+        low[j] = sv.min_exponent;
+        high[j] = sv.max_top;
+        any[j] = 1;
+    }
+    reserve_from_extents(low.data(), high.data(), any.data(), count);
+}
+
+void
+CudaColumnBlockMatrix::reserve_for_device(const double *b, std::size_t count,
+                                          std::size_t col_stride)
+{
+    if (0 == cols_ || 0 == rows_) return;
+    const std::size_t stride = col_stride ? col_stride : rows_;
+
+    std::vector<DeviceSurvey> surveys(cols_);
+    for (auto &s : surveys) s = DeviceSurvey{INT_MAX, INT_MIN, 0, 0};
+    cuda(MemcpyAsync(survey_out_, surveys.data(), cols_ * sizeof(DeviceSurvey),
+                     cudaMemcpyHostToDevice, st_compute_));
+    survey_kernel<<<launch_grid(rows_, cols_), kBlock, 0, st_compute_>>>(
+        b, rows_, stride, static_cast<DeviceSurvey *>(survey_out_));
+    cuda(MemcpyAsync(surveys.data(), survey_out_, cols_ * sizeof(DeviceSurvey),
+                     cudaMemcpyDeviceToHost, st_compute_));
+    synchronize();
+
+    std::vector<long long> low(cols_, 0), high(cols_, 0);
+    std::vector<char> any(cols_, 0);
+    for (std::size_t j = 0; j < cols_; ++j) {
+        if (surveys[j].nonfinite) {
+            throw std::domain_error(
+                "cbfp: cannot reserve from a non-finite value");
+        }
+        if (!surveys[j].any) continue;
+        low[j] = surveys[j].min_exponent;
+        high[j] = surveys[j].max_top;
+        any[j] = 1;
+    }
+    reserve_from_extents(low.data(), high.data(), any.data(), count);
 }
 
 void
