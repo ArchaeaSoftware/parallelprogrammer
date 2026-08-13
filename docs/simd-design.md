@@ -406,8 +406,9 @@ single test binary.
 
 ### Other CUDA notes
 
-- Dynamic growth mid-kernel is impractical. `reserve_for` already exists as the
-  pre-sizing escape hatch and is what a GPU path should require.
+- Dynamic growth mid-kernel is impractical, and two ways around it are closed
+  on this toolkit rather than merely inadvisable — see "The CUDA path" below,
+  which also carries the plan for growing a column *between* launches.
 - Many small `cudaMalloc`s are expensive, which pushed against one allocation
   per limb position. **Resolved: the stream-ordered pool is the compromise.**
   `cudaMallocAsync` makes per-limb-position allocation affordable, so the
@@ -440,6 +441,136 @@ single test binary.
   32-bit. Both are fully coalesced with no wasted bytes, which is part of why
   the width comparison came out flat.
 
+## The CUDA path
+
+Implemented and cross-checked against the CPU container by comparing stored
+limbs, which is stronger than comparing readback: identical limbs at an
+identical column exponent imply identical everything downstream, and unlike a
+decimal comparison it cannot be passed by two implementations wrong in the same
+way. Numbers below are an RTX 3060.
+
+### Pre-sizing is forced, not chosen
+
+A single accumulation pass can widen a column by many limbs at once, because
+`max_addend_bits` is a *range* from the column exponent to the highest bit
+reached rather than an increment. Measured on the CPU container: a fresh column
+given one pass spanning 2^-1074 to 2^1023 goes from 1 limb to 33; a column
+settled at 1.0 that then sees 2^1000 goes to 16; a single `add(2^900)` goes to
+15. So there is no cheap slack to pre-allocate — sizing for the worst case is
+2112 bits an entry against the 128-192 real columns use, which is the flat
+allocation this structure exists to avoid.
+
+Two escapes were measured and both are closed:
+
+- **Device-heap memory is unreachable from the host.** A kernel can read a
+  pointer from device-side `malloc`, but `cudaMemcpy` off it returns
+  `invalid argument`, so device-allocated limb arrays would break readback.
+- **CDP parent-child synchronization is gone.** Device-side
+  `cudaDeviceSynchronize` does not merely warn on CUDA 12.9, it does not
+  compile. A kernel cannot launch a child to grow a column and wait for it.
+
+### The host-pointer pipeline
+
+Staging into pinned memory, then starting the transfer, leaves a window to
+survey that same buffer on the host while the DMA is in flight — 32.8 us of
+staging and 31.4 us of survey inside a 79.6 us transfer, so the survey is free.
+Pinning is not optional for this: `cudaMemcpyAsync` from pageable memory
+returns only after 3.92 ms of a 3.96 ms transfer, leaving no window at all,
+while pinned returns in 0.01 ms of 2.51 and is 58% faster besides.
+
+Copy and compute then go on separate streams, so batch N+1's transfer runs on
+the copy engine while batch N is still accumulating; on one stream they
+serialize and the copy engine idles for half of every batch. Together:
+1.477 -> ~3.1 Gelem/s at 4096x64, where the path is now bound by PCIe rather
+than by scheduling.
+
+Validation stays fail-fast and costs nothing. The host survey finishes before
+the accumulate is launched, so a batch that does not fit is rejected without
+having touched the accumulator — which a device-side survey can only promise
+by draining the pipeline to ask.
+
+### The grid rule: cap the whole grid, not its x extent
+
+Both kernels grid-stride, so any smaller grid is correct; it only gives each
+thread more rows. Capping the *total* at 1024 blocks is what makes the survey's
+reduction pay for itself — uncapped, 65536 rows over 64 columns launches 16384
+blocks, each folding one value per thread and then paying a full eight-step
+shared-memory tree to reduce it.
+
+| | survey kernel | device path, end to end |
+| --- | --- | --- |
+| 16384 rows | | 5.543 -> 6.172 Gelem/s |
+| 65536 rows | 195 -> 113 us | 5.853 -> 6.715 |
+| 262144 rows | 746 -> 423 us | 5.931 -> 6.840 |
+
+The accumulate is not a reduction and was expected to be indifferent; measured
+through the host path, which uses the AVX-512 survey and so isolates it, it is
+unchanged or slightly better.
+
+### Getting results back to the host
+
+Three rules, all measured, for the small per-column results both kernels
+produce:
+
+- **Never atomics over PCIe.** Reducing into mapped host memory costs 673 us
+  against 2.59 in device memory — 260x. (They are *correct*; the cost is the
+  whole objection.)
+- **Mapped host memory wins for small results and falls off a cliff.** Writing
+  1, 16 or 64 values costs ~4.8 us against ~11.9 for device memory plus a
+  copy back; at 256 it is 30.2 against 13.2, and at 1024, 121.9 against 13.0.
+  It is transaction count that matters, not volume — 1024 slots is 16 KB, under
+  a microsecond of bandwidth.
+- **So stage in device memory, elect one block to deliver.** Every block
+  reduces into device memory with ordinary atomics, then `__threadfence()` and
+  one `atomicAdd` on a ticket; the block drawing `gridDim - 1` copies the
+  finished per-column results to mapped memory and re-arms the sentinels for
+  the next launch, so there is no H2D initialisation either. The election costs
+  ~3.4 us and the PCIe write itself 0.64. Do **not** mark the device
+  accumulator `volatile` — copied from the NVIDIA sample, it cost 5.71 us by
+  defeating caching on every atomic, and turned a 1.12x win into a 0.90x loss.
+
+The election serializes on one counter, so it is O(blocks); it wins below about
+2000 blocks and loses above, which the grid cap keeps it under.
+
+### Design intent: measured occupancy in place of a derived width
+
+`fit_column` sizes a column from
+
+    bits = max_addend_bits + ceil_log2(add_count + 1) + 1
+
+which is conservative twice over: it assumes every addend was as large as the
+largest ever seen, and that all of them accumulated in the same direction.
+`max_addend_bits` is a high-water mark that never recedes, so after
+`1e300 + 1 - 1e300` it stands near 1000 bits while the value occupies one.
+
+The accumulate can report what the accumulator actually holds, nearly free — it
+has already decomposed every value, and the carry loop already knows the
+highest limb it disturbed. Measured, the per-element statistics cost nothing
+(-0.2% in the divergent case, where the kernel does most work per element);
+the whole cost is the fixed election, 10% of a 4096-row batch and 0.3% of a
+262144-row one.
+
+Combined with the host survey of the *pending* batch, that answers exactly the
+question the code cannot currently ask:
+
+    fits = max(occupancy, pending_max_top - exponent) + 1 + 1 <= nlimbs * 64
+
+This needs no deferred validation. The host survey inspects the pending input
+before the accumulate runs, so non-finite values and out-of-range exponents are
+still rejected before anything is written. An earlier version of this plan
+assumed fusing the survey into the accumulate and accepting a corrupted
+accumulator on rejection; that was unnecessary, and the two statistics answer
+different questions — the survey describes the input, the accumulate describes
+the accumulator.
+
+The structural consequence is what makes it worth the election: it is what lets
+the device widen at all. Widening is an error there today because the fit test
+is conservative and made before the fact. With exact occupancy the host knows,
+between launches, whether the limb arrays it has will hold the batch it is
+about to send — and appending limb arrays disturbs nothing already allocated,
+which is the property per-limb-position allocation exists to preserve.
+
+
 ## Implemented
 
 **Bit-manipulation `decompose`** (`8565474`). Reads the IEEE-754 fields
@@ -471,20 +602,43 @@ essentially nothing left to buy, and a zero-padding contract on
 
 ## Remaining work, in order
 
-1. **Column-at-a-time bulk path.** `accumulate` is called per element and
-   re-does the bounds check, `isfinite`, column lookup and `ensure_limbs` test
-   every time. The layout change buys nothing until this exists. A vectorized
-   decompose also gives a branch-free finite check: one `kortestz` per 16
-   elements instead of an `isfinite` each.
-2. **Limb-major layout + SIMD kernels**, per above.
-3. **Threading across columns** — columns are already independent, so this is
-   less work than intrinsics and composes with them.
+The first two items of the previous list -- the column-at-a-time bulk path and
+the limb-major layout with SIMD kernels -- have landed, along with the whole
+CUDA path. What is left:
+
+1. **Statistics from the accumulate, and a device `reserve_for`.** Per "Design
+   intent" above. The container cannot presently be used without a CPU
+   accumulator to size it from: `reserve_like` needs one that has already seen
+   the data, and `reserve_column` needs the caller to know the bounds. The CPU
+   has `reserve_for`, which sizes every column from one representative batch;
+   the device has no equivalent, though the survey kernel that would implement
+   it is already written and validated.
+2. **Device-side widening**, which (1) unblocks: appending limb arrays disturbs
+   nothing already allocated, so growth between launches is cheap once the fit
+   test is exact. Rescaling is the harder half and can be done in place, since
+   `shift_left` reads only indices at or below the one it writes -- walking
+   limb positions downward is safe with `dst == src`.
+3. **Carry-save at radix 52 on the CPU.** The largest measured win outstanding:
+   deleting the carry chain outright is worth 25-36% at 1-4 limbs and 45-52% at
+   eight with divergent exponents. The bound is generous -- at radix 52 a
+   block's offsets span ~23% further, and that range drives the AVX-512 loop's
+   trip count -- so expect less. De-risk as prescribed above: instantiate both
+   radices and assert bit-identical `to_exact_decimal` over the corpus.
+4. **Threading across columns.** Columns are independent in storage, but
+   `add_matrix` stages each through one shared buffer, so the accumulator is
+   not reentrant. Less work than intrinsics and composes with them.
+
+Smaller, known, unmeasured: `reserve_column` issues a `cudaMemsetAsync` per
+limb position, which the driver implements as a kernel -- `cols * nlimbs` of
+them, one-time at reserve rather than per batch, but thousands for a wide
+matrix.
 
 A 16-wide AVX-512 `decompose` prototype exists and verifies against the scalar
 version on ~2M inputs (specials, random bit patterns including subnormals and
 non-finite, random finite values across exponents -1080..1020). It runs at
-0.275 ns/elem versus 0.689 for the scalar bit-twiddle, so ~2.5x — worth having
-once step 1 makes 16-wide output consumable, not before.
+0.275 ns/elem versus 0.689 for the scalar bit-twiddle, so ~2.5x. The bulk path
+that would consume 16-wide output now exists, so this is once again worth
+picking up.
 
 ## Measurement caveats
 
