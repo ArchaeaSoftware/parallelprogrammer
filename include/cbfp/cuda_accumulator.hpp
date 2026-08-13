@@ -111,7 +111,8 @@ private:
     struct Slot {
         double* pinned = nullptr;
         double* device = nullptr;
-        void* done = nullptr;  // cudaEvent_t: last kernel reading it finished
+        void* copied = nullptr;  // cudaEvent_t: H2D into `device` finished
+        void* done = nullptr;    // cudaEvent_t: last kernel reading it finished
         bool in_flight = false;
     };
 
@@ -134,8 +135,12 @@ private:
     // what coalescing actually needs, comes for free.
     std::vector<Column> cols_state_;
 
-    void* stream_ = nullptr;       // cudaStream_t; all device work is ordered
-    void* descriptors_ = nullptr;  // device array of per-column descriptors
+    // Copy and compute are separate streams so batch N+1's transfer runs on
+    // the copy engine while batch N is still accumulating. On one stream they
+    // serialize, and the transfer is the longer of the two.
+    void* copy_stream_ = nullptr;     // cudaStream_t
+    void* compute_stream_ = nullptr;  // cudaStream_t
+    void* descriptors_ = nullptr;     // device array of per-column descriptors
     bool descriptors_stale_ = true;
     void* scan_out_ = nullptr;  // device scan results, for device-side input
 
