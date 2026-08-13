@@ -150,9 +150,32 @@ This machine has clang-format at `/usr/lib/llvm-18/bin/clang-format` (it is not
 on `PATH`):
 
 ```sh
-/usr/lib/llvm-18/bin/clang-format -i include/cbfp/*.hpp src/*.cpp \
-    tests/*.cpp examples/*.cpp
+/usr/lib/llvm-18/bin/clang-format -i include/cbfp/*.hpp src/*.cpp src/*.cu \
+    tests/*.cpp tests/*.cu examples/*.cpp
 ```
+
+Naming conventions the formatter cannot enforce:
+
+- **A trailing underscore marks class state, not every member.** Classes that
+  carry invariants — `ColumnBlockMatrix`, `CudaColumnBlockMatrix`,
+  `LimbColumn` — suffix their data members. Aggregates that are plain data or a
+  return value — `Survey`, `DoubleParts`, `Split`, `Split8`, `Addend8`,
+  `Column`, `Slot`, `ColumnDesc` — do not. The distinction is deliberate: the
+  underscore says "this is guarded", and `Survey::min_exponent_` would be
+  noise on what is really a function result.
+- **`v_` and `m_` in the AVX-512 kernels**, for `__m512i`/`__m512d` and
+  `__mmask8` respectively, on locals, parameters and struct members. Intrinsic
+  code is full of names that could equally be a scalar, and the pair
+  `max_abs` / `v_max_abs` inside `survey_column_avx512` is exactly the
+  confusion it removes. Vector constants keep their `k` prefix rather than
+  stacking two: `kOne` is already unambiguous.
+- **`st_` and `ev_` for CUDA streams and events**, so `st_copy_` and
+  `s.ev_done` say what they are at the use site rather than only at their
+  declaration.
+- **Constants go on the left of a small equality test** — `if (0 == carry)`,
+  `if (cudaSuccess != status)`. Only for comparisons against a literal or a
+  named constant; a comparison between two variables such as `p == off` stays
+  in the natural order, where reversing it would guard against nothing.
 
 Loops are written in `init/check/step` form with a bound that is visibly
 finite; `while (1)` / `for (;;)` are avoided entirely, and conditional `break`
