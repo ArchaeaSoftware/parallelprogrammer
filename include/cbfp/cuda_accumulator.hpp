@@ -66,6 +66,13 @@ public:
     void add_matrix_col_major_device(const double* b,
                                      std::size_t col_stride = 0);
 
+    // Blocks until every submitted accumulation has finished. Accumulation is
+    // asynchronous: a call returns once the work is queued, so a caller
+    // streaming batches keeps the device busy without doing anything special.
+    // Readback synchronizes implicitly, so this is only needed for timing or
+    // before reusing a caller-owned device buffer.
+    void synchronize() const;
+
     // --- readback ----------------------------------------------------------
 
     int column_exponent(std::size_t j) const;
@@ -95,9 +102,25 @@ private:
         limbs::limb_t** dev_bases = nullptr;  // the same array, device-side
     };
 
+    // Two staging slots, so the host can prepare batch N+1 while the device is
+    // still accumulating batch N. Each owns a pinned host buffer -- measured,
+    // an async copy from pageable memory blocks the host for the whole
+    // transfer and there is no window to scan in -- the device buffer the
+    // kernel reads, and an event marking when the last kernel to read that
+    // buffer finished, so a slot is only reused once it is genuinely free.
+    struct Slot {
+        double* pinned = nullptr;
+        double* device = nullptr;
+        void* done = nullptr;  // cudaEvent_t: last kernel reading it finished
+        bool in_flight = false;
+    };
+
     void check_index(std::size_t i, std::size_t j) const;
     void accumulate_device(const double* b, std::size_t col_stride);
+    void launch_accumulate(const double* b, std::size_t col_stride);
+    void validate_host_scan(const double* packed);
     void sync_descriptors();
+    void ensure_slots(std::size_t words);
 
     std::size_t rows_;
     std::size_t cols_;
@@ -111,11 +134,14 @@ private:
     // what coalescing actually needs, comes for free.
     std::vector<Column> cols_state_;
 
+    void* stream_ = nullptr;       // cudaStream_t; all device work is ordered
     void* descriptors_ = nullptr;  // device array of per-column descriptors
     bool descriptors_stale_ = true;
-    void* scan_out_ = nullptr;  // device scan results, one per column
-    double* values_ = nullptr;  // device staging for an uploaded matrix
-    std::size_t values_words_ = 0;
+    void* scan_out_ = nullptr;  // device scan results, for device-side input
+
+    Slot slots_[2];
+    int slot_ = 0;
+    std::size_t slot_words_ = 0;
 };
 
 }  // namespace cbfp

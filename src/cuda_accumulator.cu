@@ -1,12 +1,14 @@
 #include <cuda_runtime.h>
 
 #include <climits>
+#include <cstring>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
 
 #include "cbfp/column_accumulator.hpp"
 #include "cbfp/cuda_accumulator.hpp"
+#include "kernels.hpp"
 
 namespace cbfp {
 namespace {
@@ -281,6 +283,10 @@ CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t rows, std::size_t cols)
     if (!cuda_available()) {
         throw std::runtime_error("cbfp: no usable CUDA device");
     }
+    cudaStream_t st;
+    cuda(StreamCreate(&st));
+    stream_ = st;
+
     if (cols_ != 0) {
         cuda(Malloc(&descriptors_, cols_ * sizeof(ColumnDesc)));
         cuda(Malloc(&scan_out_, cols_ * sizeof(DeviceScan)));
@@ -297,7 +303,12 @@ CudaColumnBlockMatrix::~CudaColumnBlockMatrix()
     }
     cudaFree(descriptors_);
     cudaFree(scan_out_);
-    cudaFree(values_);
+    for (Slot& s : slots_) {
+        if (s.pinned) cudaFreeHost(s.pinned);
+        if (s.device) cudaFree(s.device);
+        if (s.done) cudaEventDestroy(static_cast<cudaEvent_t>(s.done));
+    }
+    if (stream_) cudaStreamDestroy(static_cast<cudaStream_t>(stream_));
 }
 
 void CudaColumnBlockMatrix::check_index(std::size_t i, std::size_t j) const
@@ -385,23 +396,101 @@ void CudaColumnBlockMatrix::sync_descriptors()
     descriptors_stale_ = false;
 }
 
+void CudaColumnBlockMatrix::ensure_slots(std::size_t words)
+{
+    if (slot_words_ >= words) return;
+    synchronize();
+    for (Slot& s : slots_) {
+        if (s.pinned) cudaFreeHost(s.pinned);
+        if (s.device) cudaFree(s.device);
+        s.pinned = nullptr;
+        s.device = nullptr;
+        cuda(
+            HostAlloc(&s.pinned, words * sizeof(double), cudaHostAllocDefault));
+        cuda(Malloc(&s.device, words * sizeof(double)));
+        if (!s.done) {
+            cudaEvent_t e;
+            cuda(EventCreateWithFlags(&e, cudaEventDisableTiming));
+            s.done = e;
+        }
+        s.in_flight = false;
+    }
+    slot_words_ = words;
+}
+
+// Validates a packed column-major batch on the host, using the same scan the
+// CPU accumulator uses -- which is the AVX-512 one where available, at ~0.12
+// ns/elem. Cheap enough to hide entirely behind the transfer it runs against.
+void CudaColumnBlockMatrix::validate_host_scan(const double* packed)
+{
+    for (std::size_t j = 0; j < cols_; ++j) {
+        const Column& c = cols_state_[j];
+        // Passing the column's own exponent as the floor lets the scan stop at
+        // a lower bound whenever no rescale could be due, and only pay for the
+        // exact true-ulp minimum when it might be.
+        const kernels::Scan sc =
+            kernels::scan()(packed + j * rows_, rows_, c.exponent);
+        if (sc.nonfinite) {
+            throw std::domain_error(
+                "cbfp: cannot accumulate a non-finite value");
+        }
+        if (!sc.any) continue;
+        if (sc.min_exponent < c.exponent) {
+            std::ostringstream os;
+            os << "cbfp: column " << j << " was reserved at exponent "
+               << c.exponent << " but these values need " << sc.min_exponent
+               << "; pre-size it with reserve_column or reserve_like";
+            throw std::runtime_error(os.str());
+        }
+        const long long width = sc.max_top - c.exponent;
+        if (width > static_cast<long long>(c.nlimbs * limbs::kLimbBits)) {
+            std::ostringstream os;
+            os << "cbfp: column " << j << " was reserved at "
+               << c.nlimbs * limbs::kLimbBits << " bits but these values reach "
+               << width;
+            throw std::runtime_error(os.str());
+        }
+    }
+}
+
+// The host path runs the transfer and the scan against each other: stage into
+// pinned memory, start the copy, then scan that same buffer while the DMA is
+// in flight. The scan is pure host work on host memory, so it costs nothing
+// the transfer was not already going to spend.
+//
+// Validation therefore still happens *before* the accumulate is launched, so a
+// bad batch is rejected without having touched the accumulator -- which a
+// device-side scan cannot do without a round-trip that drains the pipeline.
 void CudaColumnBlockMatrix::add_matrix_col_major(const double* b,
                                                  std::size_t col_stride)
 {
     if (rows_ == 0 || cols_ == 0) return;
     const std::size_t stride = col_stride ? col_stride : rows_;
+    ensure_slots(rows_ * cols_);
 
-    const std::size_t need = rows_ * cols_;
-    if (values_words_ < need) {
-        cudaFree(values_);
-        values_ = nullptr;
-        cuda(Malloc(&values_, need * sizeof(double)));
-        values_words_ = need;
+    Slot& s = slots_[slot_];
+    // A slot cannot be refilled until the kernel that last read it is done.
+    if (s.in_flight) {
+        cuda(EventSynchronize(static_cast<cudaEvent_t>(s.done)));
+        s.in_flight = false;
     }
-    // Packs the columns to a tight stride on the way in.
-    cuda(Memcpy2D(values_, rows_ * sizeof(double), b, stride * sizeof(double),
-                  rows_ * sizeof(double), cols_, cudaMemcpyHostToDevice));
-    accumulate_device(values_, rows_);
+
+    for (std::size_t j = 0; j < cols_; ++j) {
+        std::memcpy(s.pinned + j * rows_, b + j * stride,
+                    rows_ * sizeof(double));
+    }
+    cuda(MemcpyAsync(s.device, s.pinned, rows_ * cols_ * sizeof(double),
+                     cudaMemcpyHostToDevice,
+                     static_cast<cudaStream_t>(stream_)));
+
+    // Runs against the copy above, not after it.
+    validate_host_scan(s.pinned);
+
+    launch_accumulate(s.device, rows_);
+    cuda(EventRecord(static_cast<cudaEvent_t>(s.done),
+                     static_cast<cudaStream_t>(stream_)));
+    s.in_flight = true;
+    slot_ ^= 1;
 }
 
 void CudaColumnBlockMatrix::add_matrix_col_major_device(const double* b,
@@ -409,6 +498,11 @@ void CudaColumnBlockMatrix::add_matrix_col_major_device(const double* b,
 {
     if (rows_ == 0 || cols_ == 0) return;
     accumulate_device(b, col_stride ? col_stride : rows_);
+}
+
+void CudaColumnBlockMatrix::synchronize() const
+{
+    cuda(StreamSynchronize(static_cast<cudaStream_t>(stream_)));
 }
 
 void CudaColumnBlockMatrix::accumulate_device(const double* b,
@@ -434,14 +528,20 @@ void CudaColumnBlockMatrix::accumulate_device(const double* b,
     // widening are errors here, because neither is possible mid-launch.
     std::vector<DeviceScan> scans(cols_);
     for (auto& s : scans) s = DeviceScan{LLONG_MAX, LLONG_MIN, 0, 0};
-    cuda(Memcpy(scan_out_, scans.data(), cols_ * sizeof(DeviceScan),
-                cudaMemcpyHostToDevice));
+    cuda(MemcpyAsync(scan_out_, scans.data(), cols_ * sizeof(DeviceScan),
+                     cudaMemcpyHostToDevice,
+                     static_cast<cudaStream_t>(stream_)));
 
-    scan_kernel<<<grid, kBlock>>>(b, rows_, col_stride,
-                                  static_cast<DeviceScan*>(scan_out_));
+    scan_kernel<<<grid, kBlock, 0, static_cast<cudaStream_t>(stream_)>>>(
+        b, rows_, col_stride, static_cast<DeviceScan*>(scan_out_));
     cuda(GetLastError());
-    cuda(Memcpy(scans.data(), scan_out_, cols_ * sizeof(DeviceScan),
-                cudaMemcpyDeviceToHost));
+    // This is the drain the host path avoids: with the input already on the
+    // device there is nothing to scan on the host, so the verdict has to come
+    // back before the accumulate can be allowed to run.
+    cuda(MemcpyAsync(scans.data(), scan_out_, cols_ * sizeof(DeviceScan),
+                     cudaMemcpyDeviceToHost,
+                     static_cast<cudaStream_t>(stream_)));
+    synchronize();
 
     for (std::size_t j = 0; j < cols_; ++j) {
         if (scans[j].nonfinite) {
@@ -468,17 +568,40 @@ void CudaColumnBlockMatrix::accumulate_device(const double* b,
         }
     }
 
-    // Second pass: fused decompose and add.
-    accumulate_kernel<64><<<grid, kBlock>>>(
-        static_cast<const ColumnDesc*>(descriptors_), b, rows_, col_stride);
+    launch_accumulate(b, col_stride);
+}
+
+// Queues the accumulate. Asynchronous: the caller is not blocked, so batches
+// pipeline against each other without the caller doing anything.
+void CudaColumnBlockMatrix::launch_accumulate(const double* b,
+                                              std::size_t col_stride)
+{
+    for (std::size_t j = 0; j < cols_; ++j) {
+        if (!cols_state_[j].reserved) {
+            throw std::runtime_error(
+                "cbfp: every device column must be reserved before "
+                "accumulation");
+        }
+    }
+    sync_descriptors();
+
+    const unsigned gx =
+        static_cast<unsigned>((rows_ + kBlock - 1) / kBlock > kMaxGridX
+                                  ? kMaxGridX
+                                  : (rows_ + kBlock - 1) / kBlock);
+    const dim3 grid(gx == 0 ? 1 : gx, static_cast<unsigned>(cols_));
+
+    accumulate_kernel<64>
+        <<<grid, kBlock, 0, static_cast<cudaStream_t>(stream_)>>>(
+            static_cast<const ColumnDesc*>(descriptors_), b, rows_, col_stride);
     cuda(GetLastError());
-    cuda(DeviceSynchronize());
 }
 
 std::vector<limb_t> CudaColumnBlockMatrix::entry_limbs(std::size_t i,
                                                        std::size_t j) const
 {
     check_index(i, j);
+    synchronize();
     const Column& c = cols_state_[j];
     std::vector<limb_t> v(c.nlimbs);
     // One small copy per limb position. This is a readback path, not a hot
@@ -493,6 +616,7 @@ std::vector<limb_t> CudaColumnBlockMatrix::entry_limbs(std::size_t i,
 std::vector<limb_t> CudaColumnBlockMatrix::download_column(std::size_t j) const
 {
     if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    synchronize();
     const Column& c = cols_state_[j];
     std::vector<limb_t> out(c.nlimbs * rows_);
     for (std::size_t k = 0; k < c.nlimbs; ++k) {
