@@ -144,7 +144,7 @@ Survey survey_column_avx512(const double* values, std::size_t rows,
     const std::uint64_t max_abs =
         static_cast<std::uint64_t>(_mm512_reduce_max_epu64(vmax_abs));
     const std::uint64_t max_biased = max_abs >> 52;
-    out.max_top = max_biased != 0 ? static_cast<long long>(max_biased) - 1022
+    out.max_top = 0 != max_biased ? static_cast<long long>(max_biased) - 1022
                                   : -1074 + (64 - __builtin_clzll(max_abs));
 
     if (min_raw >= floor_exponent) {
@@ -252,7 +252,7 @@ void accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
     };
 
     const auto apply = [&](const Addend8& q) {
-        if (q.live == 0) return;
+        if (0 == q.live) return;
         __m512i carry = _mm512_setzero_si512();
 
         for (std::size_t p = first_limb; p < nlimbs; ++p) {
@@ -260,7 +260,7 @@ void accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
             const __mmask8 active = _mm512_cmple_epi64_mask(q.off, pv) & q.live;
             // Below every lane's first limb there is nothing to add and no
             // carry can exist yet, so the position costs only this compare.
-            if (active == 0) continue;
+            if (0 == active) continue;
 
             const __mmask8 at_lo = _mm512_cmpeq_epi64_mask(q.off, pv) & q.live;
             const __mmask8 at_hi = _mm512_cmpeq_epi64_mask(q.off1, pv) & q.live;
@@ -290,7 +290,7 @@ void accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
             // subtracting lane when its carry is 1.
             const __mmask8 pending = _mm512_test_epi64_mask(carry, carry);
             const __mmask8 more = _mm512_cmpgt_epi64_mask(q.off1, pv) & q.live;
-            if (more == 0 && ((pending ^ q.negative) & q.live) == 0) break;
+            if (0 == more && 0 == ((pending ^ q.negative) & q.live)) break;
         }
     };
 

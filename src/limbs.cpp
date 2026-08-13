@@ -16,7 +16,7 @@ inline limb_t at(const limb_t* p, std::size_t n, std::size_t i, limb_t fill)
 void trim(std::vector<limb_t>& v)
 {
     std::size_t n = v.size();
-    for (; n > 0 && v[n - 1] == 0; --n) {
+    for (; n > 0 && 0 == v[n - 1]; --n) {
     }
     v.resize(n);
 }
@@ -31,7 +31,7 @@ bool is_negative(const limb_t* p, std::size_t n)
 bool is_zero(const limb_t* p, std::size_t n)
 {
     for (std::size_t i = 0; i < n; ++i) {
-        if (p[i] != 0) return false;
+        if (0 != p[i]) return false;
     }
     return true;
 }
@@ -58,7 +58,7 @@ void shift_left(const limb_t* src, std::size_t sn, unsigned s, limb_t* dst,
         }
         const std::size_t k = i - word;
         limb_t v = at(src, sn, k, fill) << bit;
-        if (bit != 0 && k > 0) {
+        if (0 != bit && k > 0) {
             v |= at(src, sn, k - 1, fill) >> (kLimbBits - bit);
         }
         dst[i] = v;
@@ -109,7 +109,7 @@ void negate_into(const limb_t* src, std::size_t n, limb_t* dst)
 std::size_t bit_length(const limb_t* p, std::size_t n)
 {
     for (std::size_t i = n; i-- > 0;) {
-        if (p[i] != 0) {
+        if (0 != p[i]) {
             return i * kLimbBits + (kLimbBits - __builtin_clzll(p[i]));
         }
     }
@@ -128,10 +128,10 @@ bool any_bits_below(const limb_t* p, std::size_t n, std::size_t i)
     const std::size_t w = i / kLimbBits;
     const unsigned b = i % kLimbBits;
     for (std::size_t k = 0; k < w && k < n; ++k) {
-        if (p[k] != 0) return true;
+        if (0 != p[k]) return true;
     }
-    if (b != 0 && w < n) {
-        if ((p[w] & ((limb_t{1} << b) - 1)) != 0) return true;
+    if (0 != b && w < n) {
+        if (0 != (p[w] & ((limb_t{1} << b) - 1))) return true;
     }
     return false;
 }
@@ -141,7 +141,7 @@ std::uint64_t extract_u64(const limb_t* p, std::size_t n, std::size_t shift)
     const std::size_t w = shift / kLimbBits;
     const unsigned b = shift % kLimbBits;
     limb_t v = at(p, n, w, 0) >> b;
-    if (b != 0) {
+    if (0 != b) {
         v |= at(p, n, w + 1, 0) << (kLimbBits - b);
     }
     return v;
@@ -155,7 +155,7 @@ void mul_small(std::vector<limb_t>& v, limb_t m)
         v[i] = static_cast<limb_t>(prod);
         carry = static_cast<limb_t>(prod >> 64);
     }
-    if (carry != 0) v.push_back(carry);
+    if (0 != carry) v.push_back(carry);
 }
 
 std::string magnitude_to_decimal(std::vector<limb_t> mag)

@@ -32,7 +32,7 @@ LimbColumn::LimbColumn(std::size_t rows, std::size_t index)
         (payload + kSkewCycle * kSkewStep + kAlign - 1) & ~(kAlign - 1);
 
     alloc_ = std::aligned_alloc(kAlign, bytes);
-    if (alloc_ == nullptr) throw std::bad_alloc();
+    if (nullptr == alloc_) throw std::bad_alloc();
     std::memset(alloc_, 0, bytes);
     data_ = reinterpret_cast<std::uint64_t*>(static_cast<char*>(alloc_) + skew);
 }

@@ -36,7 +36,7 @@ static_assert(std::is_same<cudaEvent_t, CUevent_st*>::value,
 inline void cuda_check(cudaError_t status, const char* call, const char* file,
                        int line)
 {
-    if (status != cudaSuccess) cuda_fail(status, call, file, line);
+    if (cudaSuccess != status) cuda_fail(status, call, file, line);
 }
 
 // Every checked runtime call reads exactly like the call it makes, with one
@@ -107,7 +107,7 @@ __device__ inline void split_device(double v, unsigned long long& mantissa,
     const unsigned long long frac = bits & ((1ull << 52) - 1);
 
     unsigned long long m = frac;
-    if (biased != 0) m |= 1ull << 52;
+    if (0 != biased) m |= 1ull << 52;
     int e = static_cast<int>(biased < 1 ? 1 : biased) - 1075;
 
     negative = (bits >> 63) != 0;
@@ -115,8 +115,8 @@ __device__ inline void split_device(double v, unsigned long long& mantissa,
     // Normalizing to odd raises the exponent by the trailing zero count and
     // lowers the significand's width by the same amount, so `top` is
     // unaffected and never needs that count.
-    top = e + (m == 0 ? 0 : 64 - __clzll(static_cast<long long>(m)));
-    if (m != 0) {
+    top = e + (0 == m ? 0 : 64 - __clzll(static_cast<long long>(m)));
+    if (0 != m) {
         const int tz = __ffsll(static_cast<long long>(m)) - 1;
         m >>= tz;
         e += tz;
@@ -148,14 +148,15 @@ __global__ void survey_kernel(const double* __restrict__ values,
     int tbad = 0;
 
     const std::size_t step = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    for (std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x + tid;
+    for (std::size_t i =
+             static_cast<std::size_t>(blockIdx.x) * blockDim.x + tid;
          i < rows; i += step) {
         unsigned long long m;
         int e, top;
         bool neg, bad;
         split_device(col[i], m, e, top, neg, bad);
         if (bad) tbad = 1;
-        if (m != 0) {
+        if (0 != m) {
             tany = 1;
             if (e < tmin) tmin = e;
             if (top > tmax) tmax = top;
@@ -178,7 +179,7 @@ __global__ void survey_kernel(const double* __restrict__ values,
     }
 
     // One atomic per block rather than one per thread.
-    if (tid == 0) {
+    if (0 == tid) {
         if (s_any[0]) {
             atomicMin(&out[j].min_exponent, s_min[0]);
             atomicMax(&out[j].max_top, s_max[0]);
@@ -227,7 +228,7 @@ __global__ void accumulate_kernel(const ColumnDesc* __restrict__ cols,
         int e, top;
         bool neg, bad;
         split_device(col[i], m, e, top, neg, bad);
-        if (m == 0) continue;
+        if (0 == m) continue;
 
         // The host has already checked that every value fits the column it
         // was reserved for, so the shift cannot be negative. Were it ever
@@ -240,7 +241,7 @@ __global__ void accumulate_kernel(const ColumnDesc* __restrict__ cols,
         // A 53-bit significand at intra-limb offset `bit` spans two limbs at
         // radix 64 and at radix 52 alike.
         unsigned long long lo, hi;
-        if (bit == 0) {
+        if (0 == bit) {
             lo = m & kLimbMask;
             hi = kRadix == 64 ? 0ull : (m >> kRadix) & kLimbMask;
         } else {
@@ -272,7 +273,7 @@ __global__ void accumulate_kernel(const ColumnDesc* __restrict__ cols,
                 *dst = s2;
                 carry = c1 | c2;
             }
-            if (carry == 0 && p >= off + 1) break;
+            if (0 == carry && p >= off + 1) break;
         }
     }
 }
@@ -287,7 +288,7 @@ std::size_t limbs_for_bits(std::size_t bits)
 bool cuda_available()
 {
     int n = 0;
-    return cudaGetDeviceCount(&n) == cudaSuccess && n > 0;
+    return cudaSuccess == cudaGetDeviceCount(&n) && n > 0;
 }
 
 CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t rows, std::size_t cols)
@@ -310,7 +311,7 @@ CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t rows, std::size_t cols)
     cuda(StreamCreate(&copy_stream_));
     cuda(StreamCreate(&compute_stream_));
 
-    if (cols_ != 0) {
+    if (0 != cols_) {
         cuda(Malloc(&descriptors_, cols_ * sizeof(ColumnDesc)));
         cuda(Malloc(&survey_out_, cols_ * sizeof(DeviceSurvey)));
     }
@@ -371,7 +372,7 @@ void CudaColumnBlockMatrix::reserve_column(std::size_t j, int exponent,
     c.nlimbs = limbs_for_bits(bits) < 1 ? 1 : limbs_for_bits(bits);
     c.reserved = true;
 
-    if (rows_ != 0) {
+    if (0 != rows_) {
         // One allocation per limb position. The stream-ordered pool is what
         // makes that affordable -- plain cudaMalloc is tens of microseconds a
         // call, and a wide column needs tens of them. Widening later appends
@@ -490,7 +491,7 @@ void CudaColumnBlockMatrix::validate_host_survey(const double* packed)
 void CudaColumnBlockMatrix::add_matrix_col_major(const double* b,
                                                  std::size_t col_stride)
 {
-    if (rows_ == 0 || cols_ == 0) return;
+    if (0 == rows_ || 0 == cols_) return;
     const std::size_t stride = col_stride ? col_stride : rows_;
     ensure_slots(rows_ * cols_);
 
@@ -524,7 +525,7 @@ void CudaColumnBlockMatrix::add_matrix_col_major(const double* b,
 void CudaColumnBlockMatrix::add_matrix_col_major_device(const double* b,
                                                         std::size_t col_stride)
 {
-    if (rows_ == 0 || cols_ == 0) return;
+    if (0 == rows_ || 0 == cols_) return;
     accumulate_device(b, col_stride ? col_stride : rows_);
 }
 
@@ -550,7 +551,7 @@ void CudaColumnBlockMatrix::accumulate_device(const double* b,
         static_cast<unsigned>((rows_ + kBlock - 1) / kBlock > kMaxGridX
                                   ? kMaxGridX
                                   : (rows_ + kBlock - 1) / kBlock);
-    const dim3 grid(gx == 0 ? 1 : gx, static_cast<unsigned>(cols_));
+    const dim3 grid(0 == gx ? 1 : gx, static_cast<unsigned>(cols_));
 
     // First pass: learn each column's exponent range, and reject anything the
     // reservation cannot hold. The decisions the CPU makes by rescaling and
@@ -615,7 +616,7 @@ void CudaColumnBlockMatrix::launch_accumulate(const double* b,
         static_cast<unsigned>((rows_ + kBlock - 1) / kBlock > kMaxGridX
                                   ? kMaxGridX
                                   : (rows_ + kBlock - 1) / kBlock);
-    const dim3 grid(gx == 0 ? 1 : gx, static_cast<unsigned>(cols_));
+    const dim3 grid(0 == gx ? 1 : gx, static_cast<unsigned>(cols_));
 
     accumulate_kernel<64><<<grid, kBlock, 0, compute_stream_>>>(
         static_cast<const ColumnDesc*>(descriptors_), b, rows_, col_stride);

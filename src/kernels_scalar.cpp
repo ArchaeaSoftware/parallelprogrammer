@@ -26,7 +26,7 @@ inline Split split(double v)
     const std::uint64_t frac = bits & ((std::uint64_t{1} << 52) - 1);
 
     std::uint64_t m = frac;
-    if (biased != 0) m |= std::uint64_t{1} << 52;
+    if (0 != biased) m |= std::uint64_t{1} << 52;
     long long e = static_cast<long long>(biased < 1 ? 1 : biased) - 1075;
 
     Split s;
@@ -35,8 +35,8 @@ inline Split split(double v)
     // Normalizing to odd raises the exponent by the trailing zero count and
     // lowers the significand's width by the same amount, so `top` is
     // unaffected and the survey never needs the count.
-    s.top = e + (m == 0 ? 0 : 64 - __builtin_clzll(m));
-    if (m != 0) {
+    s.top = e + (0 == m ? 0 : 64 - __builtin_clzll(m));
+    if (0 != m) {
         const int tz = __builtin_ctzll(m);
         m >>= tz;
         e += tz;
@@ -67,7 +67,7 @@ Survey survey_column_scalar(const double* values, std::size_t rows,
             out.nonfinite = true;
             return out;
         }
-        if (abs_bits == 0) continue;
+        if (0 == abs_bits) continue;
         const long long e =
             static_cast<long long>(biased < 1 ? 1 : biased) - 1075;
         if (!out.any) {
@@ -83,7 +83,7 @@ Survey survey_column_scalar(const double* values, std::size_t rows,
     if (!out.any) return out;
 
     const std::uint64_t max_biased = max_abs >> 52;
-    out.max_top = max_biased != 0 ? static_cast<long long>(max_biased) - 1022
+    out.max_top = 0 != max_biased ? static_cast<long long>(max_biased) - 1022
                                   : -1074 + (64 - __builtin_clzll(max_abs));
 
     if (min_raw >= floor_exponent) {
@@ -96,7 +96,7 @@ Survey survey_column_scalar(const double* values, std::size_t rows,
     bool first = true;
     for (std::size_t i = 0; i < rows; ++i) {
         const Split s = split(values[i]);
-        if (s.mantissa == 0) continue;
+        if (0 == s.mantissa) continue;
         if (first || s.exponent < out.min_exponent) {
             out.min_exponent = s.exponent;
             first = false;
@@ -109,12 +109,12 @@ void accumulate_one(std::uint64_t* const* limbs, std::size_t nlimbs,
                     std::size_t row, std::uint64_t mantissa, std::size_t shift,
                     bool negative)
 {
-    if (mantissa == 0) return;
+    if (0 == mantissa) return;
 
     const std::size_t off = shift / 64;
     const unsigned bit = shift % 64;
     const std::uint64_t lo = mantissa << bit;
-    const std::uint64_t hi = bit != 0 ? (mantissa >> (64 - bit)) : 0;
+    const std::uint64_t hi = 0 != bit ? (mantissa >> (64 - bit)) : 0;
 
     if (negative) {
         std::uint64_t borrow = 0;
@@ -128,7 +128,7 @@ void accumulate_one(std::uint64_t* const* limbs, std::size_t nlimbs,
             limbs[p][row] = d2;
             borrow = b1 | b2;
             // Past the addend with no borrow left, nothing further changes.
-            if (borrow == 0 && p >= off + 1) break;
+            if (0 == borrow && p >= off + 1) break;
         }
     } else {
         std::uint64_t carry = 0;
@@ -141,7 +141,7 @@ void accumulate_one(std::uint64_t* const* limbs, std::size_t nlimbs,
             const std::uint64_t c2 = (s2 < s) ? 1 : 0;
             limbs[p][row] = s2;
             carry = c1 | c2;
-            if (carry == 0 && p >= off + 1) break;
+            if (0 == carry && p >= off + 1) break;
         }
     }
 }
@@ -153,7 +153,7 @@ void accumulate_scalar(std::uint64_t* const* limbs, std::size_t nlimbs,
     (void)first_limb;  // the scalar path starts from each row's own limb
     for (std::size_t i = 0; i < rows; ++i) {
         const Split s = split(values[i]);
-        if (s.mantissa == 0) continue;
+        if (0 == s.mantissa) continue;
         accumulate_one(limbs, nlimbs, i, s.mantissa,
                        static_cast<std::size_t>(s.exponent - column_exponent),
                        s.negative);
@@ -180,7 +180,7 @@ void shift_left(std::uint64_t* const* dst, std::size_t ndst,
         // Above the source, every limb reads as the sign fill.
         if (a >= nsrc) {
             const std::uint64_t* top = src[nsrc - 1];
-            if (bit == 0 || c >= nsrc) {
+            if (0 == bit || c >= nsrc) {
                 for (std::size_t i = 0; i < n; ++i) {
                     out[i] = static_cast<std::uint64_t>(
                         static_cast<std::int64_t>(top[i]) >> 63);
@@ -197,9 +197,9 @@ void shift_left(std::uint64_t* const* dst, std::size_t ndst,
         }
 
         const std::uint64_t* high = src[a];
-        if (bit == 0) {
+        if (0 == bit) {
             for (std::size_t i = 0; i < n; ++i) out[i] = high[i];
-        } else if (a == 0) {
+        } else if (0 == a) {
             for (std::size_t i = 0; i < n; ++i) out[i] = high[i] << bit;
         } else {
             const std::uint64_t* low = src[c];

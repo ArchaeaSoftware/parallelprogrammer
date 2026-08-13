@@ -26,7 +26,7 @@ std::size_t limbs_for_bits(std::size_t bits)
 std::size_t trailing_zeros(const std::vector<limb_t>& v)
 {
     for (std::size_t i = 0; i < v.size(); ++i) {
-        if (v[i] != 0) return i * kLimbBits + __builtin_ctzll(v[i]);
+        if (0 != v[i]) return i * kLimbBits + __builtin_ctzll(v[i]);
     }
     return 0;
 }
@@ -36,7 +36,7 @@ std::size_t trailing_zeros(const std::vector<limb_t>& v)
 // neither of which is a limb.
 std::size_t bit_width_u64(std::uint64_t v)
 {
-    return v == 0 ? 0 : 64 - static_cast<std::size_t>(__builtin_clzll(v));
+    return 0 == v ? 0 : 64 - static_cast<std::size_t>(__builtin_clzll(v));
 }
 
 std::size_t ceil_log2(std::size_t n)
@@ -80,12 +80,12 @@ DoubleParts decompose(double v)
     const std::uint64_t frac = bits & ((std::uint64_t{1} << 52) - 1);
 
     std::uint64_t m = frac;
-    if (biased != 0) m |= std::uint64_t{1} << 52;
+    if (0 != biased) m |= std::uint64_t{1} << 52;
     int e = static_cast<int>(std::max<std::uint64_t>(biased, 1)) - 1075;
 
     // Normalizing the mantissa to odd makes the exponent the value's true ulp,
     // which keeps columns of coarse values (integers, say) narrow.
-    if (m != 0) {
+    if (0 != m) {
         const int tz = __builtin_ctzll(m);
         m >>= tz;
         e += tz;
@@ -151,7 +151,7 @@ bool ColumnBlockMatrix::column_is_zero(const Column& c) const
     for (const auto& lc : c.limbs) {
         const limb_t* p = lc.data();
         for (std::size_t i = 0; i < rows_; ++i) {
-            if (p[i] != 0) return false;
+            if (0 != p[i]) return false;
         }
     }
     return true;
@@ -201,7 +201,7 @@ void ColumnBlockMatrix::accumulate(std::size_t i, std::size_t j, double v,
     }
 
     const DoubleParts p = decompose(v);
-    if (p.mantissa == 0) return;
+    if (0 == p.mantissa) return;
 
     const long long e64 = static_cast<long long>(p.exponent) + log2_scale;
     if (e64 < -kExponentLimit || e64 > kExponentLimit) {
@@ -264,14 +264,14 @@ void ColumnBlockMatrix::accumulate_columns(const double* b,
                                            std::size_t column_step,
                                            std::size_t row_step, int log2_scale)
 {
-    if (rows_ == 0 || cols_ == 0) return;
+    if (0 == rows_ || 0 == cols_) return;
 
     for (std::size_t j = 0; j < cols_; ++j) {
         // Both passes want the column contiguous. When the caller's layout
         // already provides that, use it in place; otherwise stage it, because
         // a strided vector gather costs more than the work it feeds.
         const double* column = b + j * column_step;
-        if (row_step != 1) {
+        if (1 != row_step) {
             for (std::size_t i = 0; i < rows_; ++i) {
                 column_buffer_[i] = column[i * row_step];
             }
@@ -290,7 +290,7 @@ void ColumnBlockMatrix::add_column_scaled_pow2(std::size_t j, const double* v,
                                                int log2_scale)
 {
     if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
-    if (rows_ == 0) return;
+    if (0 == rows_) return;
     accumulate_column(j, v, log2_scale);
 }
 
@@ -392,7 +392,7 @@ bool ColumnBlockMatrix::is_zero(std::size_t i, std::size_t j) const
     check_index(i, j);
     const Column& c = cols_state_[j];
     for (const auto& lc : c.limbs) {
-        if (lc.data()[i] != 0) return false;
+        if (0 != lc.data()[i]) return false;
     }
     return true;
 }
@@ -402,7 +402,7 @@ double ColumnBlockMatrix::to_double(std::size_t i, std::size_t j) const
     bool neg = false;
     const std::vector<limb_t> mag = magnitude(i, j, &neg);
     const std::size_t b = limbs::bit_length(mag.data(), mag.size());
-    if (b == 0) return 0.0;
+    if (0 == b) return 0.0;
 
     const long long exp = cols_state_[j].exponent;
     const long long top = static_cast<long long>(b) - 1 + exp;  // 2^top <= |x|
@@ -423,7 +423,7 @@ double ColumnBlockMatrix::to_double(std::size_t i, std::size_t j) const
         const bool sticky =
             limbs::any_bits_below(mag.data(), mag.size(), d - 1);
         std::uint64_t m = limbs::extract_u64(mag.data(), mag.size(), d);
-        if (round_bit && (sticky || (m & 1) != 0)) ++m;
+        if (round_bit && (sticky || 0 != (m & 1))) ++m;
         r = std::ldexp(static_cast<double>(m), static_cast<int>(exp + drop));
     }
     return neg ? -r : r;
@@ -445,7 +445,7 @@ bool ColumnBlockMatrix::is_exactly_representable(std::size_t i,
     bool neg = false;
     const std::vector<limb_t> mag = magnitude(i, j, &neg);
     const std::size_t b = limbs::bit_length(mag.data(), mag.size());
-    if (b == 0) return true;
+    if (0 == b) return true;
 
     const long long exp = cols_state_[j].exponent;
     const std::size_t tz = trailing_zeros(mag);
@@ -460,7 +460,7 @@ std::string ColumnBlockMatrix::to_exact_decimal(std::size_t i,
 {
     bool neg = false;
     std::vector<limb_t> mag = magnitude(i, j, &neg);
-    if (limbs::bit_length(mag.data(), mag.size()) == 0) return "0";
+    if (0 == limbs::bit_length(mag.data(), mag.size())) return "0";
 
     const long long exp = cols_state_[j].exponent;
     std::string digits;
@@ -486,7 +486,7 @@ std::string ColumnBlockMatrix::to_exact_decimal(std::size_t i,
     }
 
     std::string out;
-    if (frac_digits == 0) {
+    if (0 == frac_digits) {
         out = digits;
     } else {
         if (digits.size() <= frac_digits) {
@@ -527,7 +527,7 @@ void ColumnBlockMatrix::reserve_for(const double* b, std::size_t count,
             const double v = b[i * stride + j];
             if (!std::isfinite(v)) continue;
             const DoubleParts p = decompose(v);
-            if (p.mantissa == 0) continue;
+            if (0 == p.mantissa) continue;
 
             const long long lsb = p.exponent;
             const long long msb =

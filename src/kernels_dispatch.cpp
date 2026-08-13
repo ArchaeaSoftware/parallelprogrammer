@@ -13,7 +13,7 @@ bool use_avx512()
     // Escape hatch so both variants can be measured and cross-checked from a
     // single binary.
     if (const char* forced = std::getenv("CBFP_KERNEL")) {
-        if (std::strcmp(forced, "scalar") == 0) return false;
+        if (0 == std::strcmp(forced, "scalar")) return false;
     }
 #if defined(CBFP_HAVE_AVX512)
     __builtin_cpu_init();
