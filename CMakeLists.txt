@@ -15,6 +15,7 @@ add_library(cbfp
   src/kernels_scalar.cpp
   src/kernels_dispatch.cpp
   src/column_accumulator.cpp
+  src/survey.cpp
 )
 
 # The AVX-512 kernels get their own translation unit with their own flags, so

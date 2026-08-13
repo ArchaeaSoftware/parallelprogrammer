@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "cbfp/column_accumulator.hpp"
+#include "cbfp/survey.hpp"
 
 namespace {
 
@@ -1104,6 +1105,64 @@ test_threaded_matches_serial()
     }
 }
 
+// The public survey is what a producer computes so an accumulator need not.
+// It has to agree with what the accumulator would have worked out itself,
+// or preallocating from it is worse than useless.
+static void
+test_public_survey()
+{
+    const std::size_t rows = 133, cols = 5;
+    std::mt19937_64 rng(31337);
+    std::vector<double> colmajor(rows * cols), rowmajor(rows * cols);
+    for (std::size_t j = 0; j < cols; ++j) {
+        for (std::size_t i = 0; i < rows; ++i) {
+            const std::uint64_t m = (rng() | (std::uint64_t{1} << 52)) &
+                                    ((std::uint64_t{1} << 53) - 1);
+            double v = std::ldexp(static_cast<double>(m),
+                                  static_cast<int>(rng() % 200) - 100);
+            if (rng() & 1) v = -v;
+            if (0 == j) v = 0.0;  // an all-zero column
+            colmajor[j * rows + i] = v;
+            rowmajor[i * cols + j] = v;
+        }
+    }
+
+    std::vector<cbfp::Survey> a(cols), b(cols);
+    cbfp::survey_matrix_col_major(colmajor.data(), rows, cols, a.data());
+    cbfp::survey_matrix(rowmajor.data(), rows, cols, b.data());
+
+    for (std::size_t j = 0; j < cols; ++j) {
+        CHECK(a[j].any == b[j].any);
+        CHECK(a[j].nonfinite == b[j].nonfinite);
+        CHECK(a[j].min_exponent == b[j].min_exponent);
+        CHECK(a[j].max_top == b[j].max_top);
+    }
+    CHECK(!a[0].any);  // the zero column
+    CHECK(a[1].any);
+
+    // The extents must actually bound the data: accumulating one matrix into a
+    // column reserved from its own survey must need no rescale and no widen.
+    for (std::size_t j = 1; j < cols; ++j) {
+        cbfp::ColumnBlockMatrix one(rows, 1);
+        one.reserve_column(
+            j == 1 ? 0 : 0, static_cast<int>(a[j].min_exponent),
+            static_cast<std::size_t>(a[j].max_top - a[j].min_exponent) + 2);
+        const int exp_before = one.column_exponent(0);
+        const std::size_t limbs_before = one.column_limbs(0);
+        one.add_column(0, colmajor.data() + j * rows);
+        CHECK(one.column_exponent(0) == exp_before);
+        CHECK(one.column_limbs(0) == limbs_before);
+    }
+
+    // A non-finite anywhere must be reported.
+    {
+        std::vector<double> bad(rows, 1.0);
+        bad[rows / 2] = std::numeric_limits<double>::infinity();
+        const cbfp::Survey s = cbfp::survey_column(bad.data(), rows);
+        CHECK(s.nonfinite);
+    }
+}
+
 int
 main()
 {
@@ -1133,6 +1192,7 @@ main()
     test_order_independent_across_entry_points();
     test_zero_crossing_preserves_value();
     test_threaded_matches_serial();
+    test_public_survey();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

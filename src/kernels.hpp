@@ -14,20 +14,13 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "cbfp/survey.hpp"
+
 namespace cbfp {
 namespace kernels {
 
-// What the first pass needs to learn about a column of incoming values.
-struct Survey {
-    // Lowest true-ulp exponent among nonzero values, or a lower bound on it
-    // when that was enough to rule out a rescale. Either way it is safe to use
-    // as a column exponent; the bound is only ever looser, never lower than
-    // the caller's floor.
-    long long min_exponent;
-    long long max_top;  // highest bit position reached, exclusive
-    bool any;           // false if every value was zero
-    bool nonfinite;     // true if any value was inf or NaN
-};
+// The public Survey is what the kernels produce; nothing here needs its own.
+using Survey = ::cbfp::Survey;
 
 // `floor_exponent` is the column's current exponent. The survey needs the exact
 // minimum only when the incoming values could drop below it; otherwise a cheap
