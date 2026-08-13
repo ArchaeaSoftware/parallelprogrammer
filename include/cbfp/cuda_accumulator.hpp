@@ -21,6 +21,15 @@
 
 #include "cbfp/limbs.hpp"
 
+// CUDA's opaque handle types, forward-declared rather than pulled in from
+// cuda_runtime.h so this header stays usable from a plain C++ translation unit
+// with no CUDA toolkit headers on its include path -- only the link needs
+// cudart. cudaStream_t and cudaEvent_t are exactly these pointer types, and
+// cuda_accumulator.cu static_asserts as much, so drift would be a compile
+// error rather than a silent one.
+struct CUstream_st;
+struct CUevent_st;
+
 namespace cbfp {
 
 class ColumnBlockMatrix;
@@ -111,8 +120,8 @@ private:
     struct Slot {
         double* pinned = nullptr;
         double* device = nullptr;
-        void* copied = nullptr;  // cudaEvent_t: H2D into `device` finished
-        void* done = nullptr;    // cudaEvent_t: last kernel reading it finished
+        CUevent_st* copied = nullptr;  // H2D into `device` finished
+        CUevent_st* done = nullptr;    // last kernel to read it finished
         bool in_flight = false;
     };
 
@@ -138,9 +147,12 @@ private:
     // Copy and compute are separate streams so batch N+1's transfer runs on
     // the copy engine while batch N is still accumulating. On one stream they
     // serialize, and the transfer is the longer of the two.
-    void* copy_stream_ = nullptr;     // cudaStream_t
-    void* compute_stream_ = nullptr;  // cudaStream_t
-    void* descriptors_ = nullptr;     // device array of per-column descriptors
+    CUstream_st* copy_stream_ = nullptr;
+    CUstream_st* compute_stream_ = nullptr;
+    // These two stay void*: they point at types defined inside the .cu, which
+    // is where they belong -- the descriptor layout is not this header's
+    // business.
+    void* descriptors_ = nullptr;  // device ColumnDesc[]
     bool descriptors_stale_ = true;
     void* survey_out_ =
         nullptr;  // device survey results, for device-side input

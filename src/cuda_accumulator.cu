@@ -4,6 +4,7 @@
 #include <cstring>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include "cbfp/column_accumulator.hpp"
@@ -14,6 +15,14 @@ namespace cbfp {
 namespace {
 
 using limbs::limb_t;
+
+// The header forward-declares these rather than including cuda_runtime.h. If
+// CUDA ever renamed the underlying structs this would stop compiling here,
+// which is the point.
+static_assert(std::is_same<cudaStream_t, CUstream_st*>::value,
+              "cudaStream_t is no longer CUstream_st*");
+static_assert(std::is_same<cudaEvent_t, CUevent_st*>::value,
+              "cudaEvent_t is no longer CUevent_st*");
 
 [[noreturn]] void cuda_fail(cudaError_t status, const char* call,
                             const char* file, int line)
@@ -139,8 +148,7 @@ __global__ void survey_kernel(const double* __restrict__ values,
     int tbad = 0;
 
     const std::size_t step = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    for (std::size_t i =
-             static_cast<std::size_t>(blockIdx.x) * blockDim.x + tid;
+    for (std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x + tid;
          i < rows; i += step) {
         unsigned long long m;
         int e, top;
@@ -299,11 +307,8 @@ CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t rows, std::size_t cols)
            << "limit of " << max_grid_y;
         throw std::runtime_error(os.str());
     }
-    cudaStream_t cs, ks;
-    cuda(StreamCreate(&cs));
-    cuda(StreamCreate(&ks));
-    copy_stream_ = cs;
-    compute_stream_ = ks;
+    cuda(StreamCreate(&copy_stream_));
+    cuda(StreamCreate(&compute_stream_));
 
     if (cols_ != 0) {
         cuda(Malloc(&descriptors_, cols_ * sizeof(ColumnDesc)));
@@ -324,13 +329,12 @@ CudaColumnBlockMatrix::~CudaColumnBlockMatrix()
     for (Slot& s : slots_) {
         if (s.pinned) cudaFreeHost(s.pinned);
         if (s.device) cudaFree(s.device);
-        if (s.copied) cudaEventDestroy(static_cast<cudaEvent_t>(s.copied));
-        if (s.done) cudaEventDestroy(static_cast<cudaEvent_t>(s.done));
+        if (s.copied) cudaEventDestroy(s.copied);
+        if (s.done) cudaEventDestroy(s.done);
     }
-    if (copy_stream_)
-        cudaStreamDestroy(static_cast<cudaStream_t>(copy_stream_));
+    if (copy_stream_) cudaStreamDestroy(copy_stream_);
     if (compute_stream_) {
-        cudaStreamDestroy(static_cast<cudaStream_t>(compute_stream_));
+        cudaStreamDestroy(compute_stream_);
     }
 }
 
@@ -432,11 +436,8 @@ void CudaColumnBlockMatrix::ensure_slots(std::size_t words)
             HostAlloc(&s.pinned, words * sizeof(double), cudaHostAllocDefault));
         cuda(Malloc(&s.device, words * sizeof(double)));
         if (!s.done) {
-            cudaEvent_t e;
-            cuda(EventCreateWithFlags(&e, cudaEventDisableTiming));
-            s.done = e;
-            cuda(EventCreateWithFlags(&e, cudaEventDisableTiming));
-            s.copied = e;
+            cuda(EventCreateWithFlags(&s.done, cudaEventDisableTiming));
+            cuda(EventCreateWithFlags(&s.copied, cudaEventDisableTiming));
         }
         s.in_flight = false;
     }
@@ -496,7 +497,7 @@ void CudaColumnBlockMatrix::add_matrix_col_major(const double* b,
     Slot& s = slots_[slot_];
     // A slot cannot be refilled until the kernel that last read it is done.
     if (s.in_flight) {
-        cuda(EventSynchronize(static_cast<cudaEvent_t>(s.done)));
+        cuda(EventSynchronize(s.done));
         s.in_flight = false;
     }
 
@@ -505,21 +506,17 @@ void CudaColumnBlockMatrix::add_matrix_col_major(const double* b,
                     rows_ * sizeof(double));
     }
     cuda(MemcpyAsync(s.device, s.pinned, rows_ * cols_ * sizeof(double),
-                     cudaMemcpyHostToDevice,
-                     static_cast<cudaStream_t>(copy_stream_)));
-    cuda(EventRecord(static_cast<cudaEvent_t>(s.copied),
-                     static_cast<cudaStream_t>(copy_stream_)));
+                     cudaMemcpyHostToDevice, copy_stream_));
+    cuda(EventRecord(s.copied, copy_stream_));
 
     // Runs against the copy above, not after it.
     validate_host_survey(s.pinned);
 
     // The accumulate waits on this slot's copy, but nothing else does, so the
     // next batch's transfer proceeds on the copy engine meanwhile.
-    cuda(StreamWaitEvent(static_cast<cudaStream_t>(compute_stream_),
-                         static_cast<cudaEvent_t>(s.copied), 0));
+    cuda(StreamWaitEvent(compute_stream_, s.copied, 0));
     launch_accumulate(s.device, rows_);
-    cuda(EventRecord(static_cast<cudaEvent_t>(s.done),
-                     static_cast<cudaStream_t>(compute_stream_)));
+    cuda(EventRecord(s.done, compute_stream_));
     s.in_flight = true;
     slot_ ^= 1;
 }
@@ -533,8 +530,8 @@ void CudaColumnBlockMatrix::add_matrix_col_major_device(const double* b,
 
 void CudaColumnBlockMatrix::synchronize() const
 {
-    cuda(StreamSynchronize(static_cast<cudaStream_t>(copy_stream_)));
-    cuda(StreamSynchronize(static_cast<cudaStream_t>(compute_stream_)));
+    cuda(StreamSynchronize(copy_stream_));
+    cuda(StreamSynchronize(compute_stream_));
 }
 
 void CudaColumnBlockMatrix::accumulate_device(const double* b,
@@ -561,18 +558,15 @@ void CudaColumnBlockMatrix::accumulate_device(const double* b,
     std::vector<DeviceSurvey> surveys(cols_);
     for (auto& s : surveys) s = DeviceSurvey{INT_MAX, INT_MIN, 0, 0};
     cuda(MemcpyAsync(survey_out_, surveys.data(), cols_ * sizeof(DeviceSurvey),
-                     cudaMemcpyHostToDevice,
-                     static_cast<cudaStream_t>(compute_stream_)));
+                     cudaMemcpyHostToDevice, compute_stream_));
 
-    survey_kernel<<<grid, kBlock, 0,
-                    static_cast<cudaStream_t>(compute_stream_)>>>(
+    survey_kernel<<<grid, kBlock, 0, compute_stream_>>>(
         b, rows_, col_stride, static_cast<DeviceSurvey*>(survey_out_));
     // This is the drain the host path avoids: with the input already on the
     // device there is nothing to survey on the host, so the verdict has to come
     // back before the accumulate can be allowed to run.
     cuda(MemcpyAsync(surveys.data(), survey_out_, cols_ * sizeof(DeviceSurvey),
-                     cudaMemcpyDeviceToHost,
-                     static_cast<cudaStream_t>(compute_stream_)));
+                     cudaMemcpyDeviceToHost, compute_stream_));
     synchronize();
 
     for (std::size_t j = 0; j < cols_; ++j) {
@@ -623,9 +617,8 @@ void CudaColumnBlockMatrix::launch_accumulate(const double* b,
                                   : (rows_ + kBlock - 1) / kBlock);
     const dim3 grid(gx == 0 ? 1 : gx, static_cast<unsigned>(cols_));
 
-    accumulate_kernel<64>
-        <<<grid, kBlock, 0, static_cast<cudaStream_t>(compute_stream_)>>>(
-            static_cast<const ColumnDesc*>(descriptors_), b, rows_, col_stride);
+    accumulate_kernel<64><<<grid, kBlock, 0, compute_stream_>>>(
+        static_cast<const ColumnDesc*>(descriptors_), b, rows_, col_stride);
 }
 
 std::vector<limb_t> CudaColumnBlockMatrix::entry_limbs(std::size_t i,
