@@ -797,23 +797,28 @@ CudaColumnBlockMatrix::validate_host_survey(const double *b,
                                             std::size_t col_stride)
 {
     for (std::size_t j = 0; j < cols_; ++j) {
-        const Column &c = cols_state_[j];
-        if (!c.reserved) {
+        if (!cols_state_[j].reserved) {
             throw std::runtime_error(
                 "cbfp: every device column must be reserved before "
                 "accumulation");
         }
-        // Passing the column's own exponent as the floor lets the survey stop
-        // at a lower bound whenever no rescale could be due, and only pay for
-        // the exact true-ulp minimum when it might be.
-        const kernels::Survey sc =
-            kernels::survey()(b + j * col_stride, rows_, c.exponent);
-        if (sc.nonfinite) {
+    }
+
+    // Not threaded, and measured rather than assumed: with two slots in
+    // rotation the survey of the next batch already overlaps the kernel
+    // streaming the previous one -- 0.5 ms of survey inside 1.26 ms of
+    // transfer at 65536x64 -- so it is not on the critical path. Threading it
+    // measured flat on this path, helped one shape of the staged path and hurt
+    // another.
+    for (std::size_t j = 0; j < cols_; ++j) {
+        const kernels::Survey sv = kernels::survey()(b + j * col_stride, rows_,
+                                                     cols_state_[j].exponent);
+        if (sv.nonfinite) {
             throw std::domain_error(
                 "cbfp: cannot accumulate a non-finite value");
         }
-        if (!sc.any) continue;
-        require_fit(j, sc.min_exponent, sc.max_top);
+        if (!sv.any) continue;
+        require_fit(j, sv.min_exponent, sv.max_top);
     }
 }
 

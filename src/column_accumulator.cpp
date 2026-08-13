@@ -13,6 +13,7 @@
 #include <thread>
 
 #include "kernels.hpp"
+#include "thread_pool.hpp"
 
 namespace cbfp {
 
@@ -120,63 +121,6 @@ ColumnBlockMatrix::ColumnBlockMatrix(std::size_t rows, std::size_t cols)
     column_buffers_[0].resize(rows_);
 }
 
-// Workers parked on a condition variable between calls. The calling thread
-// takes slot 0 and runs its own share, so `n` threads means n-1 workers.
-struct ColumnBlockMatrix::Pool {
-    std::vector<std::thread> workers;
-    std::mutex m;
-    std::condition_variable go, done;
-    std::function<void(unsigned)> job;
-    unsigned epoch = 0;
-    unsigned outstanding = 0;
-    bool stop = false;
-
-    explicit Pool(unsigned n)
-    {
-        for (unsigned w = 1; w < n; ++w) {
-            workers.emplace_back([this, w] {
-                unsigned seen = 0;
-                for (;;) {
-                    std::unique_lock<std::mutex> lk(m);
-                    go.wait(lk, [&] { return stop || epoch != seen; });
-                    if (stop) return;
-                    seen = epoch;
-                    auto fn = job;
-                    lk.unlock();
-                    fn(w);
-                    lk.lock();
-                    if (0 == --outstanding) done.notify_one();
-                }
-            });
-        }
-    }
-
-    ~Pool()
-    {
-        {
-            std::lock_guard<std::mutex> lk(m);
-            stop = true;
-        }
-        go.notify_all();
-        for (auto &t : workers) t.join();
-    }
-
-    // Runs fn(0) here and fn(w) on each worker, returning when all are done.
-    void run(const std::function<void(unsigned)> &fn)
-    {
-        {
-            std::lock_guard<std::mutex> lk(m);
-            job = fn;
-            outstanding = static_cast<unsigned>(workers.size());
-            ++epoch;
-        }
-        go.notify_all();
-        fn(0);
-        std::unique_lock<std::mutex> lk(m);
-        done.wait(lk, [&] { return 0 == outstanding; });
-    }
-};
-
 ColumnBlockMatrix::~ColumnBlockMatrix() = default;
 ColumnBlockMatrix::ColumnBlockMatrix(ColumnBlockMatrix &&) noexcept = default;
 ColumnBlockMatrix &
@@ -189,7 +133,7 @@ ColumnBlockMatrix::set_threads(unsigned n)
     if (n == threads()) return;
     pool_.reset();
     column_buffers_.assign(n, std::vector<double>(rows_));
-    if (n > 1) pool_.reset(new Pool(n));
+    if (n > 1) pool_.reset(new detail::ThreadPool(n));
 }
 
 unsigned
@@ -399,10 +343,9 @@ ColumnBlockMatrix::accumulate_columns(const double *b, std::size_t column_step,
     }
     // A contiguous block each, so a worker's columns stay near one another in
     // memory. Columns are independent in storage, so nothing needs locking.
-    const std::size_t per = (cols_ + n - 1) / n;
     pool_->run([&](unsigned slot) {
-        const std::size_t begin = std::min(cols_, slot * per);
-        const std::size_t end = std::min(cols_, begin + per);
+        std::size_t begin = 0, end = 0;
+        pool_->partition(cols_, slot, begin, end);
         accumulate_column_range(b, column_step, row_step, log2_scale, begin,
                                 end, slot);
     });

@@ -484,32 +484,22 @@ behind the bus instead of queueing after it.
 
 | | 4096x64 | 16384x64 | 65536x64 |
 | --- | --- | --- | --- |
-| staged, buffer refilled each batch | 2.74 | 2.36 | 1.46 |
-| borrowed, refilled each batch | 2.29 | 2.24 | 1.55 |
+| staged: the library copies the caller's buffer | 2.85 | 2.71 | 1.45 |
+| borrowed from `acquire_input`, read in place | **3.13** | **3.27** | **3.27** |
 
-**These are not bus-bound, and an earlier revision of this section said they
-were.** That claim came from a benchmark that filled one mapped buffer once and
-resubmitted it, so the producer cost nothing; it read 3.11 / 3.26 / 3.23 and
-was quoted as 97% of PCIe. It was also, not coincidentally, the unsafe reuse
-pattern -- the same benchmark shape that corrupts 63% of entries once the
-buffer is actually refilled.
+3.27 Gelem/s is 26.1 GB/s of doubles against the 26.7 this link achieves, so
+the path sits at 97% of PCIe — and flat, where the copying version falls off
+as batches outgrow whatever was hiding the copy.
 
-Measured against the producer that a real caller has to run:
-
-| | 33.6 MB batch |
-| --- | --- |
-| host writing the batch, any buffer kind | 1.6-1.7 ms (~20 GB/s) |
-| host surveying it | ~0.5 ms |
-| PCIe streaming it | 1.26 ms |
-
-Writing a batch costs more than transferring it. The path is therefore bound by
-the host producing and surveying the data, not by the bus, and reading in place
-buys only the staging copy back -- which is real but is one of three comparable
-costs rather than the whole of it. Zero-copy measures at 0.84-1.06x against
-staging, not 2.2x.
-
-What it does buy unconditionally is the device-side input buffer: 33.6 MB at
-this shape, returned to the accumulator, which is what wants it.
+Neither figure counts the caller generating its data, which is not the
+library's cost. Getting that wrong produced two contradictory revisions of this
+section: first a benchmark that filled one buffer and resubmitted it, which
+measured the right thing by accident while demonstrating the unsafe reuse
+pattern; then a "correction" that timed a loop copying pre-generated test data
+into the buffer each batch, concluded the path was producer-bound rather than
+bus-bound, and was measuring the harness. What is timed now is the library:
+for a borrowed buffer, the survey and the kernel; for a staged one, those plus
+the copy the library itself performs.
 
 Ordinary host memory still works and is staged through a mapped buffer, which
 is why the middle column above improves least: that host copy then becomes the

@@ -28,6 +28,10 @@ namespace cbfp {
 const char *
 active_kernel();
 
+namespace detail {
+class ThreadPool;
+}
+
 class ColumnBlockMatrix {
 public:
     ColumnBlockMatrix(std::size_t rows, std::size_t cols);
@@ -207,10 +211,9 @@ private:
     // was the only state the columns shared.
     std::vector<std::vector<double>> column_buffers_;
 
-    // Workers, parked between calls. Defined in the .cpp so this header does
-    // not drag in <thread> and friends.
-    struct Pool;
-    std::unique_ptr<Pool> pool_;
+    // Workers, parked between calls. Held by pointer so this header does not
+    // drag in <thread> and friends.
+    std::unique_ptr<detail::ThreadPool> pool_;
 };
 
 // Decomposes a finite double into an exact odd mantissa and exponent:

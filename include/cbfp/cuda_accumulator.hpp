@@ -21,6 +21,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "cbfp/limbs.hpp"
@@ -46,6 +47,9 @@ cuda_available();
 class CudaColumnBlockMatrix {
 public:
     CudaColumnBlockMatrix(std::size_t rows, std::size_t cols);
+
+    // Declared, not implicit: the worker pool is held by unique_ptr to an
+    // incomplete type, so the destructor must be defined where that is.
     ~CudaColumnBlockMatrix();
 
     CudaColumnBlockMatrix(const CudaColumnBlockMatrix &) = delete;
