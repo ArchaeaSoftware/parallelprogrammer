@@ -375,6 +375,18 @@ std::vector<limb_t> ColumnBlockMatrix::magnitude(std::size_t i, std::size_t j,
     return mag;
 }
 
+std::vector<limb_t> ColumnBlockMatrix::entry_limbs(std::size_t i,
+                                                   std::size_t j) const
+{
+    check_index(i, j);
+    const Column& c = cols_state_[j];
+    std::vector<limb_t> v(c.limbs.size());
+    for (std::size_t k = 0; k < c.limbs.size(); ++k) {
+        v[k] = c.limbs[k].data()[i];
+    }
+    return v;
+}
+
 bool ColumnBlockMatrix::is_zero(std::size_t i, std::size_t j) const
 {
     check_index(i, j);

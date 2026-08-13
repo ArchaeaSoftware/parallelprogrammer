@@ -91,6 +91,13 @@ public:
 
     bool is_zero(std::size_t i, std::size_t j) const;
 
+    // Entry (i, j)'s stored two's complement limbs, little-endian, exactly as
+    // held. Not a hot path: this exists so a second implementation can be
+    // checked against this one. Comparing limbs is strictly stronger than
+    // comparing to_double or to_exact_decimal, since identical limbs and an
+    // identical column exponent imply identical everything downstream.
+    std::vector<limbs::limb_t> entry_limbs(std::size_t i, std::size_t j) const;
+
     // --- column state / tuning ---------------------------------------------
 
     // Power-of-two weight of bit 0 of this column's stored integers.
