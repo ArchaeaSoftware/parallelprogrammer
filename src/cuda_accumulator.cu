@@ -54,9 +54,14 @@ constexpr unsigned kMaxGridX = 1024;
 // What the first pass learns about a column, mirroring kernels::Scan. Reduced
 // across the whole column with atomics, so every field is an atomic-friendly
 // type rather than the host struct's bools.
+//
+// The exponents are int where the host struct uses long long. A double's
+// exponent lives in [-1074, 1077] and the container caps its own at 2^24, so
+// 32 bits is three orders of magnitude more than enough -- and it buys 32-bit
+// atomics and halves this kernel's shared memory.
 struct DeviceScan {
-    long long min_exponent;
-    long long max_top;
+    int min_exponent;
+    int max_top;
     int any;
     int nonfinite;
 };
@@ -67,7 +72,7 @@ struct ColumnDesc {
     // this pointer load is a broadcast of one value, L1-resident for the life
     // of the kernel: the array is nlimbs * 8 bytes, 128 for a 16-limb column.
     limb_t* const* bases;
-    long long exponent;
+    int exponent;
     unsigned nlimbs;
 };
 
@@ -80,8 +85,8 @@ struct ColumnDesc {
 //
 // Both collapse to e = max(biased, 1) - 1075.
 __device__ inline void split_device(double v, unsigned long long& mantissa,
-                                    long long& exponent, long long& top,
-                                    bool& negative, bool& nonfinite)
+                                    int& exponent, int& top, bool& negative,
+                                    bool& nonfinite)
 {
     const unsigned long long bits =
         static_cast<unsigned long long>(__double_as_longlong(v));
@@ -90,7 +95,7 @@ __device__ inline void split_device(double v, unsigned long long& mantissa,
 
     unsigned long long m = frac;
     if (biased != 0) m |= 1ull << 52;
-    long long e = static_cast<long long>(biased < 1 ? 1 : biased) - 1075;
+    int e = static_cast<int>(biased < 1 ? 1 : biased) - 1075;
 
     negative = (bits >> 63) != 0;
     nonfinite = (biased == 0x7FFull);
@@ -111,32 +116,30 @@ __device__ inline void split_device(double v, unsigned long long& mantissa,
 // column's scale is settled. That does not pay here: this pass is bound by
 // reading the column, and the trailing-zero count is a few ALU ops on a value
 // already in registers. One exact pass is both simpler and cheaper.
-__global__ void scan_kernel(const double* __restrict__ values,
-                            unsigned long long rows,
-                            unsigned long long col_stride,
+__global__ void scan_kernel(const double* __restrict__ values, std::size_t rows,
+                            std::size_t col_stride,
                             DeviceScan* __restrict__ out)
 {
-    __shared__ long long s_min[kBlock];
-    __shared__ long long s_max[kBlock];
+    __shared__ int s_min[kBlock];
+    __shared__ int s_max[kBlock];
     __shared__ int s_any[kBlock];
     __shared__ int s_bad[kBlock];
 
+    const unsigned tid = threadIdx.x;
     const unsigned j = blockIdx.y;
     const double* col = values + static_cast<std::size_t>(j) * col_stride;
 
-    long long tmin = LLONG_MAX;
-    long long tmax = LLONG_MIN;
+    int tmin = INT_MAX;
+    int tmax = INT_MIN;
     int tany = 0;
     int tbad = 0;
 
-    const unsigned long long step =
-        static_cast<unsigned long long>(gridDim.x) * blockDim.x;
-    for (unsigned long long i =
-             static_cast<unsigned long long>(blockIdx.x) * blockDim.x +
-             threadIdx.x;
+    const std::size_t step = static_cast<std::size_t>(gridDim.x) * blockDim.x;
+    for (std::size_t i =
+             static_cast<std::size_t>(blockIdx.x) * blockDim.x + tid;
          i < rows; i += step) {
         unsigned long long m;
-        long long e, top;
+        int e, top;
         bool neg, bad;
         split_device(col[i], m, e, top, neg, bad);
         if (bad) tbad = 1;
@@ -147,24 +150,23 @@ __global__ void scan_kernel(const double* __restrict__ values,
         }
     }
 
-    const unsigned t = threadIdx.x;
-    s_min[t] = tmin;
-    s_max[t] = tmax;
-    s_any[t] = tany;
-    s_bad[t] = tbad;
+    s_min[tid] = tmin;
+    s_max[tid] = tmax;
+    s_any[tid] = tany;
+    s_bad[tid] = tbad;
     __syncthreads();
     for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (t < s) {
-            if (s_min[t + s] < s_min[t]) s_min[t] = s_min[t + s];
-            if (s_max[t + s] > s_max[t]) s_max[t] = s_max[t + s];
-            s_any[t] |= s_any[t + s];
-            s_bad[t] |= s_bad[t + s];
+        if (tid < s) {
+            if (s_min[tid + s] < s_min[tid]) s_min[tid] = s_min[tid + s];
+            if (s_max[tid + s] > s_max[tid]) s_max[tid] = s_max[tid + s];
+            s_any[tid] |= s_any[tid + s];
+            s_bad[tid] |= s_bad[tid + s];
         }
         __syncthreads();
     }
 
     // One atomic per block rather than one per thread.
-    if (t == 0) {
+    if (tid == 0) {
         if (s_any[0]) {
             atomicMin(&out[j].min_exponent, s_min[0]);
             atomicMax(&out[j].max_top, s_max[0]);
@@ -187,8 +189,7 @@ __global__ void scan_kernel(const double* __restrict__ values,
 template <int kRadix>
 __global__ void accumulate_kernel(const ColumnDesc* __restrict__ cols,
                                   const double* __restrict__ values,
-                                  unsigned long long rows,
-                                  unsigned long long col_stride)
+                                  std::size_t rows, std::size_t col_stride)
 {
     // The addend split, the offset arithmetic and the limb mask below are all
     // written in terms of kRadix. What is not yet written is the carry-save
@@ -205,24 +206,24 @@ __global__ void accumulate_kernel(const ColumnDesc* __restrict__ cols,
     const ColumnDesc c = cols[j];
     const double* col = values + static_cast<std::size_t>(j) * col_stride;
 
-    const unsigned long long step =
-        static_cast<unsigned long long>(gridDim.x) * blockDim.x;
-    for (unsigned long long i =
-             static_cast<unsigned long long>(blockIdx.x) * blockDim.x +
-             threadIdx.x;
+    const unsigned tid = threadIdx.x;
+    const std::size_t step = static_cast<std::size_t>(gridDim.x) * blockDim.x;
+    for (std::size_t i =
+             static_cast<std::size_t>(blockIdx.x) * blockDim.x + tid;
          i < rows; i += step) {
         unsigned long long m;
-        long long e, top;
+        int e, top;
         bool neg, bad;
         split_device(col[i], m, e, top, neg, bad);
         if (m == 0) continue;
 
-        // The host has already checked that every value fits the column it was
-        // reserved for, so the shift cannot be negative.
-        const unsigned long long shift =
-            static_cast<unsigned long long>(e - c.exponent);
-        const unsigned off = static_cast<unsigned>(shift / kRadix);
-        const unsigned bit = static_cast<unsigned>(shift % kRadix);
+        // The host has already checked that every value fits the column it
+        // was reserved for, so the shift cannot be negative. Were it ever
+        // negative anyway, the unsigned conversion puts `off` far above
+        // nlimbs and the loop below simply does not run.
+        const int shift = e - c.exponent;
+        const unsigned off = static_cast<unsigned>(shift) / kRadix;
+        const unsigned bit = static_cast<unsigned>(shift) % kRadix;
 
         // A 53-bit significand at intra-limb offset `bit` spans two limbs at
         // radix 64 and at radix 52 alike.
@@ -543,7 +544,7 @@ void CudaColumnBlockMatrix::accumulate_device(const double* b,
     // reservation cannot hold. The decisions the CPU makes by rescaling and
     // widening are errors here, because neither is possible mid-launch.
     std::vector<DeviceScan> scans(cols_);
-    for (auto& s : scans) s = DeviceScan{LLONG_MAX, LLONG_MIN, 0, 0};
+    for (auto& s : scans) s = DeviceScan{INT_MAX, INT_MIN, 0, 0};
     cuda(MemcpyAsync(scan_out_, scans.data(), cols_ * sizeof(DeviceScan),
                      cudaMemcpyHostToDevice,
                      static_cast<cudaStream_t>(compute_stream_)));
