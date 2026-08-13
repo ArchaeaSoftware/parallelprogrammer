@@ -603,6 +603,64 @@ produce:
 The election serializes on one counter, so it is O(blocks); it wins below about
 2000 blocks and loses above, which the grid cap keeps it under.
 
+### Design intent: the survey belongs to whoever produced the matrix
+
+Every path here pays for a survey — a full read of the batch to learn each
+column's lowest true-ulp exponent and highest bit — and every path pays for it
+*again* on top of the read the accumulate already does. On the host path that
+is 0.729 ms at 65536x64, currently hidden behind the bus. On the device path it
+is a kernel plus a round-trip whose verdict the host must see before the
+accumulate may launch, which is 19.9 us of fixed cost a batch and 79% of a
+1024-row one.
+
+But whoever computed the matrix already touched every element, with the values
+in registers. Producing the same four numbers per column there costs a
+comparison or two and no extra memory traffic at all. And the result is
+minuscule beside the payload it describes:
+
+| | 65536x64 |
+| --- | --- |
+| matrix elements | 33.6 MB |
+| per-column survey | 1.024 KB |
+| ratio | 1 : 32768 |
+
+So it can simply be carried alongside the matrix. What that buys is out of
+proportion to its size:
+
+- **No survey, on either path.** The read disappears rather than being
+  hidden or threaded.
+- **No device round-trip.** The verdict is known before anything is launched,
+  so the survey kernel, its drain and its 19.9 us go away — and with them the
+  reason the device path ever needed to ask the host a question mid-batch.
+- **Exact pre-sizing, before any processing begins.** `reserve_for` currently
+  infers a column's exponent and width from one representative batch and a
+  count. Given the survey for every batch up front, an accumulator can be
+  allocated with precisely the limb columns the whole stream will need, and
+  then never rescale or widen at all — which is the expensive half of adaptive
+  sizing, and the half that must happen between launches.
+
+The cost is a trust boundary, and it is worth stating plainly. Today the survey
+is computed from the data, so it cannot disagree with it; handing it over means
+a producer that miscounts silently yields a wrong sum, and one that fails to
+report a non-finite value defeats the check that currently rejects it. The
+accumulate kernel already decomposes every element, so it can raise a flag for
+nothing extra — a non-finite seen, or an addend landing outside the reserved
+range — reported through the same mapped-memory channel the occupancy figure
+uses, and checked at the next readback. That turns a silent wrong answer into a
+loud one without putting a second read back on the critical path.
+
+**If the producer cannot supply it**, the fallback is to keep the survey on the
+device but stop asking the host about it. Survey and accumulate launch back to
+back, and the accumulate reads the verdict first: if the batch fits — the
+common case, and the only one when `reserve_for` has done its job — it proceeds
+with no host involvement. If it does not, the accumulate does nothing, leaving
+the accumulator untouched, and the host discovers it at the next check and
+performs the rescale or widen it needs before resubmitting. That is optimistic
+execution rather than deferred validation: a rejected batch is skipped, not
+half-applied, so there is no corrupted state to explain. The survey can also be
+folded into the copy where one is happening anyway, so the data lands in device
+memory and its extent is known from the same pass.
+
 ### Design intent: measured occupancy in place of a derived width
 
 `fit_column` sizes a column from
@@ -736,12 +794,15 @@ last revision of this list.
    at radix 52 a block's offsets span ~23% further, and that range drives the
    AVX-512 loop's trip count. De-risk as prescribed above: instantiate both
    radices and assert bit-identical `to_exact_decimal` over the corpus.
-4. **The device path's 19.9 us fixed cost.** Only affects input that is
-   already resident, and only small batches -- 79% of a 1024-row batch, 3% of
-   a 65536-row one. The survey's verdict has to come back before the
-   accumulate may launch, which drains the pipeline; surveying batch N+1
-   while batch N accumulates would hide it, since the two do not depend on
-   each other.
+4. **Take the survey out of the library**, per "the survey belongs to whoever
+   produced the matrix" above. It removes a full read from both paths, removes
+   the device path's 19.9 us round-trip entirely -- 79% of a 1024-row batch --
+   and lets an accumulator be sized exactly before any processing begins,
+   so it never rescales or widens. The interface change is small; the trust
+   boundary it introduces is the part to design carefully. Where a producer
+   cannot supply it, launching survey and accumulate back to back with the
+   accumulate self-guarding on the verdict gets most of the same benefit
+   without asking the host anything.
 
 Smaller, known: `reserve_column` issues a `cudaMemsetAsync` per limb position,
 `cols * nlimbs` of them, one-time at reserve rather than per batch. And
