@@ -639,15 +639,37 @@ proportion to its size:
   then never rescale or widen at all — which is the expensive half of adaptive
   sizing, and the half that must happen between launches.
 
-The cost is a trust boundary, and it is worth stating plainly. Today the survey
-is computed from the data, so it cannot disagree with it; handing it over means
-a producer that miscounts silently yields a wrong sum, and one that fails to
-report a non-finite value defeats the check that currently rejects it. The
-accumulate kernel already decomposes every element, so it can raise a flag for
-nothing extra — a non-finite seen, or an addend landing outside the reserved
-range — reported through the same mapped-memory channel the occupancy figure
-uses, and checked at the next readback. That turns a silent wrong answer into a
-loud one without putting a second read back on the critical path.
+The cost is a trust boundary, and the failure modes are not symmetric.
+
+**Over-reporting is harmless.** A column wider or lower than it needed to be
+holds the right answer, in more memory, marginally slower.
+
+**Under-reporting is silent, not an error**, which is the part worth designing
+for. Both directions were demonstrated as bugs earlier in this project:
+
+- *Exponent too high.* `shift = e - exponent` goes negative, the unsigned
+  conversion makes `off` enormous, and the accumulate loop never executes —
+  the value is dropped. This is the rescale bug in `eae167d`, where the shift
+  itself landed correctly and the addend that triggered it vanished, giving 8
+  where 9 was right.
+- *Width too small.* `require_fit` derives `max_addend_bits` **from the
+  survey**, so a survey that under-reports fools the check meant to catch it,
+  and the sum wraps. This is `749707f`: twenty batches of 2^60 into a one-limb
+  column gave 4611686018427387904 for 23058430092136939520.
+
+Neither raises anything, and the reason is the decision the whole structure
+rests on — the width is *derived* so that no entry can overflow, which is what
+lets the kernels skip overflow checks and be vectorized at all. Take the
+derivation from an untrusted source and that guarantee leaves with it.
+
+Verifying the metadata up front is not an option: that is the survey. But
+detecting the contradiction afterwards costs almost nothing, because the
+accumulate already decomposes every element and the facts are in registers —
+`shift < 0`, `off` beyond `nlimbs`, a non-finite significand, a carry out of
+the top limb. Any of those means reality disagreed with what it was told.
+Reported through the mapped channel the occupancy figure already uses and
+checked at the next readback, that turns a silent wrong answer into a loud one
+without putting a second read on the critical path.
 
 **If the producer cannot supply it**, the fallback is to keep the survey on the
 device but stop asking the host about it. Survey and accumulate launch back to
