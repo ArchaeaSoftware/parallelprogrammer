@@ -331,46 +331,48 @@ test_reserve_for()
 }
 
 // An addend does not grow with the batch count but the accumulated sum does,
-// so checking only the incoming values against the reservation is not enough.
-// Before this was caught, twenty batches of 2^60 into a one-limb column wrapped
-// modulo 2^64 and reported nothing.
+// so checking only the incoming values against the reservation is not enough:
+// twenty batches of 2^60 into a one-limb column once wrapped modulo 2^64 and
+// reported nothing. The column now grows to fit instead, which in a limb-major
+// layout is an allocation and a sign fill with no data movement.
 void
 test_accumulated_bound()
 {
     const std::size_t rows = 8, cols = 1;
+    const int nbatches = 20;
     std::vector<double> b(rows * cols);
     for (std::size_t i = 0; i < rows; ++i) b[i] = std::ldexp(1.0, 60);
 
     cbfp::ColumnBlockMatrix cpu(rows, cols);
     cbfp::CudaColumnBlockMatrix gpu(rows, cols);
-    gpu.reserve_column(0, 0, 64);  // one limb, exponent 0
+    gpu.reserve_column(0, 0, 64);  // one limb, deliberately too narrow
 
-    int applied = 0;
-    bool threw = false;
-    try {
-        for (int k = 0; k < 20; ++k) {
-            gpu.add_matrix_col_major(b.data());
-            cpu.add_matrix_col_major(b.data());
-            ++applied;
-        }
-    } catch (const std::runtime_error &) {
-        threw = true;
+    for (int k = 0; k < nbatches; ++k) {
+        gpu.add_matrix_col_major(b.data());
+        cpu.add_matrix_col_major(b.data());
     }
-    check(threw, "accumulating past the reserved count is rejected");
-    check(applied < 20, "rejected before the sum could wrap");
+    check(gpu.column_limbs(0) > 1, "the column grew past its reservation");
 
-    // Everything applied before the rejection must still be exact: the check
-    // has to refuse the batch, not corrupt what came before it.
+    // The CPU chose exponent 60 and the device was pinned to 0, so the device
+    // holds the same value scaled by 2^60. Compare that, not the encoding.
     std::size_t mismatches = 0;
     for (std::size_t i = 0; i < rows; ++i) {
         const std::vector<std::uint64_t> host = cpu.entry_limbs(i, 0);
         const std::vector<std::uint64_t> dev = gpu.entry_limbs(i, 0);
-        // cpu picks exponent 60 and gpu was forced to 0, so compare values
-        const std::uint64_t want = static_cast<std::uint64_t>(host[0])
-                                   << 60;  // V * 2^60
-        if (want != dev[0]) ++mismatches;
+        unsigned __int128 want = 0;
+        for (std::size_t k = host.size(); k-- > 0;) {
+            want = (want << 64) | host[k];
+        }
+        want <<= 60;
+        for (std::size_t k = 0; k < dev.size(); ++k) {
+            const std::uint64_t w =
+                static_cast<std::uint64_t>(want >> (64 * k));
+            if (w != dev[k]) ++mismatches;
+        }
     }
-    check(0 == mismatches, "the batches that were applied are still exact");
+    check(0 == mismatches, "growing kept the sum exact (" +
+                               std::to_string(mismatches) +
+                               " limb mismatches)");
 }
 
 void
@@ -419,7 +421,9 @@ test_errors()
         check(threw, "an under-reserved exponent is an error");
     }
 
-    // Likewise a column reserved too narrow to hold what arrives.
+    // A width that is too small is no longer an error -- the column grows.
+    // Only the exponent cannot be fixed after the fact, since that needs every
+    // entry shifted rather than a limb appended.
     {
         cbfp::CudaColumnBlockMatrix gpu(64, 1);
         gpu.reserve_column(0, 0, 64);
@@ -430,7 +434,8 @@ test_errors()
         } catch (const std::runtime_error &) {
             threw = true;
         }
-        check(threw, "an under-reserved width is an error");
+        check(!threw, "an under-reserved width grows instead of failing");
+        check(gpu.column_limbs(0) > 1, "and the column is wider for it");
     }
 
     // Accumulating into a column that was never reserved.

@@ -360,6 +360,21 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols,
     if (0 == tid) *ticket = 0;
 }
 
+// A newly appended limb array holds the sign extension of the one below it:
+// all-ones where that limb is negative, all-zeros otherwise. This is the whole
+// cost of widening in a limb-major layout -- nothing already allocated moves.
+__global__ void
+sign_fill_kernel(limb_t *__restrict__ dst, const limb_t *__restrict__ src,
+                 std::size_t rows)
+{
+    const std::size_t step = static_cast<std::size_t>(gridDim.x) * blockDim.x;
+    for (std::size_t i =
+             static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         i < rows; i += step) {
+        dst[i] = static_cast<limb_t>(static_cast<long long>(src[i]) >> 63);
+    }
+}
+
 std::size_t
 ceil_log2(std::size_t n)
 {
@@ -501,6 +516,43 @@ CudaColumnBlockMatrix::reserve_column(std::size_t j, int exponent,
     descriptors_stale_ = true;
 }
 
+// Appends limb positions until the column has `needed` of them. Existing
+// arrays are not touched -- that is what limb-major buys, and what the
+// per-limb-position allocation preserves -- so growth is an allocation plus a
+// sign fill, with no data movement at all.
+//
+// Synchronizes first. Widening rewrites the descriptor array that in-flight
+// kernels are reading, and it is rare enough that draining once is simpler
+// than versioning the descriptors.
+void
+CudaColumnBlockMatrix::grow_column(std::size_t j, std::size_t needed)
+{
+    Column &c = cols_state_[j];
+    if (c.nlimbs >= needed) return;
+    synchronize();
+
+    const std::size_t bytes = rows_ * sizeof(limb_t);
+    const dim3 grid = launch_grid(rows_, 1);
+    for (std::size_t k = c.nlimbs; k < needed; ++k) {
+        limb_t *fresh = nullptr;
+        cuda(MallocAsync(&fresh, bytes, st_compute_));
+        sign_fill_kernel<<<grid, kBlock, 0, st_compute_>>>(
+            fresh, c.bases[k - 1], rows_);
+        c.bases.push_back(fresh);
+    }
+    c.nlimbs = needed;
+
+    // A fresh array rather than an overwrite: the old one may still be under a
+    // kernel that has not retired, and cudaFreeAsync releases it in order.
+    limb_t **fresh_bases = nullptr;
+    cuda(Malloc(&fresh_bases, c.nlimbs * sizeof(limb_t *)));
+    cuda(Memcpy(fresh_bases, c.bases.data(), c.nlimbs * sizeof(limb_t *),
+                cudaMemcpyHostToDevice));
+    cudaFree(c.dev_bases);
+    c.dev_bases = fresh_bases;
+    descriptors_stale_ = true;
+}
+
 // The derived bound ColumnBlockMatrix::fit_column applies, checked against
 // what the column was actually reserved for. Called once per column per batch,
 // after the survey has established that batch's extent.
@@ -520,16 +572,10 @@ CudaColumnBlockMatrix::require_fit(std::size_t j, long long min_exponent,
         c.max_addend_bits, static_cast<std::size_t>(max_top - c.exponent));
     ++c.add_count;
 
-    const std::size_t needed =
+    const std::size_t needed_bits =
         c.max_addend_bits + ceil_log2(c.add_count + 1) + 1;
-    if (needed > c.nlimbs * limbs::kLimbBits) {
-        std::ostringstream os;
-        os << "cbfp: column " << j << " was reserved at "
-           << c.nlimbs * limbs::kLimbBits << " bits, but " << c.add_count
-           << " batches reaching " << c.max_addend_bits << " bits need "
-           << needed << "; reserve_for a larger count";
-        throw std::runtime_error(os.str());
-    }
+    const std::size_t needed = limbs_for_bits(needed_bits);
+    if (needed > c.nlimbs) grow_column(j, needed);
 }
 
 // Shared tail of both reserve_for entry points: turn per-column exponent
@@ -698,6 +744,11 @@ CudaColumnBlockMatrix::validate_host_survey(const double *packed)
 {
     for (std::size_t j = 0; j < cols_; ++j) {
         const Column &c = cols_state_[j];
+        if (!c.reserved) {
+            throw std::runtime_error(
+                "cbfp: every device column must be reserved before "
+                "accumulation");
+        }
         // Passing the column's own exponent as the floor lets the survey stop
         // at a lower bound whenever no rescale could be due, and only pay for
         // the exact true-ulp minimum when it might be.

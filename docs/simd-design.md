@@ -613,10 +613,12 @@ CUDA path. What is left:
    has `reserve_for`, which sizes every column from one representative batch;
    the device has no equivalent, though the survey kernel that would implement
    it is already written and validated.
-2. **Device-side widening**, which (1) unblocks: appending limb arrays disturbs
-   nothing already allocated, so growth between launches is cheap once the fit
-   test is exact. Rescaling is the harder half and can be done in place, since
-   `shift_left` reads only indices at or below the one it writes -- walking
+2. **Device-side rescaling.** Widening has landed: a column that outgrows its
+   reservation appends limb arrays between launches and sign-fills them, with
+   nothing already allocated moved. Lowering an exponent is the harder half,
+   because it shifts every entry rather than appending to them, and it remains
+   an error on the device. It can be done in place when it comes:
+   `shift_left` reads only indices at or below the one it writes, so walking
    limb positions downward is safe with `dst == src`.
 3. **Carry-save at radix 52 on the CPU.** The largest measured win outstanding:
    deleting the carry chain outright is worth 25-36% at 1-4 limbs and 45-52% at

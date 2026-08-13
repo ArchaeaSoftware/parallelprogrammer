@@ -8,11 +8,15 @@
 // when to rescale, when to widen, how the exponent moves -- not the memory.
 // See docs/simd-design.md.
 //
-// Pre-sizing is mandatory here, where it is only an optimization on the CPU.
-// Growing a column mid-kernel would mean reallocating device memory from
-// inside a launch, so a column's exponent and width are fixed before any
-// accumulation touches it, and values that would not fit are an error rather
-// than a silent rescale.
+// A column's *exponent* is fixed before anything is accumulated into it, and
+// values needing a lower one are an error rather than a silent rescale:
+// lowering it means shifting every entry, which cannot be done from inside a
+// launch. Its *width* is not fixed -- a column that needs more limbs grows
+// between launches, which in a limb-major layout is an allocation and a sign
+// fill with nothing already allocated moved.
+//
+// So reserve_for is an optimization here as it is on the CPU, not a
+// requirement, except in the one direction the device cannot repair.
 #pragma once
 
 #include <cstddef>
@@ -172,6 +176,7 @@ private:
     void reserve_from_extents(const long long *low, const long long *high,
                               const char *any, std::size_t count);
     void require_fit(std::size_t j, long long min_exponent, long long max_top);
+    void grow_column(std::size_t j, std::size_t needed);
     void ensure_slots(std::size_t words);
 
     std::size_t rows_;
