@@ -13,11 +13,24 @@ namespace {
 
 constexpr std::uint64_t kFracMask = (std::uint64_t{1} << 52) - 1;
 
-// Eight doubles from a contiguous column. `k` masks off the tail so a partial
-// block never reads past the input. There is deliberately no gather here: the
-// caller stages a strided column instead, because gathering costs more than
-// the decomposition it would feed.
-inline __m512d load_column(const double* values, std::size_t row, __mmask8 k)
+// Eight doubles from a contiguous column. There is deliberately no gather
+// here: the caller stages a strided column instead, because gathering costs
+// more than the decomposition it would feed.
+inline __m512d load_column(const double* values, std::size_t row)
+{
+    return _mm512_loadu_pd(values + row);
+}
+
+// The final partial block, which is the only one that could read past the
+// caller's array. Masked-off lanes read as zero, which is already inert
+// everywhere downstream -- a zero has no mantissa, so it never goes live.
+//
+// Every loop below peels this block out rather than masking all of them: the
+// mask is loop-invariant for all but the last block, and threading it through
+// the body costs ~4% of the accumulate and ~15% of the scan, whose pass-1
+// body is short enough for three extra instructions to matter.
+inline __m512d load_column_tail(const double* values, std::size_t row,
+                                __mmask8 k)
 {
     return _mm512_maskz_loadu_pd(k, values + row);
 }
@@ -99,9 +112,9 @@ Scan scan_column_avx512(const double* values, std::size_t rows,
     const __m512i kExp = _mm512_set1_epi64(0x7FF);
     const __m512i kOne = _mm512_set1_epi64(1);
 
-    for (std::size_t row = 0; row < rows; row += 8) {
-        const __mmask8 k = tail_mask(row, rows);
-        const __m512i bits = _mm512_castpd_si512(load_column(values, row, k));
+    // `k` is all-ones for every block but the last, so it is passed as a
+    // constant here and the whole body folds down to the unmasked form.
+    const auto exponent_step = [&](__m512i bits, __mmask8 k) {
         const __m512i abs_bits = _mm512_and_si512(bits, kAbs);
         const __m512i biased = _mm512_srli_epi64(abs_bits, 52);
 
@@ -112,6 +125,15 @@ Scan scan_column_avx512(const double* values, std::size_t rows,
         vmin = _mm512_mask_min_epu64(vmin, live, vmin,
                                      _mm512_max_epu64(biased, kOne));
         vmax_abs = _mm512_mask_max_epu64(vmax_abs, live, vmax_abs, abs_bits);
+    };
+
+    std::size_t row = 0;
+    for (; row + 8 <= rows; row += 8) {
+        exponent_step(_mm512_castpd_si512(load_column(values, row)), 0xFF);
+    }
+    if (row < rows) {
+        const __mmask8 k = tail_mask(row, rows);
+        exponent_step(_mm512_castpd_si512(load_column_tail(values, row, k)), k);
     }
 
     Scan out{0, 0, any != 0, bad != 0};
@@ -137,9 +159,7 @@ Scan scan_column_avx512(const double* values, std::size_t rows,
     const __m512i k1075 = _mm512_set1_epi64(1075);
     __m512i vulp = _mm512_set1_epi64(std::numeric_limits<long long>::max());
 
-    for (std::size_t row = 0; row < rows; row += 8) {
-        const __mmask8 k = tail_mask(row, rows);
-        const __m512i bits = _mm512_castpd_si512(load_column(values, row, k));
+    const auto ulp_step = [&](__m512i bits, __mmask8 k) {
         const __m512i biased =
             _mm512_and_si512(_mm512_srli_epi64(bits, 52), kExp);
         const __m512i frac = _mm512_and_si512(bits, kFrac);
@@ -155,6 +175,15 @@ Scan scan_column_avx512(const double* values, std::size_t rows,
             _mm512_and_si512(m, _mm512_sub_epi64(_mm512_setzero_si512(), m));
         const __m512i tz = _mm512_popcnt_epi64(_mm512_sub_epi64(lowbit, kOne));
         vulp = _mm512_mask_min_epi64(vulp, live, vulp, _mm512_add_epi64(e, tz));
+    };
+
+    row = 0;
+    for (; row + 8 <= rows; row += 8) {
+        ulp_step(_mm512_castpd_si512(load_column(values, row)), 0xFF);
+    }
+    if (row < rows) {
+        const __mmask8 k = tail_mask(row, rows);
+        ulp_step(_mm512_castpd_si512(load_column_tail(values, row, k)), k);
     }
     out.min_exponent = _mm512_reduce_min_epi64(vulp);
     return out;
@@ -201,9 +230,8 @@ void accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
     const __m512i k64 = _mm512_set1_epi64(64);
     const __m512i kColExp = _mm512_set1_epi64(column_exponent);
 
-    const auto prepare = [&](std::size_t row) {
-        const __mmask8 k = tail_mask(row, rows);
-        const Split8 s = split8(load_column(values, row, k));
+    const auto prepare = [&](std::size_t row, __m512d v, __mmask8 k) {
+        const Split8 s = split8(v);
 
         Addend8 q;
         q.row = row;
@@ -268,12 +296,18 @@ void accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
 
     std::size_t row = 0;
     for (; row + 16 <= rows; row += 16) {
-        const Addend8 a = prepare(row);
-        const Addend8 b = prepare(row + 8);
+        const Addend8 a = prepare(row, load_column(values, row), 0xFF);
+        const Addend8 b = prepare(row + 8, load_column(values, row + 8), 0xFF);
         apply(a);
         apply(b);
     }
-    for (; row < rows; row += 8) apply(prepare(row));
+    for (; row + 8 <= rows; row += 8) {
+        apply(prepare(row, load_column(values, row), 0xFF));
+    }
+    if (row < rows) {
+        const __mmask8 k = tail_mask(row, rows);
+        apply(prepare(row, load_column_tail(values, row, k), k));
+    }
 }
 
 }  // namespace kernels
