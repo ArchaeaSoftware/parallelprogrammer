@@ -55,7 +55,7 @@ inline void cuda_check(cudaError_t status, const char* call, const char* file,
 constexpr unsigned kBlock = 256;  // a power of two; the reductions rely on it
 constexpr unsigned kMaxGridX = 1024;
 
-// What the first pass learns about a column, mirroring kernels::Scan. Reduced
+// What the first pass learns about a column, mirroring kernels::Survey. Reduced
 // across the whole column with atomics, so every field is an atomic-friendly
 // type rather than the host struct's bools.
 //
@@ -63,7 +63,7 @@ constexpr unsigned kMaxGridX = 1024;
 // exponent lives in [-1074, 1077] and the container caps its own at 2^24, so
 // 32 bits is three orders of magnitude more than enough -- and it buys 32-bit
 // atomics and halves this kernel's shared memory.
-struct DeviceScan {
+struct DeviceSurvey {
     int min_exponent;
     int max_top;
     int any;
@@ -116,13 +116,13 @@ __device__ inline void split_device(double v, unsigned long long& mantissa,
     exponent = e;
 }
 
-// The CPU scan splits into two passes so the significand can be skipped once a
-// column's scale is settled. That does not pay here: this pass is bound by
+// The CPU survey splits into two passes so the significand can be skipped once
+// a column's scale is settled. That does not pay here: this pass is bound by
 // reading the column, and the trailing-zero count is a few ALU ops on a value
 // already in registers. One exact pass is both simpler and cheaper.
-__global__ void scan_kernel(const double* __restrict__ values, std::size_t rows,
-                            std::size_t col_stride,
-                            DeviceScan* __restrict__ out)
+__global__ void survey_kernel(const double* __restrict__ values,
+                              std::size_t rows, std::size_t col_stride,
+                              DeviceSurvey* __restrict__ out)
 {
     __shared__ int s_min[kBlock];
     __shared__ int s_max[kBlock];
@@ -307,7 +307,7 @@ CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t rows, std::size_t cols)
 
     if (cols_ != 0) {
         cuda(Malloc(&descriptors_, cols_ * sizeof(ColumnDesc)));
-        cuda(Malloc(&scan_out_, cols_ * sizeof(DeviceScan)));
+        cuda(Malloc(&survey_out_, cols_ * sizeof(DeviceSurvey)));
     }
 }
 
@@ -320,7 +320,7 @@ CudaColumnBlockMatrix::~CudaColumnBlockMatrix()
         cudaFree(c.dev_bases);
     }
     cudaFree(descriptors_);
-    cudaFree(scan_out_);
+    cudaFree(survey_out_);
     for (Slot& s : slots_) {
         if (s.pinned) cudaFreeHost(s.pinned);
         if (s.device) cudaFree(s.device);
@@ -443,18 +443,18 @@ void CudaColumnBlockMatrix::ensure_slots(std::size_t words)
     slot_words_ = words;
 }
 
-// Validates a packed column-major batch on the host, using the same scan the
+// Validates a packed column-major batch on the host, using the same survey the
 // CPU accumulator uses -- which is the AVX-512 one where available, at ~0.12
 // ns/elem. Cheap enough to hide entirely behind the transfer it runs against.
-void CudaColumnBlockMatrix::validate_host_scan(const double* packed)
+void CudaColumnBlockMatrix::validate_host_survey(const double* packed)
 {
     for (std::size_t j = 0; j < cols_; ++j) {
         const Column& c = cols_state_[j];
-        // Passing the column's own exponent as the floor lets the scan stop at
-        // a lower bound whenever no rescale could be due, and only pay for the
-        // exact true-ulp minimum when it might be.
-        const kernels::Scan sc =
-            kernels::scan()(packed + j * rows_, rows_, c.exponent);
+        // Passing the column's own exponent as the floor lets the survey stop
+        // at a lower bound whenever no rescale could be due, and only pay for
+        // the exact true-ulp minimum when it might be.
+        const kernels::Survey sc =
+            kernels::survey()(packed + j * rows_, rows_, c.exponent);
         if (sc.nonfinite) {
             throw std::domain_error(
                 "cbfp: cannot accumulate a non-finite value");
@@ -478,14 +478,14 @@ void CudaColumnBlockMatrix::validate_host_scan(const double* packed)
     }
 }
 
-// The host path runs the transfer and the scan against each other: stage into
-// pinned memory, start the copy, then scan that same buffer while the DMA is
-// in flight. The scan is pure host work on host memory, so it costs nothing
+// The host path runs the transfer and the survey against each other: stage into
+// pinned memory, start the copy, then survey that same buffer while the DMA is
+// in flight. The survey is pure host work on host memory, so it costs nothing
 // the transfer was not already going to spend.
 //
 // Validation therefore still happens *before* the accumulate is launched, so a
 // bad batch is rejected without having touched the accumulator -- which a
-// device-side scan cannot do without a round-trip that drains the pipeline.
+// device-side survey cannot do without a round-trip that drains the pipeline.
 void CudaColumnBlockMatrix::add_matrix_col_major(const double* b,
                                                  std::size_t col_stride)
 {
@@ -511,7 +511,7 @@ void CudaColumnBlockMatrix::add_matrix_col_major(const double* b,
                      static_cast<cudaStream_t>(copy_stream_)));
 
     // Runs against the copy above, not after it.
-    validate_host_scan(s.pinned);
+    validate_host_survey(s.pinned);
 
     // The accumulate waits on this slot's copy, but nothing else does, so the
     // next batch's transfer proceeds on the copy engine meanwhile.
@@ -558,39 +558,39 @@ void CudaColumnBlockMatrix::accumulate_device(const double* b,
     // First pass: learn each column's exponent range, and reject anything the
     // reservation cannot hold. The decisions the CPU makes by rescaling and
     // widening are errors here, because neither is possible mid-launch.
-    std::vector<DeviceScan> scans(cols_);
-    for (auto& s : scans) s = DeviceScan{INT_MAX, INT_MIN, 0, 0};
-    cuda(MemcpyAsync(scan_out_, scans.data(), cols_ * sizeof(DeviceScan),
+    std::vector<DeviceSurvey> surveys(cols_);
+    for (auto& s : surveys) s = DeviceSurvey{INT_MAX, INT_MIN, 0, 0};
+    cuda(MemcpyAsync(survey_out_, surveys.data(), cols_ * sizeof(DeviceSurvey),
                      cudaMemcpyHostToDevice,
                      static_cast<cudaStream_t>(compute_stream_)));
 
-    scan_kernel<<<grid, kBlock, 0,
-                  static_cast<cudaStream_t>(compute_stream_)>>>(
-        b, rows_, col_stride, static_cast<DeviceScan*>(scan_out_));
+    survey_kernel<<<grid, kBlock, 0,
+                    static_cast<cudaStream_t>(compute_stream_)>>>(
+        b, rows_, col_stride, static_cast<DeviceSurvey*>(survey_out_));
     // This is the drain the host path avoids: with the input already on the
-    // device there is nothing to scan on the host, so the verdict has to come
+    // device there is nothing to survey on the host, so the verdict has to come
     // back before the accumulate can be allowed to run.
-    cuda(MemcpyAsync(scans.data(), scan_out_, cols_ * sizeof(DeviceScan),
+    cuda(MemcpyAsync(surveys.data(), survey_out_, cols_ * sizeof(DeviceSurvey),
                      cudaMemcpyDeviceToHost,
                      static_cast<cudaStream_t>(compute_stream_)));
     synchronize();
 
     for (std::size_t j = 0; j < cols_; ++j) {
-        if (scans[j].nonfinite) {
+        if (surveys[j].nonfinite) {
             throw std::domain_error(
                 "cbfp: cannot accumulate a non-finite value");
         }
-        if (!scans[j].any) continue;
+        if (!surveys[j].any) continue;
         const Column& c = cols_state_[j];
-        if (scans[j].min_exponent < c.exponent) {
+        if (surveys[j].min_exponent < c.exponent) {
             std::ostringstream os;
             os << "cbfp: column " << j << " was reserved at exponent "
                << c.exponent << " but these values need "
-               << scans[j].min_exponent
+               << surveys[j].min_exponent
                << "; pre-size it with reserve_column or reserve_like";
             throw std::runtime_error(os.str());
         }
-        const long long width = scans[j].max_top - c.exponent;
+        const long long width = surveys[j].max_top - c.exponent;
         if (width > static_cast<long long>(c.nlimbs * limbs::kLimbBits)) {
             std::ostringstream os;
             os << "cbfp: column " << j << " was reserved at "

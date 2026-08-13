@@ -41,13 +41,13 @@ AccumulateFn accumulate()
     return fn;
 }
 
-ScanFn scan()
+SurveyFn survey()
 {
 #if defined(CBFP_HAVE_AVX512)
-    static const ScanFn fn =
-        use_avx512() ? scan_column_avx512 : scan_column_scalar;
+    static const SurveyFn fn =
+        use_avx512() ? survey_column_avx512 : survey_column_scalar;
 #else
-    static const ScanFn fn = scan_column_scalar;
+    static const SurveyFn fn = survey_column_scalar;
 #endif
     return fn;
 }

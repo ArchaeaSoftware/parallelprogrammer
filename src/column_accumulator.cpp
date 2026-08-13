@@ -300,15 +300,15 @@ void ColumnBlockMatrix::accumulate_column(std::size_t j, const double* column,
     // First pass learns only the exponent range, because the rescale and widen
     // decisions have to be made before any value can be added.
     // Once the column has a scale, a lower bound on the incoming exponents is
-    // enough to rule out a rescale, and the scan can skip the significand.
+    // enough to rule out a rescale, and the survey can skip the significand.
     Column& c = cols_state_[j];
-    // A column with no scale yet takes whatever the scan returns as its
+    // A column with no scale yet takes whatever the survey returns as its
     // exponent, so there the exact value is always required -- a floor nothing
     // can clear.
     const long long floor_exponent =
         c.initialized ? static_cast<long long>(c.exponent) - log2_scale
                       : std::numeric_limits<long long>::max();
-    const kernels::Scan sc = kernels::scan()(column, rows_, floor_exponent);
+    const kernels::Survey sc = kernels::survey()(column, rows_, floor_exponent);
     if (sc.nonfinite) {
         throw std::domain_error("cbfp: cannot accumulate a non-finite value");
     }

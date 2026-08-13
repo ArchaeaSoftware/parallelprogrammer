@@ -18,7 +18,7 @@ namespace cbfp {
 namespace kernels {
 
 // What the first pass needs to learn about a column of incoming values.
-struct Scan {
+struct Survey {
     // Lowest true-ulp exponent among nonzero values, or a lower bound on it
     // when that was enough to rule out a rescale. Either way it is safe to use
     // as a column exponent; the bound is only ever looser, never lower than
@@ -29,30 +29,30 @@ struct Scan {
     bool nonfinite;     // true if any value was inf or NaN
 };
 
-// `floor_exponent` is the column's current exponent. The scan needs the exact
+// `floor_exponent` is the column's current exponent. The survey needs the exact
 // minimum only when the incoming values could drop below it; otherwise a cheap
 // lower bound settles that no rescale is due and the significand is never
 // touched. Pass LLONG_MAX to force the exact value, which is what a column
-// with no scale yet requires, since it adopts whatever the scan returns.
-using ScanFn = Scan (*)(const double*, std::size_t, long long);
+// with no scale yet requires, since it adopts whatever the survey returns.
+using SurveyFn = Survey (*)(const double*, std::size_t, long long);
 
 // Fused decompose-and-add. `column_exponent` already absorbs any power-of-two
 // scale, so the shift is simply value_exponent - column_exponent.
-// `first_limb` is a starting hint from the scan; a row block that has not
+// `first_limb` is a starting hint from the survey; a row block that has not
 // reached its own first limb skips the position outright.
 using AccumulateFn = void (*)(std::uint64_t* const*, std::size_t, const double*,
                               std::size_t, std::int32_t, std::size_t);
 
-Scan scan_column_scalar(const double* values, std::size_t rows,
-                        long long floor_exponent);
+Survey survey_column_scalar(const double* values, std::size_t rows,
+                            long long floor_exponent);
 
 void accumulate_scalar(std::uint64_t* const* limbs, std::size_t nlimbs,
                        const double* values, std::size_t rows,
                        std::int32_t column_exponent, std::size_t first_limb);
 
 #if defined(CBFP_HAVE_AVX512)
-Scan scan_column_avx512(const double* values, std::size_t rows,
-                        long long floor_exponent);
+Survey survey_column_avx512(const double* values, std::size_t rows,
+                            long long floor_exponent);
 
 void accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
                        const double* values, std::size_t rows,
@@ -60,7 +60,7 @@ void accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
 #endif
 
 // Chosen once, on first use, from the running CPU's capabilities.
-ScanFn scan();
+SurveyFn survey();
 AccumulateFn accumulate();
 const char* accumulate_name();
 

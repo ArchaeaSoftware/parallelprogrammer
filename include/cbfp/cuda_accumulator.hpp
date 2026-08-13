@@ -105,7 +105,7 @@ private:
     // Two staging slots, so the host can prepare batch N+1 while the device is
     // still accumulating batch N. Each owns a pinned host buffer -- measured,
     // an async copy from pageable memory blocks the host for the whole
-    // transfer and there is no window to scan in -- the device buffer the
+    // transfer and there is no window to survey in -- the device buffer the
     // kernel reads, and an event marking when the last kernel to read that
     // buffer finished, so a slot is only reused once it is genuinely free.
     struct Slot {
@@ -119,7 +119,7 @@ private:
     void check_index(std::size_t i, std::size_t j) const;
     void accumulate_device(const double* b, std::size_t col_stride);
     void launch_accumulate(const double* b, std::size_t col_stride);
-    void validate_host_scan(const double* packed);
+    void validate_host_survey(const double* packed);
     void sync_descriptors();
     void ensure_slots(std::size_t words);
 
@@ -142,7 +142,8 @@ private:
     void* compute_stream_ = nullptr;  // cudaStream_t
     void* descriptors_ = nullptr;     // device array of per-column descriptors
     bool descriptors_stale_ = true;
-    void* scan_out_ = nullptr;  // device scan results, for device-side input
+    void* survey_out_ =
+        nullptr;  // device survey results, for device-side input
 
     Slot slots_[2];
     int slot_ = 0;

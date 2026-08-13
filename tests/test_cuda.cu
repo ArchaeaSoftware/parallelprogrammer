@@ -173,7 +173,7 @@ void test_edge_values()
 
 void test_errors()
 {
-    // A non-finite value must be rejected by the scan, not silently added.
+    // A non-finite value must be rejected by the survey, not silently added.
     {
         cbfp::ColumnBlockMatrix cpu(64, 2);
         std::vector<double> ok(64 * 2, 1.0);
@@ -189,7 +189,7 @@ void test_errors()
         } catch (const std::domain_error&) {
             threw = true;
         }
-        check(threw, "NaN is rejected by the device scan");
+        check(threw, "NaN is rejected by the device survey");
 
         bad[70] = std::numeric_limits<double>::infinity();
         threw = false;
@@ -198,7 +198,7 @@ void test_errors()
         } catch (const std::domain_error&) {
             threw = true;
         }
-        check(threw, "inf is rejected by the device scan");
+        check(threw, "inf is rejected by the device survey");
     }
 
     // A column reserved at too high an exponent must be an error rather than

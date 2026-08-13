@@ -27,7 +27,7 @@ inline __m512d load_column(const double* values, std::size_t row)
 //
 // Every loop below peels this block out rather than masking all of them: the
 // mask is loop-invariant for all but the last block, and threading it through
-// the body costs ~4% of the accumulate and ~15% of the scan, whose pass-1
+// the body costs ~4% of the accumulate and ~15% of the survey, whose pass-1
 // body is short enough for three extra instructions to matter.
 inline __m512d load_column_tail(const double* values, std::size_t row,
                                 __mmask8 k)
@@ -65,7 +65,7 @@ inline Split8 split8(__m512d v)
     s.nonfinite = _mm512_cmpeq_epi64_mask(biased, _mm512_set1_epi64(0x7FF));
     // top = e + the significand's bit width, which odd-normalization leaves
     // unchanged: it raises e and lowers the width by the same amount. That is
-    // why the scan never needs a trailing-zero count.
+    // why the survey never needs a trailing-zero count.
     s.top = _mm512_add_epi64(
         e, _mm512_sub_epi64(_mm512_set1_epi64(64), _mm512_lzcnt_epi64(m)));
 
@@ -87,8 +87,8 @@ inline __mmask8 tail_mask(std::size_t row, std::size_t rows)
 
 }  // namespace
 
-Scan scan_column_avx512(const double* values, std::size_t rows,
-                        long long floor_exponent)
+Survey survey_column_avx512(const double* values, std::size_t rows,
+                            long long floor_exponent)
 {
     // First pass touches only the exponent field.
     //
@@ -136,7 +136,7 @@ Scan scan_column_avx512(const double* values, std::size_t rows,
         exponent_step(_mm512_castpd_si512(load_column_tail(values, row, k)), k);
     }
 
-    Scan out{0, 0, any != 0, bad != 0};
+    Survey out{0, 0, any != 0, bad != 0};
     if (!out.any || out.nonfinite) return out;
 
     const long long min_raw =

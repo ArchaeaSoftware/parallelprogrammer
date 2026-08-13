@@ -1,7 +1,7 @@
 # SIMD and portability design record
 
 **Status: largely implemented.** The limb-major layout, the skewed aligned
-allocation and the AVX-512 scan and accumulate kernels have all landed, and
+allocation and the AVX-512 survey and accumulate kernels have all landed, and
 the measurements below are from the real kernels unless a section says
 otherwise. What remains open is the radix (see the table) and threading. This
 header previously read "design, not implemented", which stopped being true at
@@ -414,14 +414,14 @@ never made.
 **Peeled tails in the AVX-512 kernels.** Every loop used to compute a tail
 mask per 8-row block and thread it through the body, though it is all-ones for
 every block but the last. Peeling the final partial block out and passing a
-constant mask to the rest folds the masking away entirely: the scan's pass-1
+constant mask to the rest folds the masking away entirely: the survey's pass-1
 went 0.144 to 0.123 ns/elem (**14.7%**) and the accumulate 1.159 to 1.073
 (**7.4%**) at four limbs.
 
 Note what this was *not*: jagged row counts were never the cost. 4093 rows and
 4096 rows measured identically both before and after, because the ragged block
 is one iteration in 512. The cost was the per-block tax paid by every block for
-the possibility of a tail. The scan takes the larger share because its pass-1
+the possibility of a tail. The survey takes the larger share because its pass-1
 body is only ~8 instructions, so three extra ones are a large fraction of it.
 
 This also removes the case for requiring row counts to be a multiple of 8, or

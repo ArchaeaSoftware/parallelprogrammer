@@ -16,7 +16,7 @@ struct Split {
 };
 
 // The IEEE-754 field extraction both passes share, kept in one place so the
-// scan and the accumulate cannot disagree about what a double means.
+// survey and the accumulate cannot disagree about what a double means.
 inline Split split(double v)
 {
     std::uint64_t bits;
@@ -34,7 +34,7 @@ inline Split split(double v)
     s.nonfinite = (biased == 0x7FF);
     // Normalizing to odd raises the exponent by the trailing zero count and
     // lowers the significand's width by the same amount, so `top` is
-    // unaffected and the scan never needs the count.
+    // unaffected and the survey never needs the count.
     s.top = e + (m == 0 ? 0 : 64 - __builtin_clzll(m));
     if (m != 0) {
         const int tz = __builtin_ctzll(m);
@@ -48,13 +48,13 @@ inline Split split(double v)
 
 }  // namespace
 
-Scan scan_column_scalar(const double* values, std::size_t rows,
-                        long long floor_exponent)
+Survey survey_column_scalar(const double* values, std::size_t rows,
+                            long long floor_exponent)
 {
     // First pass reads only the exponent field. The raw exponent is a lower
     // bound on the true ulp, so if it clears the floor no rescale is due and
     // the significand never has to be examined.
-    Scan out{0, 0, false, false};
+    Survey out{0, 0, false, false};
     long long min_raw = 0;
     std::uint64_t max_abs = 0;
 
