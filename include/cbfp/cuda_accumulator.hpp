@@ -86,15 +86,22 @@ public:
 
     // --- input memory ------------------------------------------------------
 
-    // Host memory the device can read directly. Filling one of these and
-    // handing it to add_matrix_col_major skips the staging copy entirely: the
-    // kernel streams it over PCIe as it works, so the transfer costs one pass
-    // and the arithmetic hides behind it.
+    // Borrows the next input buffer, sized rows() * cols() doubles. Fill it
+    // column-major and pass it to add_matrix_col_major, which recognises it
+    // and lets the kernel stream it over PCIe in place -- no staging copy, and
+    // no device-side copy of the input at all.
     //
-    // Ordinary host memory still works and is staged through an internal
-    // buffer; this only removes that copy.
-    static double *allocate_input(std::size_t count);
-    static void free_input(double *p);
+    // Blocks only if the device is still reading the buffer being handed back,
+    // so with two in rotation the host fills one while the device streams the
+    // other. That rotation is the point: reading in place means the kernel is
+    // still using a buffer after the call that submitted it returned, and a
+    // caller refilling it would be writing under the device. Measured, doing
+    // so corrupts about 63% of entries.
+    //
+    // The buffer belongs to the accumulator and stays valid until the next
+    // acquire_input. Ordinary host memory still works everywhere and is staged
+    // through the same buffers; this only removes that copy.
+    double *acquire_input();
 
     // --- accumulation ------------------------------------------------------
 
@@ -185,7 +192,6 @@ private:
     void accumulate_device(const double *b, std::size_t col_stride);
     void launch_accumulate(const double *b, std::size_t col_stride);
     void validate_host_survey(const double *b, std::size_t col_stride);
-    static bool device_readable(const double *p);
     void sync_descriptors();
     void harvest_occupancy();
     void reserve_from_extents(const long long *low, const long long *high,

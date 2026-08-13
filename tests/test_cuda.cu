@@ -481,47 +481,58 @@ test_rescale()
     }
 }
 
-// Input the device can read directly skips the staging copy and is streamed
-// over PCIe by the kernel itself. It is a different route into the same
-// arithmetic, so it must land on the same bits.
+// Buffers borrowed from acquire_input are read in place by the kernel rather
+// than copied, so the accumulator has to know when the device has finished
+// with one before handing it back. Refilling a buffer the device is still
+// streaming corrupted about 63% of entries when the fast path was keyed on
+// the pointer's memory type instead of on ownership.
 void
-test_mapped_input()
+test_acquired_input()
 {
-    const std::size_t rows = 301, cols = 6;
-    const int nbatches = 3;
+    const std::size_t rows = 4096, cols = 16;
+    const int nbatches = 6;
     const std::size_t n = rows * cols;
 
-    std::vector<double> plain(n);
-    double *mapped = cbfp::CudaColumnBlockMatrix::allocate_input(n);
-    for (std::size_t i = 0; i < n; ++i) {
-        const double v = random_value(150);
-        plain[i] = v;
-        mapped[i] = v;
-    }
+    std::vector<double> data(n);
+    for (auto &x : data) x = random_value(150);
 
     cbfp::ColumnBlockMatrix cpu(rows, cols);
-    cbfp::CudaColumnBlockMatrix staged(rows, cols), direct(rows, cols);
-    for (int b = 0; b < nbatches; ++b) cpu.add_matrix_col_major(plain.data());
-    staged.reserve_like(cpu);
-    direct.reserve_like(cpu);
-    for (int b = 0; b < nbatches; ++b) {
-        staged.add_matrix_col_major(plain.data());
-        direct.add_matrix_col_major(mapped);
-    }
+    for (int b = 0; b < nbatches; ++b) cpu.add_matrix_col_major(data.data());
 
-    std::size_t differ = 0, wrong = 0;
-    for (std::size_t j = 0; j < cols; ++j) {
-        for (std::size_t i = 0; i < rows; ++i) {
-            const std::vector<std::uint64_t> a = staged.entry_limbs(i, j);
-            const std::vector<std::uint64_t> b = direct.entry_limbs(i, j);
-            const std::vector<std::uint64_t> h = cpu.entry_limbs(i, j);
-            if (a != b) ++differ;
-            if (b != h) ++wrong;
+    // Staged: the caller's buffer is copied, so it may be reused at once.
+    cbfp::CudaColumnBlockMatrix staged(rows, cols);
+    staged.reserve_like(cpu);
+    {
+        std::vector<double> buf(n);
+        for (int b = 0; b < nbatches; ++b) {
+            buf = data;
+            staged.add_matrix_col_major(buf.data());
+            std::fill(buf.begin(), buf.end(), 0.0);  // safe: it was copied
         }
     }
-    check(0 == differ, "mapped input matches staged input bit for bit");
-    check(0 == wrong, "and both match the CPU");
-    cbfp::CudaColumnBlockMatrix::free_input(mapped);
+
+    // Borrowed: read in place, and acquire_input blocks until that is over.
+    // The loop refills as fast as it can, which is the shape that raced.
+    cbfp::CudaColumnBlockMatrix borrowed(rows, cols);
+    borrowed.reserve_like(cpu);
+    for (int b = 0; b < nbatches; ++b) {
+        double *buf = borrowed.acquire_input();
+        for (std::size_t i = 0; i < n; ++i) buf[i] = data[i];
+        borrowed.add_matrix_col_major(buf);
+    }
+
+    std::size_t staged_wrong = 0, borrowed_wrong = 0;
+    for (std::size_t j = 0; j < cols; ++j) {
+        for (std::size_t i = 0; i < rows; ++i) {
+            const std::vector<std::uint64_t> h = cpu.entry_limbs(i, j);
+            if (staged.entry_limbs(i, j) != h) ++staged_wrong;
+            if (borrowed.entry_limbs(i, j) != h) ++borrowed_wrong;
+        }
+    }
+    check(0 == staged_wrong,
+          "a staged buffer may be reused as soon as the call returns");
+    check(0 == borrowed_wrong,
+          "an acquired buffer is not handed back while the device reads it");
 }
 
 void
@@ -620,7 +631,7 @@ main()
     test_reserve_for();
     test_accumulated_bound();
     test_rescale();
-    test_mapped_input();
+    test_acquired_input();
     test_errors();
 
     std::printf("%d checks, %d failures\n", checks, failures);

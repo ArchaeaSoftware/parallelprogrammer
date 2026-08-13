@@ -832,27 +832,24 @@ CudaColumnBlockMatrix::add_matrix_col_major(const double *b,
     if (0 == rows_ || 0 == cols_) return;
     const std::size_t stride = col_stride ? col_stride : rows_;
 
-    // Memory the device can already read is read where it is. Otherwise it is
-    // staged through a mapped slot -- one host copy, and then the kernel
-    // streams it over PCIe rather than a separate transfer doing so first.
-    if (device_readable(b)) {
-        validate_host_survey(b, stride);
-        launch_accumulate(b, stride);
-        return;
-    }
-
+    // Only buffers this accumulator owns are read in place, because only for
+    // those is it tracking when the device has finished. Anything else is
+    // staged, so the caller's pointer may be reused the moment this returns
+    // whatever kind of memory it is -- the lifetime contract does not depend
+    // on where the caller got it, which is the trap the fast path used to set.
     ensure_slots(rows_ * cols_);
     Slot &s = slots_[slot_];
-    // A slot cannot be refilled until the kernel reading it has finished. With
-    // two of them the host stages and surveys batch N+1 while the device is
-    // still streaming batch N.
-    if (s.in_flight) {
-        cuda(EventSynchronize(s.ev_done));
-        s.in_flight = false;
-    }
-    for (std::size_t j = 0; j < cols_; ++j) {
-        std::memcpy(s.mapped + j * rows_, b + j * stride,
-                    rows_ * sizeof(double));
+    const bool borrowed = (b == s.mapped && rows_ == stride);
+    if (!borrowed) {
+        // A slot cannot be refilled until the kernel reading it has finished.
+        if (s.in_flight) {
+            cuda(EventSynchronize(s.ev_done));
+            s.in_flight = false;
+        }
+        for (std::size_t j = 0; j < cols_; ++j) {
+            std::memcpy(s.mapped + j * rows_, b + j * stride,
+                        rows_ * sizeof(double));
+        }
     }
 
     validate_host_survey(s.mapped, rows_);
@@ -862,35 +859,16 @@ CudaColumnBlockMatrix::add_matrix_col_major(const double *b,
     slot_ ^= 1;
 }
 
-// True if the device can dereference this pointer: mapped host memory, or
-// device memory. Unregistered host memory has to be staged.
-bool
-CudaColumnBlockMatrix::device_readable(const double *p)
-{
-    cudaPointerAttributes attr{};
-    const cudaError_t st = cudaGetLastError();  // clear, then probe
-    (void)st;
-    if (cudaSuccess != cudaPointerGetAttributes(&attr, p)) {
-        cudaGetLastError();  // an unregistered pointer is not an error here
-        return false;
-    }
-    if (cudaMemoryTypeDevice == attr.type) return true;
-    return cudaMemoryTypeHost == attr.type && nullptr != attr.devicePointer;
-}
-
 double *
-CudaColumnBlockMatrix::allocate_input(std::size_t count)
+CudaColumnBlockMatrix::acquire_input()
 {
-    cudaSetDeviceFlags(cudaDeviceMapHost);
-    double *p = nullptr;
-    cuda(HostAlloc(&p, count * sizeof(double), cudaHostAllocMapped));
-    return p;
-}
-
-void
-CudaColumnBlockMatrix::free_input(double *p)
-{
-    cudaFreeHost(p);
+    ensure_slots(rows_ * cols_);
+    Slot &s = slots_[slot_];
+    if (s.in_flight) {
+        cuda(EventSynchronize(s.ev_done));
+        s.in_flight = false;
+    }
+    return s.mapped;
 }
 
 void
