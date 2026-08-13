@@ -1,9 +1,11 @@
 # SIMD and portability design record
 
-**Status: design, not implemented.** The only pieces of this that have landed
-are the bit-manipulation `decompose` (`8565474`) and the `kLimbBits` cleanup
-(`60711df`). Everything below the "Implemented" section is a decision record,
-not a description of the code.
+**Status: largely implemented.** The limb-major layout, the skewed aligned
+allocation and the AVX-512 scan and accumulate kernels have all landed, and
+the measurements below are from the real kernels unless a section says
+otherwise. What remains open is the radix (see the table) and threading. This
+header previously read "design, not implemented", which stopped being true at
+`fdc8b75`.
 
 Targets both AVX-512 on the CPU and a future CUDA implementation. CUDA turned
 out to impose no special constraint on the representation — measurement found
@@ -107,22 +109,40 @@ misalignment cost 17.3% and a 32-byte misalignment only 2.0%. The datapath is
 each half inside one line. Align to 64 anyway, it is free. Plain
 `std::vector<uint64_t>` measured 48-byte alignment here, so it is not enough.
 
-**Skew** is not about throughput, it is about variance. A limb array is
-`rows * 8` bytes, and round row counts make those mutually 4KB-congruent —
-`rows = 512` is exactly 4096. Running the identical benchmark twice in one
-process, differing only in heap state:
+**Skew** keeps limb arrays off mutual 4KB congruence. A limb array is
+`rows * 8` bytes, so round row counts make them congruent — `rows = 512` is
+exactly 4096 — and one 8-row block touches every live limb array at the same
+row offset, which then lands every one of them in the same L1 set against an
+8-way cache.
 
-```
-first call:   no skew 28.8 GB/s    skewed 91.1 GB/s
-second call:  no skew 79.6 GB/s    skewed 89.6 GB/s
-```
+Measured against the real accumulate kernel, with the arrays carved from one
+arena at a controlled stride so the allocator is not a variable, 4096 rows and
+exponents spread across the full column width so every limb array is live:
 
-Unskewed performance is a lottery drawn by the allocator, 2.8x between tickets.
-Skewed is ~90 both times. 448 bytes on a 512KB array (0.09%) buys a
-deterministic outcome.
+| limbs | congruent | skewed | skew buys |
+| --- | --- | --- | --- |
+| 2 | 1.158 | 1.157 | nothing |
+| 4 | 2.06 | 1.92 | 6.8% |
+| 8 | 3.61 | 3.42 | 5.3% |
+| 16 | 7.16 | 6.54 | 8.7% |
 
-`K=8` (offsets `(k & 7) * 64`) sufficed everywhere measured. Treat it as a
-tunable, not a derived constant — see the caveats.
+Two qualifications, both of which matter more than the headline:
+
+- **The effect is 4KB congruence specifically, not the offset.** A stride
+  delta of 4096 measures identically to a delta of 0 — still congruent — while
+  64, 128, 256 and 512 are indistinguishable from each other. `kSkewStep = 64`
+  is not a tuned constant, it is the cheapest way to not be a multiple of 4096.
+- **It only appears when the column is wide *and* its exponents diverge.**
+  With the exponents clustered, a block touches ~2 limb arrays whatever the
+  column's width, and the skew measures as noise. That is the same regime that
+  makes the AVX-512 accumulate lose to scalar, so the skew pays off mainly
+  where the vector kernel should not be running anyway.
+
+An earlier draft of this section claimed 2.8x, from a bandwidth-bound
+synthetic carry walk (28.8 vs 91.1 GB/s). That does not reproduce against the
+real kernel, which is issue-bound at ~2.3 IPC rather than waiting on L1. The
+skew is worth keeping at 448 bytes on a 512KB array (0.09%); it is not worth
+2.8x.
 
 ## Limb width: 64-bit storage everywhere (settled)
 
@@ -369,6 +389,24 @@ overstates the win: `frexp`/`ldexp` were already inlined as builtins inside
 `accumulate`, so the microbenchmark measured an out-of-line call the real code
 never made.
 
+**Peeled tails in the AVX-512 kernels.** Every loop used to compute a tail
+mask per 8-row block and thread it through the body, though it is all-ones for
+every block but the last. Peeling the final partial block out and passing a
+constant mask to the rest folds the masking away entirely: the scan's pass-1
+went 0.144 to 0.123 ns/elem (**14.7%**) and the accumulate 1.159 to 1.073
+(**7.4%**) at four limbs.
+
+Note what this was *not*: jagged row counts were never the cost. 4093 rows and
+4096 rows measured identically both before and after, because the ragged block
+is one iteration in 512. The cost was the per-block tax paid by every block for
+the possibility of a tail. The scan takes the larger share because its pass-1
+body is only ~8 instructions, so three extra ones are a large fraction of it.
+
+This also removes the case for requiring row counts to be a multiple of 8, or
+for padding the caller's column: with the mask out of the loop there is
+essentially nothing left to buy, and a zero-padding contract on
+`add_matrix_col_major` would fail silently on the last column.
+
 ## Remaining work, in order
 
 1. **Column-at-a-time bulk path.** `accumulate` is called per element and
@@ -413,10 +451,17 @@ being caught. Both are worth remembering when re-measuring.
   measured — check the toolkit against the toolkit, and the hardware against
   the hardware.
 
+- The skew was claimed at 2.8x from a synthetic carry walk. Re-measured
+  against the real kernel it is 5-9%, and only when the column is wide and its
+  exponents diverge. The walk was bandwidth-bound; the real kernel is
+  issue-bound, so the one number did not transfer to the other. A first attempt
+  at re-measuring it let `aligned_alloc` place the arrays and produced
+  non-reproducible swings in both directions — the allocator has to be taken
+  out of the experiment before the effect is visible at all.
+
 The synthetic carry walk used throughout has none of the real work: no
-decompose, no per-lane variable shifts, no masked selects. Re-measure the skew
-constant against the actual kernel before treating any of these numbers as
-settled.
+decompose, no per-lane variable shifts, no masked selects. Treat anything still
+resting on it as unsettled.
 
 ## Current baseline
 
