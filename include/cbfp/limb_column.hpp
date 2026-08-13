@@ -35,6 +35,7 @@ private:
 };
 
 // Rows rounded up to a whole vector block.
-std::size_t padded_rows(std::size_t rows);
+std::size_t
+padded_rows(std::size_t rows);
 
 }  // namespace cbfp

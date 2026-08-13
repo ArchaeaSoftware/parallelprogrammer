@@ -15,7 +15,8 @@ constexpr int kBatches = 20000;
 constexpr long kMaxUlps = 1000000;
 
 // How many representable doubles separate a from b.
-long ulp_distance(double a, double b)
+long
+ulp_distance(double a, double b)
 {
     long ulps = 0;
     double walk = a;
@@ -27,7 +28,8 @@ long ulp_distance(double a, double b)
 
 }  // namespace
 
-int main()
+int
+main()
 {
     // Column 0: values near 1. Column 1: tiny. Column 2: huge. Column 3:
     // mixed magnitudes that cancel, which is where naive summation falls

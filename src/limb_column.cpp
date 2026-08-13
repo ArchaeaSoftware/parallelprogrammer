@@ -18,7 +18,8 @@ constexpr std::size_t kAlign = 64;
 
 }  // namespace
 
-std::size_t padded_rows(std::size_t rows)
+std::size_t
+padded_rows(std::size_t rows)
 {
     return (rows + LimbColumn::kRowBlock - 1) & ~(LimbColumn::kRowBlock - 1);
 }
@@ -49,7 +50,8 @@ LimbColumn::LimbColumn(LimbColumn&& other) noexcept
     other.data_ = nullptr;
 }
 
-LimbColumn& LimbColumn::operator=(LimbColumn&& other) noexcept
+LimbColumn&
+LimbColumn::operator=(LimbColumn&& other) noexcept
 {
     if (this != &other) {
         std::free(alloc_);

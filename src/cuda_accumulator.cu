@@ -24,8 +24,8 @@ static_assert(std::is_same<cudaStream_t, CUstream_st*>::value,
 static_assert(std::is_same<cudaEvent_t, CUevent_st*>::value,
               "cudaEvent_t is no longer CUevent_st*");
 
-[[noreturn]] void cuda_fail(cudaError_t status, const char* call,
-                            const char* file, int line)
+[[noreturn]] void
+cuda_fail(cudaError_t status, const char* call, const char* file, int line)
 {
     std::ostringstream os;
     os << "cbfp: " << call << " failed at " << file << ":" << line << ": "
@@ -33,8 +33,8 @@ static_assert(std::is_same<cudaEvent_t, CUevent_st*>::value,
     throw std::runtime_error(os.str());
 }
 
-inline void cuda_check(cudaError_t status, const char* call, const char* file,
-                       int line)
+inline void
+cuda_check(cudaError_t status, const char* call, const char* file, int line)
 {
     if (cudaSuccess != status) cuda_fail(status, call, file, line);
 }
@@ -77,7 +77,8 @@ constexpr unsigned kMaxBlocks = 1024;
 // A grid that covers `rows` a thread at a time, then shrunk to kMaxBlocks.
 // Subsumes the old separate cap on the x extent: with one column the two are
 // the same bound.
-dim3 launch_grid(std::size_t rows, std::size_t cols)
+dim3
+launch_grid(std::size_t rows, std::size_t cols)
 {
     unsigned gx = static_cast<unsigned>((rows + kBlock - 1) / kBlock);
     const unsigned per_column =
@@ -120,9 +121,9 @@ struct ColumnDesc {
 //   subnormal (biased == 0): m = frac,        e = -1074
 //
 // Both collapse to e = max(biased, 1) - 1075.
-__device__ inline void split_device(double v, unsigned long long& mantissa,
-                                    int& exponent, int& top, bool& negative,
-                                    bool& nonfinite)
+__device__ inline void
+split_device(double v, unsigned long long& mantissa, int& exponent, int& top,
+             bool& negative, bool& nonfinite)
 {
     const unsigned long long bits =
         static_cast<unsigned long long>(__double_as_longlong(v));
@@ -152,9 +153,9 @@ __device__ inline void split_device(double v, unsigned long long& mantissa,
 // a column's scale is settled. That does not pay here: this pass is bound by
 // reading the column, and the trailing-zero count is a few ALU ops on a value
 // already in registers. One exact pass is both simpler and cheaper.
-__global__ void survey_kernel(const double* __restrict__ values,
-                              std::size_t rows, std::size_t col_stride,
-                              DeviceSurvey* __restrict__ out)
+__global__ void
+survey_kernel(const double* __restrict__ values, std::size_t rows,
+              std::size_t col_stride, DeviceSurvey* __restrict__ out)
 {
     __shared__ int s_min[kBlock];
     __shared__ int s_max[kBlock];
@@ -223,9 +224,10 @@ __global__ void survey_kernel(const double* __restrict__ values,
 // Divergent exponents cost coalescing here (threads land in different limb
 // arrays in the same instruction), not instruction count.
 template <int kRadix>
-__global__ void accumulate_kernel(const ColumnDesc* __restrict__ cols,
-                                  const double* __restrict__ values,
-                                  std::size_t rows, std::size_t col_stride)
+__global__ void
+accumulate_kernel(const ColumnDesc* __restrict__ cols,
+                  const double* __restrict__ values, std::size_t rows,
+                  std::size_t col_stride)
 {
     // The addend split, the offset arithmetic and the limb mask below are all
     // written in terms of kRadix. What is not yet written is the carry-save
@@ -301,14 +303,16 @@ __global__ void accumulate_kernel(const ColumnDesc* __restrict__ cols,
     }
 }
 
-std::size_t limbs_for_bits(std::size_t bits)
+std::size_t
+limbs_for_bits(std::size_t bits)
 {
     return (bits + limbs::kLimbBits - 1) / limbs::kLimbBits;
 }
 
 }  // namespace
 
-bool cuda_available()
+bool
+cuda_available()
 {
     int n = 0;
     return cudaSuccess == cudaGetDeviceCount(&n) && n > 0;
@@ -362,27 +366,31 @@ CudaColumnBlockMatrix::~CudaColumnBlockMatrix()
     }
 }
 
-void CudaColumnBlockMatrix::check_index(std::size_t i, std::size_t j) const
+void
+CudaColumnBlockMatrix::check_index(std::size_t i, std::size_t j) const
 {
     if (i >= rows_ || j >= cols_) {
         throw std::out_of_range("cbfp: matrix index out of range");
     }
 }
 
-int CudaColumnBlockMatrix::column_exponent(std::size_t j) const
+int
+CudaColumnBlockMatrix::column_exponent(std::size_t j) const
 {
     if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
     return cols_state_[j].exponent;
 }
 
-std::size_t CudaColumnBlockMatrix::column_limbs(std::size_t j) const
+std::size_t
+CudaColumnBlockMatrix::column_limbs(std::size_t j) const
 {
     if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
     return cols_state_[j].nlimbs;
 }
 
-void CudaColumnBlockMatrix::reserve_column(std::size_t j, int exponent,
-                                           std::size_t bits)
+void
+CudaColumnBlockMatrix::reserve_column(std::size_t j, int exponent,
+                                      std::size_t bits)
 {
     if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
     Column& c = cols_state_[j];
@@ -413,7 +421,8 @@ void CudaColumnBlockMatrix::reserve_column(std::size_t j, int exponent,
     descriptors_stale_ = true;
 }
 
-void CudaColumnBlockMatrix::reserve_like(const ColumnBlockMatrix& cpu)
+void
+CudaColumnBlockMatrix::reserve_like(const ColumnBlockMatrix& cpu)
 {
     if (cpu.rows() != rows_ || cpu.cols() != cols_) {
         throw std::runtime_error(
@@ -424,7 +433,8 @@ void CudaColumnBlockMatrix::reserve_like(const ColumnBlockMatrix& cpu)
     }
 }
 
-std::size_t CudaColumnBlockMatrix::memory_bytes() const
+std::size_t
+CudaColumnBlockMatrix::memory_bytes() const
 {
     std::size_t total = 0;
     for (const auto& c : cols_state_) {
@@ -433,7 +443,8 @@ std::size_t CudaColumnBlockMatrix::memory_bytes() const
     return total;
 }
 
-void CudaColumnBlockMatrix::sync_descriptors()
+void
+CudaColumnBlockMatrix::sync_descriptors()
 {
     if (!descriptors_stale_) return;
     std::vector<ColumnDesc> host(cols_);
@@ -447,7 +458,8 @@ void CudaColumnBlockMatrix::sync_descriptors()
     descriptors_stale_ = false;
 }
 
-void CudaColumnBlockMatrix::ensure_slots(std::size_t words)
+void
+CudaColumnBlockMatrix::ensure_slots(std::size_t words)
 {
     if (slot_words_ >= words) return;
     synchronize();
@@ -471,7 +483,8 @@ void CudaColumnBlockMatrix::ensure_slots(std::size_t words)
 // Validates a packed column-major batch on the host, using the same survey the
 // CPU accumulator uses -- which is the AVX-512 one where available, at ~0.12
 // ns/elem. Cheap enough to hide entirely behind the transfer it runs against.
-void CudaColumnBlockMatrix::validate_host_survey(const double* packed)
+void
+CudaColumnBlockMatrix::validate_host_survey(const double* packed)
 {
     for (std::size_t j = 0; j < cols_; ++j) {
         const Column& c = cols_state_[j];
@@ -511,8 +524,9 @@ void CudaColumnBlockMatrix::validate_host_survey(const double* packed)
 // Validation therefore still happens *before* the accumulate is launched, so a
 // bad batch is rejected without having touched the accumulator -- which a
 // device-side survey cannot do without a round-trip that drains the pipeline.
-void CudaColumnBlockMatrix::add_matrix_col_major(const double* b,
-                                                 std::size_t col_stride)
+void
+CudaColumnBlockMatrix::add_matrix_col_major(const double* b,
+                                            std::size_t col_stride)
 {
     if (0 == rows_ || 0 == cols_) return;
     const std::size_t stride = col_stride ? col_stride : rows_;
@@ -545,21 +559,24 @@ void CudaColumnBlockMatrix::add_matrix_col_major(const double* b,
     slot_ ^= 1;
 }
 
-void CudaColumnBlockMatrix::add_matrix_col_major_device(const double* b,
-                                                        std::size_t col_stride)
+void
+CudaColumnBlockMatrix::add_matrix_col_major_device(const double* b,
+                                                   std::size_t col_stride)
 {
     if (0 == rows_ || 0 == cols_) return;
     accumulate_device(b, col_stride ? col_stride : rows_);
 }
 
-void CudaColumnBlockMatrix::synchronize() const
+void
+CudaColumnBlockMatrix::synchronize() const
 {
     cuda(StreamSynchronize(st_copy_));
     cuda(StreamSynchronize(st_compute_));
 }
 
-void CudaColumnBlockMatrix::accumulate_device(const double* b,
-                                              std::size_t col_stride)
+void
+CudaColumnBlockMatrix::accumulate_device(const double* b,
+                                         std::size_t col_stride)
 {
     for (std::size_t j = 0; j < cols_; ++j) {
         if (!cols_state_[j].reserved) {
@@ -619,8 +636,9 @@ void CudaColumnBlockMatrix::accumulate_device(const double* b,
 
 // Queues the accumulate. Asynchronous: the caller is not blocked, so batches
 // pipeline against each other without the caller doing anything.
-void CudaColumnBlockMatrix::launch_accumulate(const double* b,
-                                              std::size_t col_stride)
+void
+CudaColumnBlockMatrix::launch_accumulate(const double* b,
+                                         std::size_t col_stride)
 {
     for (std::size_t j = 0; j < cols_; ++j) {
         if (!cols_state_[j].reserved) {
@@ -637,8 +655,8 @@ void CudaColumnBlockMatrix::launch_accumulate(const double* b,
         static_cast<const ColumnDesc*>(descriptors_), b, rows_, col_stride);
 }
 
-std::vector<limb_t> CudaColumnBlockMatrix::entry_limbs(std::size_t i,
-                                                       std::size_t j) const
+std::vector<limb_t>
+CudaColumnBlockMatrix::entry_limbs(std::size_t i, std::size_t j) const
 {
     check_index(i, j);
     synchronize();
@@ -653,7 +671,8 @@ std::vector<limb_t> CudaColumnBlockMatrix::entry_limbs(std::size_t i,
     return v;
 }
 
-std::vector<limb_t> CudaColumnBlockMatrix::download_column(std::size_t j) const
+std::vector<limb_t>
+CudaColumnBlockMatrix::download_column(std::size_t j) const
 {
     if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
     synchronize();

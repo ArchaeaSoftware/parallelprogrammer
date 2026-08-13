@@ -17,13 +17,15 @@ using limbs::limb_t;
 
 namespace {
 
-std::size_t limbs_for_bits(std::size_t bits)
+std::size_t
+limbs_for_bits(std::size_t bits)
 {
     return (bits + kLimbBits - 1) / kLimbBits;
 }
 
 // Number of trailing zero bits of a non-negative magnitude (0 if zero).
-std::size_t trailing_zeros(const std::vector<limb_t>& v)
+std::size_t
+trailing_zeros(const std::vector<limb_t>& v)
 {
     for (std::size_t i = 0; i < v.size(); ++i) {
         if (0 != v[i]) return i * kLimbBits + __builtin_ctzll(v[i]);
@@ -34,19 +36,22 @@ std::size_t trailing_zeros(const std::vector<limb_t>& v)
 // Significant bits of a 64-bit quantity. Deliberately not expressed in terms
 // of kLimbBits: the callers pass a std::size_t and a double's mantissa,
 // neither of which is a limb.
-std::size_t bit_width_u64(std::uint64_t v)
+std::size_t
+bit_width_u64(std::uint64_t v)
 {
     return 0 == v ? 0 : 64 - static_cast<std::size_t>(__builtin_clzll(v));
 }
 
-std::size_t ceil_log2(std::size_t n)
+std::size_t
+ceil_log2(std::size_t n)
 {
     if (n <= 1) return 0;
     return bit_width_u64(n - 1);
 }
 
 // 5^k for k <= 27, the largest power of five that fits in a limb.
-limb_t pow5(std::size_t k)
+limb_t
+pow5(std::size_t k)
 {
     assert(k <= 27);
     limb_t p = 1;
@@ -58,12 +63,14 @@ constexpr long long kExponentLimit = 1 << 24;
 
 }  // namespace
 
-const char* active_kernel()
+const char*
+active_kernel()
 {
     return kernels::accumulate_name();
 }
 
-DoubleParts decompose(double v)
+DoubleParts
+decompose(double v)
 {
     // Read the IEEE-754 fields directly. frexp/ldexp would do the same job but
     // are real libm calls; this is branch-free apart from the odd-normalizing
@@ -108,14 +115,16 @@ ColumnBlockMatrix::ColumnBlockMatrix(std::size_t rows, std::size_t cols)
     column_buffer_.resize(rows_);
 }
 
-void ColumnBlockMatrix::check_index(std::size_t i, std::size_t j) const
+void
+ColumnBlockMatrix::check_index(std::size_t i, std::size_t j) const
 {
     if (i >= rows_ || j >= cols_) {
         throw std::out_of_range("cbfp: matrix index out of range");
     }
 }
 
-void ColumnBlockMatrix::rebuild_bases(Column& c)
+void
+ColumnBlockMatrix::rebuild_bases(Column& c)
 {
     c.bases.resize(c.limbs.size());
     for (std::size_t k = 0; k < c.limbs.size(); ++k) {
@@ -123,7 +132,8 @@ void ColumnBlockMatrix::rebuild_bases(Column& c)
     }
 }
 
-void ColumnBlockMatrix::ensure_limb_count(Column& c, std::size_t needed)
+void
+ColumnBlockMatrix::ensure_limb_count(Column& c, std::size_t needed)
 {
     if (c.limbs.size() >= needed) return;
 
@@ -139,14 +149,16 @@ void ColumnBlockMatrix::ensure_limb_count(Column& c, std::size_t needed)
     rebuild_bases(c);
 }
 
-void ColumnBlockMatrix::fit_column(Column& c)
+void
+ColumnBlockMatrix::fit_column(Column& c)
 {
     const std::size_t bits =
         c.max_addend_bits + ceil_log2(c.add_count + 1) + 1;  // +1 for the sign
     ensure_limb_count(c, std::max<std::size_t>(limbs_for_bits(bits), 1));
 }
 
-bool ColumnBlockMatrix::column_is_zero(const Column& c) const
+bool
+ColumnBlockMatrix::column_is_zero(const Column& c) const
 {
     for (const auto& lc : c.limbs) {
         const limb_t* p = lc.data();
@@ -157,7 +169,8 @@ bool ColumnBlockMatrix::column_is_zero(const Column& c) const
     return true;
 }
 
-void ColumnBlockMatrix::rescale(Column& c, int new_exponent)
+void
+ColumnBlockMatrix::rescale(Column& c, int new_exponent)
 {
     if (new_exponent >= c.exponent) return;
     const unsigned shift = static_cast<unsigned>(
@@ -192,8 +205,9 @@ void ColumnBlockMatrix::rescale(Column& c, int new_exponent)
     c.exponent = new_exponent;
 }
 
-void ColumnBlockMatrix::accumulate(std::size_t i, std::size_t j, double v,
-                                   bool negate, int log2_scale)
+void
+ColumnBlockMatrix::accumulate(std::size_t i, std::size_t j, double v,
+                              bool negate, int log2_scale)
 {
     check_index(i, j);
     if (!std::isfinite(v)) {
@@ -226,43 +240,48 @@ void ColumnBlockMatrix::accumulate(std::size_t i, std::size_t j, double v,
                             shift, p.negative != negate);
 }
 
-void ColumnBlockMatrix::add(std::size_t i, std::size_t j, double v)
+void
+ColumnBlockMatrix::add(std::size_t i, std::size_t j, double v)
 {
     accumulate(i, j, v, false, 0);
 }
 
-void ColumnBlockMatrix::sub(std::size_t i, std::size_t j, double v)
+void
+ColumnBlockMatrix::sub(std::size_t i, std::size_t j, double v)
 {
     accumulate(i, j, v, true, 0);
 }
 
-void ColumnBlockMatrix::add_matrix(const double* b, std::size_t row_stride)
+void
+ColumnBlockMatrix::add_matrix(const double* b, std::size_t row_stride)
 {
     add_matrix_scaled_pow2(b, 0, row_stride);
 }
 
-void ColumnBlockMatrix::add_matrix_scaled_pow2(const double* b, int log2_scale,
-                                               std::size_t row_stride)
+void
+ColumnBlockMatrix::add_matrix_scaled_pow2(const double* b, int log2_scale,
+                                          std::size_t row_stride)
 {
     accumulate_columns(b, 1, row_stride ? row_stride : cols_, log2_scale);
 }
 
-void ColumnBlockMatrix::add_matrix_col_major(const double* b,
-                                             std::size_t col_stride)
+void
+ColumnBlockMatrix::add_matrix_col_major(const double* b, std::size_t col_stride)
 {
     add_matrix_col_major_scaled_pow2(b, 0, col_stride);
 }
 
-void ColumnBlockMatrix::add_matrix_col_major_scaled_pow2(const double* b,
-                                                         int log2_scale,
-                                                         std::size_t col_stride)
+void
+ColumnBlockMatrix::add_matrix_col_major_scaled_pow2(const double* b,
+                                                    int log2_scale,
+                                                    std::size_t col_stride)
 {
     accumulate_columns(b, col_stride ? col_stride : rows_, 1, log2_scale);
 }
 
-void ColumnBlockMatrix::accumulate_columns(const double* b,
-                                           std::size_t column_step,
-                                           std::size_t row_step, int log2_scale)
+void
+ColumnBlockMatrix::accumulate_columns(const double* b, std::size_t column_step,
+                                      std::size_t row_step, int log2_scale)
 {
     if (0 == rows_ || 0 == cols_) return;
 
@@ -281,21 +300,24 @@ void ColumnBlockMatrix::accumulate_columns(const double* b,
     }
 }
 
-void ColumnBlockMatrix::add_column(std::size_t j, const double* v)
+void
+ColumnBlockMatrix::add_column(std::size_t j, const double* v)
 {
     add_column_scaled_pow2(j, v, 0);
 }
 
-void ColumnBlockMatrix::add_column_scaled_pow2(std::size_t j, const double* v,
-                                               int log2_scale)
+void
+ColumnBlockMatrix::add_column_scaled_pow2(std::size_t j, const double* v,
+                                          int log2_scale)
 {
     if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
     if (0 == rows_) return;
     accumulate_column(j, v, log2_scale);
 }
 
-void ColumnBlockMatrix::accumulate_column(std::size_t j, const double* column,
-                                          int log2_scale)
+void
+ColumnBlockMatrix::accumulate_column(std::size_t j, const double* column,
+                                     int log2_scale)
 {
     // First pass learns only the exponent range, because the rescale and widen
     // decisions have to be made before any value can be added.
@@ -340,7 +362,8 @@ void ColumnBlockMatrix::accumulate_column(std::size_t j, const double* column,
         static_cast<std::size_t>(min_exponent - c.exponent) / kLimbBits);
 }
 
-void ColumnBlockMatrix::set_zero()
+void
+ColumnBlockMatrix::set_zero()
 {
     for (auto& c : cols_state_) {
         for (auto& lc : c.limbs) {
@@ -351,8 +374,8 @@ void ColumnBlockMatrix::set_zero()
     }
 }
 
-std::vector<limb_t> ColumnBlockMatrix::magnitude(std::size_t i, std::size_t j,
-                                                 bool* negative) const
+std::vector<limb_t>
+ColumnBlockMatrix::magnitude(std::size_t i, std::size_t j, bool* negative) const
 {
     check_index(i, j);
     const Column& c = cols_state_[j];
@@ -375,8 +398,8 @@ std::vector<limb_t> ColumnBlockMatrix::magnitude(std::size_t i, std::size_t j,
     return mag;
 }
 
-std::vector<limb_t> ColumnBlockMatrix::entry_limbs(std::size_t i,
-                                                   std::size_t j) const
+std::vector<limb_t>
+ColumnBlockMatrix::entry_limbs(std::size_t i, std::size_t j) const
 {
     check_index(i, j);
     const Column& c = cols_state_[j];
@@ -387,7 +410,8 @@ std::vector<limb_t> ColumnBlockMatrix::entry_limbs(std::size_t i,
     return v;
 }
 
-bool ColumnBlockMatrix::is_zero(std::size_t i, std::size_t j) const
+bool
+ColumnBlockMatrix::is_zero(std::size_t i, std::size_t j) const
 {
     check_index(i, j);
     const Column& c = cols_state_[j];
@@ -397,7 +421,8 @@ bool ColumnBlockMatrix::is_zero(std::size_t i, std::size_t j) const
     return true;
 }
 
-double ColumnBlockMatrix::to_double(std::size_t i, std::size_t j) const
+double
+ColumnBlockMatrix::to_double(std::size_t i, std::size_t j) const
 {
     bool neg = false;
     const std::vector<limb_t> mag = magnitude(i, j, &neg);
@@ -429,7 +454,8 @@ double ColumnBlockMatrix::to_double(std::size_t i, std::size_t j) const
     return neg ? -r : r;
 }
 
-void ColumnBlockMatrix::to_matrix(double* out, std::size_t row_stride) const
+void
+ColumnBlockMatrix::to_matrix(double* out, std::size_t row_stride) const
 {
     const std::size_t stride = row_stride ? row_stride : cols_;
     for (std::size_t j = 0; j < cols_; ++j) {
@@ -439,8 +465,8 @@ void ColumnBlockMatrix::to_matrix(double* out, std::size_t row_stride) const
     }
 }
 
-bool ColumnBlockMatrix::is_exactly_representable(std::size_t i,
-                                                 std::size_t j) const
+bool
+ColumnBlockMatrix::is_exactly_representable(std::size_t i, std::size_t j) const
 {
     bool neg = false;
     const std::vector<limb_t> mag = magnitude(i, j, &neg);
@@ -455,8 +481,8 @@ bool ColumnBlockMatrix::is_exactly_representable(std::size_t i,
     return true;
 }
 
-std::string ColumnBlockMatrix::to_exact_decimal(std::size_t i,
-                                                std::size_t j) const
+std::string
+ColumnBlockMatrix::to_exact_decimal(std::size_t i, std::size_t j) const
 {
     bool neg = false;
     std::vector<limb_t> mag = magnitude(i, j, &neg);
@@ -500,8 +526,8 @@ std::string ColumnBlockMatrix::to_exact_decimal(std::size_t i,
     return neg ? "-" + out : out;
 }
 
-void ColumnBlockMatrix::reserve_column(std::size_t j, int exponent,
-                                       std::size_t bits)
+void
+ColumnBlockMatrix::reserve_column(std::size_t j, int exponent, std::size_t bits)
 {
     if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
     Column& c = cols_state_[j];
@@ -514,8 +540,9 @@ void ColumnBlockMatrix::reserve_column(std::size_t j, int exponent,
     ensure_limb_count(c, std::max<std::size_t>(limbs_for_bits(bits), 1));
 }
 
-void ColumnBlockMatrix::reserve_for(const double* b, std::size_t count,
-                                    std::size_t row_stride)
+void
+ColumnBlockMatrix::reserve_for(const double* b, std::size_t count,
+                               std::size_t row_stride)
 {
     const std::size_t stride = row_stride ? row_stride : cols_;
     const std::size_t headroom = ceil_log2(std::max<std::size_t>(count, 1)) + 1;
@@ -547,7 +574,8 @@ void ColumnBlockMatrix::reserve_for(const double* b, std::size_t count,
     }
 }
 
-std::size_t ColumnBlockMatrix::memory_bytes() const
+std::size_t
+ColumnBlockMatrix::memory_bytes() const
 {
     std::size_t total = sizeof(*this);
     const std::size_t per_limb = padded_rows(rows_) * sizeof(limb_t) + 512;
@@ -558,7 +586,8 @@ std::size_t ColumnBlockMatrix::memory_bytes() const
     return total;
 }
 
-std::string ColumnBlockMatrix::describe() const
+std::string
+ColumnBlockMatrix::describe() const
 {
     std::ostringstream os;
     os << rows_ << " x " << cols_ << " column-block fixed-point matrix ("

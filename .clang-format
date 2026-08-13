@@ -20,3 +20,9 @@ BraceWrapping:
 # Short accessors defined inside a class may stay on one line; every other
 # function definition gets its brace on the next line.
 AllowShortFunctionsOnASingleLine: Inline
+# The return type goes on its own line for anything at namespace scope, so the
+# function name always starts in the first column and is greppable there.
+# TopLevel rather than All: an in-class declaration is indented and could not
+# reach the first column anyway, and All would also break the short accessors
+# above out into multi-line bodies.
+AlwaysBreakAfterReturnType: TopLevel

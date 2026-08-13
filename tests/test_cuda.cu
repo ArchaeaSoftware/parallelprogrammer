@@ -26,7 +26,8 @@ namespace {
 int checks = 0;
 int failures = 0;
 
-void check(bool ok, const std::string& what)
+void
+check(bool ok, const std::string& what)
 {
     ++checks;
     if (!ok) {
@@ -44,8 +45,9 @@ void check(bool ok, const std::string& what)
 // reached its final exponent by rescaling holds the same integer as one that
 // started there.
 template <typename Gen>
-void cross_check(const char* name, std::size_t rows, std::size_t cols,
-                 int nbatches, Gen gen)
+void
+cross_check(const char* name, std::size_t rows, std::size_t cols, int nbatches,
+            Gen gen)
 {
     std::vector<std::vector<double>> batches(
         nbatches, std::vector<double>(rows * cols, 0.0));
@@ -103,7 +105,8 @@ void cross_check(const char* name, std::size_t rows, std::size_t cols,
 std::mt19937_64 rng(20260812);
 
 // A random finite double whose exponent lands within `spread` binades.
-double random_value(int spread)
+double
+random_value(int spread)
 {
     std::uint64_t m =
         (rng() | (std::uint64_t{1} << 52)) & ((std::uint64_t{1} << 53) - 1);
@@ -112,7 +115,8 @@ double random_value(int spread)
     return (rng() & 1) ? v : -v;
 }
 
-void test_shapes()
+void
+test_shapes()
 {
     // The workhorse shape, exponents clustered.
     cross_check("4096x64 narrow, 4 batches", 4096, 64, 4,
@@ -140,7 +144,8 @@ void test_shapes()
                 [](std::size_t, std::size_t, int) { return random_value(24); });
 }
 
-void test_edge_values()
+void
+test_edge_values()
 {
     // Zeros, negative zero, subnormals and the extremes of the range, mixed
     // with ordinary values so columns still have a sensible scale.
@@ -171,7 +176,8 @@ void test_edge_values()
                 });
 }
 
-void test_errors()
+void
+test_errors()
 {
     // A non-finite value must be rejected by the survey, not silently added.
     {
@@ -247,7 +253,8 @@ void test_errors()
 
 }  // namespace
 
-int main()
+int
+main()
 {
     if (!cbfp::cuda_available()) {
         std::printf("no CUDA device; skipping\n");

@@ -24,7 +24,8 @@
 namespace cbfp {
 
 // Name of the kernel variant selected for this CPU ("scalar", "avx512").
-const char* active_kernel();
+const char*
+active_kernel();
 
 class ColumnBlockMatrix {
 public:
@@ -186,6 +187,7 @@ struct DoubleParts {
     int exponent;
 };
 
-DoubleParts decompose(double v);
+DoubleParts
+decompose(double v);
 
 }  // namespace cbfp

@@ -17,7 +17,8 @@ struct Split {
 
 // The IEEE-754 field extraction both passes share, kept in one place so the
 // survey and the accumulate cannot disagree about what a double means.
-inline Split split(double v)
+inline Split
+split(double v)
 {
     std::uint64_t bits;
     std::memcpy(&bits, &v, sizeof bits);
@@ -48,8 +49,9 @@ inline Split split(double v)
 
 }  // namespace
 
-Survey survey_column_scalar(const double* values, std::size_t rows,
-                            long long floor_exponent)
+Survey
+survey_column_scalar(const double* values, std::size_t rows,
+                     long long floor_exponent)
 {
     // First pass reads only the exponent field. The raw exponent is a lower
     // bound on the true ulp, so if it clears the floor no rescale is due and
@@ -105,9 +107,9 @@ Survey survey_column_scalar(const double* values, std::size_t rows,
     return out;
 }
 
-void accumulate_one(std::uint64_t* const* limbs, std::size_t nlimbs,
-                    std::size_t row, std::uint64_t mantissa, std::size_t shift,
-                    bool negative)
+void
+accumulate_one(std::uint64_t* const* limbs, std::size_t nlimbs, std::size_t row,
+               std::uint64_t mantissa, std::size_t shift, bool negative)
 {
     if (0 == mantissa) return;
 
@@ -146,9 +148,10 @@ void accumulate_one(std::uint64_t* const* limbs, std::size_t nlimbs,
     }
 }
 
-void accumulate_scalar(std::uint64_t* const* limbs, std::size_t nlimbs,
-                       const double* values, std::size_t rows,
-                       std::int32_t column_exponent, std::size_t first_limb)
+void
+accumulate_scalar(std::uint64_t* const* limbs, std::size_t nlimbs,
+                  const double* values, std::size_t rows,
+                  std::int32_t column_exponent, std::size_t first_limb)
 {
     (void)first_limb;  // the scalar path starts from each row's own limb
     for (std::size_t i = 0; i < rows; ++i) {
@@ -160,9 +163,10 @@ void accumulate_scalar(std::uint64_t* const* limbs, std::size_t nlimbs,
     }
 }
 
-void shift_left(std::uint64_t* const* dst, std::size_t ndst,
-                std::uint64_t* const* src, std::size_t nsrc, std::size_t rows,
-                unsigned shift)
+void
+shift_left(std::uint64_t* const* dst, std::size_t ndst,
+           std::uint64_t* const* src, std::size_t nsrc, std::size_t rows,
+           unsigned shift)
 {
     const std::size_t word = shift / 64;
     const unsigned bit = shift % 64;
@@ -210,7 +214,8 @@ void shift_left(std::uint64_t* const* dst, std::size_t ndst,
     }
 }
 
-void sign_fill(std::uint64_t* dst, const std::uint64_t* top, std::size_t rows)
+void
+sign_fill(std::uint64_t* dst, const std::uint64_t* top, std::size_t rows)
 {
     const std::size_t n = padded_rows(rows);
     for (std::size_t i = 0; i < n; ++i) {

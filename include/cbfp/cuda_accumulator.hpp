@@ -36,7 +36,8 @@ class ColumnBlockMatrix;
 
 // True if a CUDA device is present and usable. Everything below throws
 // std::runtime_error if it is not.
-bool cuda_available();
+bool
+cuda_available();
 
 class CudaColumnBlockMatrix {
 public:

@@ -14,7 +14,8 @@ namespace {
 int g_failures = 0;
 int g_checks = 0;
 
-void check(bool ok, const char* expr, const char* file, int line)
+void
+check(bool ok, const char* expr, const char* file, int line)
 {
     ++g_checks;
     if (!ok) {
@@ -25,7 +26,8 @@ void check(bool ok, const char* expr, const char* file, int line)
 
 #define CHECK(expr) check((expr), #expr, __FILE__, __LINE__)
 
-void check_eq_double(double got, double want, const char* what, int line)
+void
+check_eq_double(double got, double want, const char* what, int line)
 {
     ++g_checks;
     const bool ok = (std::isnan(got) && std::isnan(want)) ||
@@ -39,8 +41,9 @@ void check_eq_double(double got, double want, const char* what, int line)
 
 #define CHECK_DOUBLE(got, want) check_eq_double((got), (want), #got, __LINE__)
 
-void check_eq_str(const std::string& got, const std::string& want,
-                  const char* what, int line)
+void
+check_eq_str(const std::string& got, const std::string& want, const char* what,
+             int line)
 {
     ++g_checks;
     if (got != want) {
@@ -54,7 +57,8 @@ void check_eq_str(const std::string& got, const std::string& want,
 
 // ---------------------------------------------------------------------------
 
-void test_decompose()
+void
+test_decompose()
 {
     auto p = cbfp::decompose(1.0);
     CHECK(p.mantissa == 1 && p.exponent == 0 && !p.negative);
@@ -97,7 +101,8 @@ void test_decompose()
     }
 }
 
-void test_single_value_roundtrip()
+void
+test_single_value_roundtrip()
 {
     const double values[] = {
         0.0,
@@ -127,7 +132,8 @@ void test_single_value_roundtrip()
     }
 }
 
-void test_catastrophic_cancellation()
+void
+test_catastrophic_cancellation()
 {
     // The classic case: naive double summation returns 0, the exact answer
     // is 1.
@@ -142,7 +148,8 @@ void test_catastrophic_cancellation()
     CHECK_STR(m.to_exact_decimal(0, 0), "1");
 }
 
-void test_repeated_tenth()
+void
+test_repeated_tenth()
 {
     // double(0.1) is exactly 3602879701896397 * 2^-55, so ten of them sum to
     // exactly 1 + 2^-54 -- a quarter ulp above 1, which rounds back to 1.0.
@@ -159,7 +166,8 @@ void test_repeated_tenth()
               "1.000000000000000055511151231257827021181583404541015625");
 }
 
-void test_exact_decimal()
+void
+test_exact_decimal()
 {
     cbfp::ColumnBlockMatrix m(1, 4);
     m.add(0, 0, 0.1);
@@ -180,7 +188,8 @@ void test_exact_decimal()
     CHECK(tiny.back() == '5');  // 2^-1074 ends in ...625
 }
 
-void test_exponent_and_width_tracking()
+void
+test_exponent_and_width_tracking()
 {
     cbfp::ColumnBlockMatrix m(1, 1);
     m.add(0, 0, 1.0);
@@ -205,7 +214,8 @@ void test_exponent_and_width_tracking()
     CHECK_DOUBLE(m.to_double(0, 0), 0.0);
 }
 
-void test_full_double_range()
+void
+test_full_double_range()
 {
     // Span the entire binade range in a single column: 2^-1074 up to 2^1023.
     cbfp::ColumnBlockMatrix m(1, 1);
@@ -223,7 +233,8 @@ void test_full_double_range()
     CHECK(m.is_exactly_representable(0, 0));
 }
 
-void test_rounding_ties_to_even()
+void
+test_rounding_ties_to_even()
 {
     {  // 1 + 2^-53 is exactly halfway between 1 and nextafter(1); ties to
        // even.
@@ -281,7 +292,8 @@ void test_rounding_ties_to_even()
     }
 }
 
-void test_add_then_subtract_is_zero()
+void
+test_add_then_subtract_is_zero()
 {
     // Order-independence and exactness: adding a random set and then
     // subtracting the same values in a different order must land on exact
@@ -313,7 +325,8 @@ void test_add_then_subtract_is_zero()
     }
 }
 
-void test_matrix_accumulation()
+void
+test_matrix_accumulation()
 {
     const std::size_t rows = 3, cols = 4;
     // clang-format off
@@ -354,7 +367,8 @@ void test_matrix_accumulation()
     }
 }
 
-void test_reserve_avoids_rescaling()
+void
+test_reserve_avoids_rescaling()
 {
     const std::size_t rows = 4, cols = 3;
     // clang-format off
@@ -385,7 +399,8 @@ void test_reserve_avoids_rescaling()
     }
 }
 
-void test_column_independence()
+void
+test_column_independence()
 {
     // Column 0 gets a huge dynamic range, column 1 stays cheap. The whole
     // point of per-column scaling is that column 1 does not pay for column 0.
@@ -400,7 +415,8 @@ void test_column_independence()
     CHECK(m.column_exponent(1) == 0);
 }
 
-void test_errors()
+void
+test_errors()
 {
     cbfp::ColumnBlockMatrix m(2, 2);
     bool threw = false;
@@ -420,7 +436,8 @@ void test_errors()
     CHECK(threw);
 }
 
-void test_many_small_into_large()
+void
+test_many_small_into_large()
 {
     // A million values whose ulp is far below the running total's ulp. Naive
     // summation stalls completely; this does not.
@@ -439,7 +456,8 @@ void test_many_small_into_large()
     CHECK_DOUBLE(m.to_double(0, 0), 1000000.0);
 }
 
-void test_reuse_after_zero()
+void
+test_reuse_after_zero()
 {
     cbfp::ColumnBlockMatrix m(1, 1);
     m.add(0, 0, 1.0);
@@ -454,7 +472,8 @@ void test_reuse_after_zero()
 // A deterministic value per (row, column, batch), spanning a wide exponent
 // range with mixed signs so columns rescale and widen at different rates and
 // entries partially cancel.
-double wide_sample(std::size_t i, std::size_t j, int batch)
+double
+wide_sample(std::size_t i, std::size_t j, int batch)
 {
     const int e = static_cast<int>((i * 7 + j * 13 + batch * 3) % 120) - 60;
     const double frac =
@@ -463,7 +482,8 @@ double wide_sample(std::size_t i, std::size_t j, int batch)
     return std::ldexp((batch % 2 == 0) ? m : -m, e);
 }
 
-void test_row_stride()
+void
+test_row_stride()
 {
     const std::size_t rows = 5, cols = 3, stride = cols + 4;
 
@@ -516,7 +536,8 @@ void test_row_stride()
     }
 }
 
-void test_large_matrix_matches_scalar()
+void
+test_large_matrix_matches_scalar()
 {
     // A column of 257 rows shares one exponent across every row, while a 1x1
     // accumulator picks the exponent that suits its single cell. The stored
@@ -556,7 +577,8 @@ void test_large_matrix_matches_scalar()
     }
 }
 
-void test_large_matrix_cancels_to_zero()
+void
+test_large_matrix_cancels_to_zero()
 {
     // Subtracting the same values back in a different order must clear every
     // one of the 2313 cells, which no amount of cross-row bleed would survive.
@@ -593,7 +615,8 @@ void test_large_matrix_cancels_to_zero()
     CHECK(nonzero == 0);
 }
 
-void test_large_matrix_per_column_scales()
+void
+test_large_matrix_per_column_scales()
 {
     // 512 x 64 with a distinct power-of-two scale per column. Each cell sums
     // integers below 2^53 at a single fixed scale, so plain double addition is
@@ -637,7 +660,8 @@ void test_large_matrix_per_column_scales()
     }
 }
 
-void test_column_major_input()
+void
+test_column_major_input()
 {
     // The same matrix in both layouts must accumulate to the same exact
     // values. Column-major needs no staging copy, so it takes a different
@@ -702,7 +726,8 @@ void test_column_major_input()
     }
 }
 
-void test_streamed_columns()
+void
+test_streamed_columns()
 {
     // Feeding one column at a time must match feeding the whole matrix. This
     // is what lets a caller hold an accumulator far larger than any input it
@@ -762,7 +787,8 @@ void test_streamed_columns()
 // Value for matrix `m` at (i, j). Each matrix occupies a distinct magnitude
 // band, so different orderings trigger the column rescales at different points
 // and pass through different intermediate widths on the way to the same total.
-double order_sample(std::size_t i, std::size_t j, int m)
+double
+order_sample(std::size_t i, std::size_t j, int m)
 {
     const int band = (m * 137) % 400 - 200;
     const int e = band + static_cast<int>((i * 5 + j * 3) % 17);
@@ -771,7 +797,8 @@ double order_sample(std::size_t i, std::size_t j, int m)
     return std::ldexp((m % 3 == 0) ? -frac : frac, e);
 }
 
-void test_order_independence()
+void
+test_order_independence()
 {
     // Double addition is already commutative -- a + b and b + a round
     // identically -- but it is not associative, which is what makes a naive
@@ -831,7 +858,8 @@ void test_order_independence()
     }
 }
 
-void test_order_independent_cancellation()
+void
+test_order_independent_cancellation()
 {
     // Matrices that cancel exactly must reach zero in any order, including
     // orders where the huge terms arrive before the tiny ones and orders where
@@ -869,7 +897,8 @@ void test_order_independent_cancellation()
     }
 }
 
-void test_order_independent_across_entry_points()
+void
+test_order_independent_across_entry_points()
 {
     // Whole-matrix, column-major, per-column and per-element accumulation are
     // four different code paths; all must agree on the same total.
@@ -937,7 +966,8 @@ void test_order_independent_across_entry_points()
     }
 }
 
-void test_zero_crossing_preserves_value()
+void
+test_zero_crossing_preserves_value()
 {
     // A column that passes through exact zero lets rescale take its shortcut
     // and reset the width bound, so two orderings can end with different
@@ -1002,7 +1032,8 @@ void test_zero_crossing_preserves_value()
 
 }  // namespace
 
-int main()
+int
+main()
 {
     test_decompose();
     test_single_value_roundtrip();

@@ -8,7 +8,8 @@ namespace cbfp {
 namespace kernels {
 namespace {
 
-bool use_avx512()
+bool
+use_avx512()
 {
     // Escape hatch so both variants can be measured and cross-checked from a
     // single binary.
@@ -30,7 +31,8 @@ bool use_avx512()
 
 }  // namespace
 
-AccumulateFn accumulate()
+AccumulateFn
+accumulate()
 {
 #if defined(CBFP_HAVE_AVX512)
     static const AccumulateFn fn =
@@ -41,7 +43,8 @@ AccumulateFn accumulate()
     return fn;
 }
 
-SurveyFn survey()
+SurveyFn
+survey()
 {
 #if defined(CBFP_HAVE_AVX512)
     static const SurveyFn fn =
@@ -52,7 +55,8 @@ SurveyFn survey()
     return fn;
 }
 
-const char* accumulate_name()
+const char*
+accumulate_name()
 {
     return accumulate() == accumulate_scalar ? "scalar" : "avx512";
 }

@@ -16,7 +16,8 @@ constexpr std::uint64_t kFracMask = (std::uint64_t{1} << 52) - 1;
 // Eight doubles from a contiguous column. There is deliberately no gather
 // here: the caller stages a strided column instead, because gathering costs
 // more than the decomposition it would feed.
-inline __m512d load_column(const double* values, std::size_t row)
+inline __m512d
+load_column(const double* values, std::size_t row)
 {
     return _mm512_loadu_pd(values + row);
 }
@@ -29,8 +30,8 @@ inline __m512d load_column(const double* values, std::size_t row)
 // mask is loop-invariant for all but the last block, and threading it through
 // the body costs ~4% of the accumulate and ~15% of the survey, whose pass-1
 // body is short enough for three extra instructions to matter.
-inline __m512d load_column_tail(const double* values, std::size_t row,
-                                __mmask8 m_k)
+inline __m512d
+load_column_tail(const double* values, std::size_t row, __mmask8 m_k)
 {
     return _mm512_maskz_loadu_pd(m_k, values + row);
 }
@@ -45,7 +46,8 @@ struct Split8 {
 };
 
 // Vector form of the scalar `split`: the same IEEE-754 field extraction.
-inline Split8 split8(__m512d v_val)
+inline Split8
+split8(__m512d v_val)
 {
     const __m512i v_bits = _mm512_castpd_si512(v_val);
     const __m512i v_biased = _mm512_and_si512(_mm512_srli_epi64(v_bits, 52),
@@ -81,7 +83,8 @@ inline Split8 split8(__m512d v_val)
     return s;
 }
 
-inline __mmask8 tail_mask(std::size_t row, std::size_t rows)
+inline __mmask8
+tail_mask(std::size_t row, std::size_t rows)
 {
     return row + 8 <= rows ? static_cast<__mmask8>(0xFF)
                            : static_cast<__mmask8>((1u << (rows - row)) - 1u);
@@ -89,8 +92,9 @@ inline __mmask8 tail_mask(std::size_t row, std::size_t rows)
 
 }  // namespace
 
-Survey survey_column_avx512(const double* values, std::size_t rows,
-                            long long floor_exponent)
+Survey
+survey_column_avx512(const double* values, std::size_t rows,
+                     long long floor_exponent)
 {
     // First pass touches only the exponent field.
     //
@@ -227,9 +231,10 @@ struct Addend8 {
 
 }  // namespace
 
-void accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
-                       const double* values, std::size_t rows,
-                       std::int32_t column_exponent, std::size_t first_limb)
+void
+accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
+                  const double* values, std::size_t rows,
+                  std::int32_t column_exponent, std::size_t first_limb)
 {
     const __m512i kOne = _mm512_set1_epi64(1);
     const __m512i kOnes = _mm512_set1_epi64(-1);

@@ -146,6 +146,12 @@ namespaces, and control statements keep theirs on the same line). Short
 accessors defined inside a class may stay on one line; the few that wrap do so
 only because they exceed the 80-column limit.
 
+The return type of anything at namespace scope goes on its own line, so a
+function name always begins in the first column and `grep '^name'` finds its
+definition. Declarations inside a class are exempt — they are indented and
+could not reach the first column anyway, and breaking them would also split
+the one-line accessors apart.
+
 This machine has clang-format at `/usr/lib/llvm-18/bin/clang-format` (it is not
 on `PATH`):
 
