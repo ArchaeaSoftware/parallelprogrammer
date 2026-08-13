@@ -8,14 +8,14 @@ namespace {
 
 // Sign-extended limb read: indices at or past the top return the sign fill.
 inline limb_t
-at(const limb_t* p, std::size_t n, std::size_t i, limb_t fill)
+at(const limb_t *p, std::size_t n, std::size_t i, limb_t fill)
 {
     return i < n ? p[i] : fill;
 }
 
 // Drops leading zero limbs from a magnitude.
 void
-trim(std::vector<limb_t>& v)
+trim(std::vector<limb_t> &v)
 {
     std::size_t n = v.size();
     for (; n > 0 && 0 == v[n - 1]; --n) {
@@ -26,13 +26,13 @@ trim(std::vector<limb_t>& v)
 }  // namespace
 
 bool
-is_negative(const limb_t* p, std::size_t n)
+is_negative(const limb_t *p, std::size_t n)
 {
     return n != 0 && (p[n - 1] >> 63) != 0;
 }
 
 bool
-is_zero(const limb_t* p, std::size_t n)
+is_zero(const limb_t *p, std::size_t n)
 {
     for (std::size_t i = 0; i < n; ++i) {
         if (0 != p[i]) return false;
@@ -41,7 +41,7 @@ is_zero(const limb_t* p, std::size_t n)
 }
 
 void
-widen(const limb_t* src, std::size_t sn, limb_t* dst, std::size_t dn)
+widen(const limb_t *src, std::size_t sn, limb_t *dst, std::size_t dn)
 {
     assert(dn >= sn);
     const limb_t fill = is_negative(src, sn) ? ~limb_t{0} : limb_t{0};
@@ -50,7 +50,7 @@ widen(const limb_t* src, std::size_t sn, limb_t* dst, std::size_t dn)
 }
 
 void
-shift_left(const limb_t* src, std::size_t sn, unsigned s, limb_t* dst,
+shift_left(const limb_t *src, std::size_t sn, unsigned s, limb_t *dst,
            std::size_t dn)
 {
     const limb_t fill = is_negative(src, sn) ? ~limb_t{0} : limb_t{0};
@@ -72,7 +72,7 @@ shift_left(const limb_t* src, std::size_t sn, unsigned s, limb_t* dst,
 }
 
 bool
-add_shifted(limb_t* p, std::size_t n, limb_t lo, limb_t hi, std::size_t off,
+add_shifted(limb_t *p, std::size_t n, limb_t lo, limb_t hi, std::size_t off,
             bool subtract)
 {
     const bool was_negative = is_negative(p, n);
@@ -104,7 +104,7 @@ add_shifted(limb_t* p, std::size_t n, limb_t lo, limb_t hi, std::size_t off,
 }
 
 void
-negate_into(const limb_t* src, std::size_t n, limb_t* dst)
+negate_into(const limb_t *src, std::size_t n, limb_t *dst)
 {
     limb_t carry = 1;
     for (std::size_t i = 0; i < n; ++i) {
@@ -115,7 +115,7 @@ negate_into(const limb_t* src, std::size_t n, limb_t* dst)
 }
 
 std::size_t
-bit_length(const limb_t* p, std::size_t n)
+bit_length(const limb_t *p, std::size_t n)
 {
     for (std::size_t i = n; i-- > 0;) {
         if (0 != p[i]) {
@@ -126,7 +126,7 @@ bit_length(const limb_t* p, std::size_t n)
 }
 
 bool
-get_bit(const limb_t* p, std::size_t n, std::size_t i)
+get_bit(const limb_t *p, std::size_t n, std::size_t i)
 {
     const std::size_t w = i / kLimbBits;
     if (w >= n) return false;
@@ -134,7 +134,7 @@ get_bit(const limb_t* p, std::size_t n, std::size_t i)
 }
 
 bool
-any_bits_below(const limb_t* p, std::size_t n, std::size_t i)
+any_bits_below(const limb_t *p, std::size_t n, std::size_t i)
 {
     const std::size_t w = i / kLimbBits;
     const unsigned b = i % kLimbBits;
@@ -148,7 +148,7 @@ any_bits_below(const limb_t* p, std::size_t n, std::size_t i)
 }
 
 std::uint64_t
-extract_u64(const limb_t* p, std::size_t n, std::size_t shift)
+extract_u64(const limb_t *p, std::size_t n, std::size_t shift)
 {
     const std::size_t w = shift / kLimbBits;
     const unsigned b = shift % kLimbBits;
@@ -160,7 +160,7 @@ extract_u64(const limb_t* p, std::size_t n, std::size_t shift)
 }
 
 void
-mul_small(std::vector<limb_t>& v, limb_t m)
+mul_small(std::vector<limb_t> &v, limb_t m)
 {
     limb_t carry = 0;
     for (std::size_t i = 0; i < v.size(); ++i) {

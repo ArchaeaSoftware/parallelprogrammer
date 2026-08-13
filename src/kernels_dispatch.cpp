@@ -13,7 +13,7 @@ use_avx512()
 {
     // Escape hatch so both variants can be measured and cross-checked from a
     // single binary.
-    if (const char* forced = std::getenv("CBFP_KERNEL")) {
+    if (const char *forced = std::getenv("CBFP_KERNEL")) {
         if (0 == std::strcmp(forced, "scalar")) return false;
     }
 #if defined(CBFP_HAVE_AVX512)
@@ -55,7 +55,7 @@ survey()
     return fn;
 }
 
-const char*
+const char *
 accumulate_name()
 {
     return accumulate() == accumulate_scalar ? "scalar" : "avx512";

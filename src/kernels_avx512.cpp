@@ -17,7 +17,7 @@ constexpr std::uint64_t kFracMask = (std::uint64_t{1} << 52) - 1;
 // here: the caller stages a strided column instead, because gathering costs
 // more than the decomposition it would feed.
 inline __m512d
-load_column(const double* values, std::size_t row)
+load_column(const double *values, std::size_t row)
 {
     return _mm512_loadu_pd(values + row);
 }
@@ -31,7 +31,7 @@ load_column(const double* values, std::size_t row)
 // the body costs ~4% of the accumulate and ~15% of the survey, whose pass-1
 // body is short enough for three extra instructions to matter.
 inline __m512d
-load_column_tail(const double* values, std::size_t row, __mmask8 m_k)
+load_column_tail(const double *values, std::size_t row, __mmask8 m_k)
 {
     return _mm512_maskz_loadu_pd(m_k, values + row);
 }
@@ -93,7 +93,7 @@ tail_mask(std::size_t row, std::size_t rows)
 }  // namespace
 
 Survey
-survey_column_avx512(const double* values, std::size_t rows,
+survey_column_avx512(const double *values, std::size_t rows,
                      long long floor_exponent)
 {
     // First pass touches only the exponent field.
@@ -232,8 +232,8 @@ struct Addend8 {
 }  // namespace
 
 void
-accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
-                  const double* values, std::size_t rows,
+accumulate_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
+                  const double *values, std::size_t rows,
                   std::int32_t column_exponent, std::size_t first_limb)
 {
     const __m512i kOne = _mm512_set1_epi64(1);
@@ -263,7 +263,7 @@ accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
         return q;
     };
 
-    const auto apply = [&](const Addend8& q) {
+    const auto apply = [&](const Addend8 &q) {
         if (0 == q.m_live) return;
         __m512i v_carry = _mm512_setzero_si512();
 
@@ -289,7 +289,7 @@ accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
             v_carry =
                 _mm512_mask_mov_epi64(v_carry, m_at_lo & q.m_negative, kOne);
 
-            std::uint64_t* dst = limbs[p] + q.row;
+            std::uint64_t *dst = limbs[p] + q.row;
             const __m512i v_x = _mm512_loadu_si512(dst);
             const __m512i v_sum = _mm512_add_epi64(v_x, v_addend);
             const __mmask8 m_c1 = _mm512_cmplt_epu64_mask(v_sum, v_x);

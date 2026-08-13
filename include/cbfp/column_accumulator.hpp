@@ -24,7 +24,7 @@
 namespace cbfp {
 
 // Name of the kernel variant selected for this CPU ("scalar", "avx512").
-const char*
+const char *
 active_kernel();
 
 class ColumnBlockMatrix {
@@ -45,30 +45,30 @@ public:
 
     // A += B, where B is a dense row-major rows() x cols() matrix whose rows
     // are `row_stride` doubles apart (0 means "tightly packed", i.e. cols()).
-    void add_matrix(const double* b, std::size_t row_stride = 0);
+    void add_matrix(const double *b, std::size_t row_stride = 0);
 
     // A += scale * B, where scale is a power of two. Exact for any such scale
     // (including negative ones); this is the only scaling that stays exact
     // without widening the mantissa.
-    void add_matrix_scaled_pow2(const double* b, int log2_scale,
+    void add_matrix_scaled_pow2(const double *b, int log2_scale,
                                 std::size_t row_stride = 0);
 
     // A += B, where B is column-major: column j begins at b + j*col_stride and
     // its rows are contiguous (0 means tightly packed, i.e. rows()). This is
     // the layout the accumulator itself wants, so it avoids the staging copy
     // that a row-major input needs.
-    void add_matrix_col_major(const double* b, std::size_t col_stride = 0);
+    void add_matrix_col_major(const double *b, std::size_t col_stride = 0);
 
-    void add_matrix_col_major_scaled_pow2(const double* b, int log2_scale,
+    void add_matrix_col_major_scaled_pow2(const double *b, int log2_scale,
                                           std::size_t col_stride = 0);
 
     // A(., j) += v, where v is rows() contiguous doubles. Lets a caller stream
     // one column at a time, so only the accumulator has to be resident -- the
     // difference between holding a whole input matrix and holding 8*rows()
     // bytes of it.
-    void add_column(std::size_t j, const double* v);
+    void add_column(std::size_t j, const double *v);
 
-    void add_column_scaled_pow2(std::size_t j, const double* v, int log2_scale);
+    void add_column_scaled_pow2(std::size_t j, const double *v, int log2_scale);
 
     void set_zero();
 
@@ -80,7 +80,7 @@ public:
     double to_double(std::size_t i, std::size_t j) const;
 
     // Fills a dense row-major rows() x cols() buffer with to_double() results.
-    void to_matrix(double* out, std::size_t row_stride = 0) const;
+    void to_matrix(double *out, std::size_t row_stride = 0) const;
 
     // The exact value as a decimal string, e.g. "0.1" accumulated once yields
     // 0.1000000000000000055511151231257827021181583404541015625. Never rounds.
@@ -122,7 +122,7 @@ public:
     // Pre-size every column from a matrix that is about to be accumulated
     // `count` times, so the accumulation itself never rescales. Purely an
     // optimization; results are identical without it.
-    void reserve_for(const double* b, std::size_t count = 1,
+    void reserve_for(const double *b, std::size_t count = 1,
                      std::size_t row_stride = 0);
 
     std::size_t memory_bytes() const;
@@ -141,31 +141,31 @@ private:
         std::size_t max_addend_bits = 0;
         std::size_t add_count = 0;
 
-        std::vector<LimbColumn> limbs;      // limbs[k] = k-th limb of a row
-        std::vector<limbs::limb_t*> bases;  // limbs[k].data(), for kernels
+        std::vector<LimbColumn> limbs;       // limbs[k] = k-th limb of a row
+        std::vector<limbs::limb_t *> bases;  // limbs[k].data(), for kernels
     };
 
     // Column j starts at b + j*column_step, with element i at + i*row_step.
     // Row-major is (1, row_stride); column-major is (col_stride, 1).
-    void accumulate_columns(const double* b, std::size_t column_step,
+    void accumulate_columns(const double *b, std::size_t column_step,
                             std::size_t row_step, int log2_scale);
 
     // Accumulates one column that is already contiguous.
-    void accumulate_column(std::size_t j, const double* column, int log2_scale);
+    void accumulate_column(std::size_t j, const double *column, int log2_scale);
 
     void check_index(std::size_t i, std::size_t j) const;
-    void rebuild_bases(Column& c);
-    void ensure_limb_count(Column& c, std::size_t limbs_needed);
-    void fit_column(Column& c);
-    void rescale(Column& c, int new_exponent);
-    bool column_is_zero(const Column& c) const;
+    void rebuild_bases(Column &c);
+    void ensure_limb_count(Column &c, std::size_t limbs_needed);
+    void fit_column(Column &c);
+    void rescale(Column &c, int new_exponent);
+    bool column_is_zero(const Column &c) const;
     void accumulate(std::size_t i, std::size_t j, double v, bool negate,
                     int log2_scale);
 
     // Absolute value of entry (i, j) as a magnitude limb vector, plus its
     // sign. Gathers across limb positions, so this is a readback path only.
     std::vector<limbs::limb_t> magnitude(std::size_t i, std::size_t j,
-                                         bool* negative) const;
+                                         bool *negative) const;
 
     std::size_t rows_;
     std::size_t cols_;

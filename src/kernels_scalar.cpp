@@ -50,7 +50,7 @@ split(double v)
 }  // namespace
 
 Survey
-survey_column_scalar(const double* values, std::size_t rows,
+survey_column_scalar(const double *values, std::size_t rows,
                      long long floor_exponent)
 {
     // First pass reads only the exponent field. The raw exponent is a lower
@@ -108,7 +108,7 @@ survey_column_scalar(const double* values, std::size_t rows,
 }
 
 void
-accumulate_one(std::uint64_t* const* limbs, std::size_t nlimbs, std::size_t row,
+accumulate_one(std::uint64_t *const *limbs, std::size_t nlimbs, std::size_t row,
                std::uint64_t mantissa, std::size_t shift, bool negative)
 {
     if (0 == mantissa) return;
@@ -149,8 +149,8 @@ accumulate_one(std::uint64_t* const* limbs, std::size_t nlimbs, std::size_t row,
 }
 
 void
-accumulate_scalar(std::uint64_t* const* limbs, std::size_t nlimbs,
-                  const double* values, std::size_t rows,
+accumulate_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
+                  const double *values, std::size_t rows,
                   std::int32_t column_exponent, std::size_t first_limb)
 {
     (void)first_limb;  // the scalar path starts from each row's own limb
@@ -164,8 +164,8 @@ accumulate_scalar(std::uint64_t* const* limbs, std::size_t nlimbs,
 }
 
 void
-shift_left(std::uint64_t* const* dst, std::size_t ndst,
-           std::uint64_t* const* src, std::size_t nsrc, std::size_t rows,
+shift_left(std::uint64_t *const *dst, std::size_t ndst,
+           std::uint64_t *const *src, std::size_t nsrc, std::size_t rows,
            unsigned shift)
 {
     const std::size_t word = shift / 64;
@@ -173,7 +173,7 @@ shift_left(std::uint64_t* const* dst, std::size_t ndst,
     const std::size_t n = padded_rows(rows);
 
     for (std::size_t k = ndst; k-- > 0;) {
-        std::uint64_t* out = dst[k];
+        std::uint64_t *out = dst[k];
         if (k < word) {
             for (std::size_t i = 0; i < n; ++i) out[i] = 0;
             continue;
@@ -183,14 +183,14 @@ shift_left(std::uint64_t* const* dst, std::size_t ndst,
 
         // Above the source, every limb reads as the sign fill.
         if (a >= nsrc) {
-            const std::uint64_t* top = src[nsrc - 1];
+            const std::uint64_t *top = src[nsrc - 1];
             if (0 == bit || c >= nsrc) {
                 for (std::size_t i = 0; i < n; ++i) {
                     out[i] = static_cast<std::uint64_t>(
                         static_cast<std::int64_t>(top[i]) >> 63);
                 }
             } else {
-                const std::uint64_t* low = src[c];
+                const std::uint64_t *low = src[c];
                 for (std::size_t i = 0; i < n; ++i) {
                     const std::uint64_t fill = static_cast<std::uint64_t>(
                         static_cast<std::int64_t>(top[i]) >> 63);
@@ -200,13 +200,13 @@ shift_left(std::uint64_t* const* dst, std::size_t ndst,
             continue;
         }
 
-        const std::uint64_t* high = src[a];
+        const std::uint64_t *high = src[a];
         if (0 == bit) {
             for (std::size_t i = 0; i < n; ++i) out[i] = high[i];
         } else if (0 == a) {
             for (std::size_t i = 0; i < n; ++i) out[i] = high[i] << bit;
         } else {
-            const std::uint64_t* low = src[c];
+            const std::uint64_t *low = src[c];
             for (std::size_t i = 0; i < n; ++i) {
                 out[i] = (high[i] << bit) | (low[i] >> (64 - bit));
             }
@@ -215,7 +215,7 @@ shift_left(std::uint64_t* const* dst, std::size_t ndst,
 }
 
 void
-sign_fill(std::uint64_t* dst, const std::uint64_t* top, std::size_t rows)
+sign_fill(std::uint64_t *dst, const std::uint64_t *top, std::size_t rows)
 {
     const std::size_t n = padded_rows(rows);
     for (std::size_t i = 0; i < n; ++i) {

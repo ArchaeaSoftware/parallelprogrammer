@@ -34,32 +34,33 @@ struct Survey {
 // lower bound settles that no rescale is due and the significand is never
 // touched. Pass LLONG_MAX to force the exact value, which is what a column
 // with no scale yet requires, since it adopts whatever the survey returns.
-using SurveyFn = Survey (*)(const double*, std::size_t, long long);
+using SurveyFn = Survey (*)(const double *, std::size_t, long long);
 
 // Fused decompose-and-add. `column_exponent` already absorbs any power-of-two
 // scale, so the shift is simply value_exponent - column_exponent.
 // `first_limb` is a starting hint from the survey; a row block that has not
 // reached its own first limb skips the position outright.
-using AccumulateFn = void (*)(std::uint64_t* const*, std::size_t, const double*,
-                              std::size_t, std::int32_t, std::size_t);
+using AccumulateFn = void (*)(std::uint64_t *const *, std::size_t,
+                              const double *, std::size_t, std::int32_t,
+                              std::size_t);
 
 Survey
-survey_column_scalar(const double* values, std::size_t rows,
+survey_column_scalar(const double *values, std::size_t rows,
                      long long floor_exponent);
 
 void
-accumulate_scalar(std::uint64_t* const* limbs, std::size_t nlimbs,
-                  const double* values, std::size_t rows,
+accumulate_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
+                  const double *values, std::size_t rows,
                   std::int32_t column_exponent, std::size_t first_limb);
 
 #if defined(CBFP_HAVE_AVX512)
 Survey
-survey_column_avx512(const double* values, std::size_t rows,
+survey_column_avx512(const double *values, std::size_t rows,
                      long long floor_exponent);
 
 void
-accumulate_avx512(std::uint64_t* const* limbs, std::size_t nlimbs,
-                  const double* values, std::size_t rows,
+accumulate_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
+                  const double *values, std::size_t rows,
                   std::int32_t column_exponent, std::size_t first_limb);
 #endif
 
@@ -68,24 +69,24 @@ SurveyFn
 survey();
 AccumulateFn
 accumulate();
-const char*
+const char *
 accumulate_name();
 
 // Adds one already-decomposed value to a single row. Not hot; used by the
 // element-at-a-time API.
 void
-accumulate_one(std::uint64_t* const* limbs, std::size_t nlimbs, std::size_t row,
+accumulate_one(std::uint64_t *const *limbs, std::size_t nlimbs, std::size_t row,
                std::uint64_t mantissa, std::size_t shift, bool negative);
 
 // dst = src << shift, sign-extended. dst and src are distinct allocations.
 void
-shift_left(std::uint64_t* const* dst, std::size_t ndst,
-           std::uint64_t* const* src, std::size_t nsrc, std::size_t rows,
+shift_left(std::uint64_t *const *dst, std::size_t ndst,
+           std::uint64_t *const *src, std::size_t nsrc, std::size_t rows,
            unsigned shift);
 
 // dst[i] = sign of top[i], i.e. all ones when negative and zero otherwise.
 void
-sign_fill(std::uint64_t* dst, const std::uint64_t* top, std::size_t rows);
+sign_fill(std::uint64_t *dst, const std::uint64_t *top, std::size_t rows);
 
 }  // namespace kernels
 }  // namespace cbfp

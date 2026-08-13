@@ -54,7 +54,7 @@ main()
     exact.reserve_for(batches[0].data(), kBatches);
 
     std::vector<double> naive(kRows * kCols, 0.0);
-    for (const auto& m : batches) {
+    for (const auto &m : batches) {
         exact.add_matrix(m.data());
         for (std::size_t k = 0; k < kRows * kCols; ++k) naive[k] += m[k];
     }

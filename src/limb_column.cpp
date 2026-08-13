@@ -35,7 +35,8 @@ LimbColumn::LimbColumn(std::size_t rows, std::size_t index)
     alloc_ = std::aligned_alloc(kAlign, bytes);
     if (nullptr == alloc_) throw std::bad_alloc();
     std::memset(alloc_, 0, bytes);
-    data_ = reinterpret_cast<std::uint64_t*>(static_cast<char*>(alloc_) + skew);
+    data_ =
+        reinterpret_cast<std::uint64_t *>(static_cast<char *>(alloc_) + skew);
 }
 
 LimbColumn::~LimbColumn()
@@ -43,15 +44,15 @@ LimbColumn::~LimbColumn()
     std::free(alloc_);
 }
 
-LimbColumn::LimbColumn(LimbColumn&& other) noexcept
+LimbColumn::LimbColumn(LimbColumn &&other) noexcept
     : alloc_(other.alloc_), data_(other.data_)
 {
     other.alloc_ = nullptr;
     other.data_ = nullptr;
 }
 
-LimbColumn&
-LimbColumn::operator=(LimbColumn&& other) noexcept
+LimbColumn &
+LimbColumn::operator=(LimbColumn &&other) noexcept
 {
     if (this != &other) {
         std::free(alloc_);

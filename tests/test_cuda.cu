@@ -27,7 +27,7 @@ int checks = 0;
 int failures = 0;
 
 void
-check(bool ok, const std::string& what)
+check(bool ok, const std::string &what)
 {
     ++checks;
     if (!ok) {
@@ -46,7 +46,7 @@ check(bool ok, const std::string& what)
 // started there.
 template <typename Gen>
 void
-cross_check(const char* name, std::size_t rows, std::size_t cols, int nbatches,
+cross_check(const char *name, std::size_t rows, std::size_t cols, int nbatches,
             Gen gen)
 {
     std::vector<std::vector<double>> batches(
@@ -168,7 +168,7 @@ test_edge_values()
     // Cancellation: the second batch is the negation of the first, so every
     // cell must return to exact zero on both sides.
     std::vector<double> first(128 * 4);
-    for (auto& v : first) v = random_value(200);
+    for (auto &v : first) v = random_value(200);
     cross_check("cancellation to exact zero", 128, 4, 2,
                 [&](std::size_t i, std::size_t j, int b) {
                     const double v = first[j * 128 + i];
@@ -217,14 +217,14 @@ test_occupancy()
             const int nbatches = 1 + static_cast<int>(rng() % 4);
             std::vector<std::vector<double>> b(
                 nbatches, std::vector<double>(rows * cols));
-            for (auto& one : b) {
-                for (auto& x : one) x = random_value(spread);
+            for (auto &one : b) {
+                for (auto &x : one) x = random_value(spread);
             }
             cbfp::ColumnBlockMatrix cpu(rows, cols);
-            for (auto& one : b) cpu.add_matrix_col_major(one.data());
+            for (auto &one : b) cpu.add_matrix_col_major(one.data());
             cbfp::CudaColumnBlockMatrix gpu(rows, cols);
             gpu.reserve_like(cpu);
-            for (auto& one : b) gpu.add_matrix_col_major(one.data());
+            for (auto &one : b) gpu.add_matrix_col_major(one.data());
 
             for (std::size_t j = 0; j < cols; ++j) {
                 const int occ = gpu.column_occupancy(j);
@@ -267,7 +267,7 @@ test_errors()
         bool threw = false;
         try {
             gpu.add_matrix_col_major(bad.data());
-        } catch (const std::domain_error&) {
+        } catch (const std::domain_error &) {
             threw = true;
         }
         check(threw, "NaN is rejected by the device survey");
@@ -276,7 +276,7 @@ test_errors()
         threw = false;
         try {
             gpu.add_matrix_col_major(bad.data());
-        } catch (const std::domain_error&) {
+        } catch (const std::domain_error &) {
             threw = true;
         }
         check(threw, "inf is rejected by the device survey");
@@ -291,7 +291,7 @@ test_errors()
         bool threw = false;
         try {
             gpu.add_matrix_col_major(v.data());
-        } catch (const std::runtime_error&) {
+        } catch (const std::runtime_error &) {
             threw = true;
         }
         check(threw, "an under-reserved exponent is an error");
@@ -305,7 +305,7 @@ test_errors()
         bool threw = false;
         try {
             gpu.add_matrix_col_major(v.data());
-        } catch (const std::runtime_error&) {
+        } catch (const std::runtime_error &) {
             threw = true;
         }
         check(threw, "an under-reserved width is an error");
@@ -319,7 +319,7 @@ test_errors()
         bool threw = false;
         try {
             gpu.add_matrix_col_major(v.data());
-        } catch (const std::runtime_error&) {
+        } catch (const std::runtime_error &) {
             threw = true;
         }
         check(threw, "an unreserved column is an error");

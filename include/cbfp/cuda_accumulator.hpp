@@ -44,8 +44,8 @@ public:
     CudaColumnBlockMatrix(std::size_t rows, std::size_t cols);
     ~CudaColumnBlockMatrix();
 
-    CudaColumnBlockMatrix(const CudaColumnBlockMatrix&) = delete;
-    CudaColumnBlockMatrix& operator=(const CudaColumnBlockMatrix&) = delete;
+    CudaColumnBlockMatrix(const CudaColumnBlockMatrix &) = delete;
+    CudaColumnBlockMatrix &operator=(const CudaColumnBlockMatrix &) = delete;
 
     std::size_t rows() const { return rows_; }
 
@@ -62,7 +62,7 @@ public:
     // already seen the data. This is the natural way to drive the device path
     // and what makes the two directly comparable: given the same exponent and
     // width, both must hold bit-identical limbs.
-    void reserve_like(const ColumnBlockMatrix& cpu);
+    void reserve_like(const ColumnBlockMatrix &cpu);
 
     // --- accumulation ------------------------------------------------------
 
@@ -70,10 +70,10 @@ public:
     // b + j*col_stride and its rows are contiguous (0 means tightly packed).
     // Throws std::domain_error on inf/NaN, and std::runtime_error if a column
     // was reserved too narrow or at too high an exponent for these values.
-    void add_matrix_col_major(const double* b, std::size_t col_stride = 0);
+    void add_matrix_col_major(const double *b, std::size_t col_stride = 0);
 
     // The same, for input already resident in device memory.
-    void add_matrix_col_major_device(const double* b,
+    void add_matrix_col_major_device(const double *b,
                                      std::size_t col_stride = 0);
 
     // Blocks until every submitted accumulation has finished. Accumulation is
@@ -114,8 +114,8 @@ private:
         // One device allocation per limb position, mirroring the CPU's
         // vector<LimbColumn>. Widening is then an append: the existing
         // allocations are not touched at all.
-        std::vector<limbs::limb_t*> bases;
-        limbs::limb_t** dev_bases = nullptr;  // the same array, device-side
+        std::vector<limbs::limb_t *> bases;
+        limbs::limb_t **dev_bases = nullptr;  // the same array, device-side
 
         // Highest limb position the accumulate has ever disturbed, reported
         // by the kernel rather than derived. -1 until something is added.
@@ -131,17 +131,17 @@ private:
     // kernel reads, and an event marking when the last kernel to read that
     // buffer finished, so a slot is only reused once it is genuinely free.
     struct Slot {
-        double* pinned = nullptr;
-        double* device = nullptr;
-        CUevent_st* ev_copied = nullptr;  // H2D into `device` finished
-        CUevent_st* ev_done = nullptr;    // last kernel to read it finished
+        double *pinned = nullptr;
+        double *device = nullptr;
+        CUevent_st *ev_copied = nullptr;  // H2D into `device` finished
+        CUevent_st *ev_done = nullptr;    // last kernel to read it finished
         bool in_flight = false;
     };
 
     void check_index(std::size_t i, std::size_t j) const;
-    void accumulate_device(const double* b, std::size_t col_stride);
-    void launch_accumulate(const double* b, std::size_t col_stride);
-    void validate_host_survey(const double* packed);
+    void accumulate_device(const double *b, std::size_t col_stride);
+    void launch_accumulate(const double *b, std::size_t col_stride);
+    void validate_host_survey(const double *packed);
     void sync_descriptors();
     void harvest_occupancy();
     void ensure_slots(std::size_t words);
@@ -161,8 +161,8 @@ private:
     // Copy and compute are separate streams so batch N+1's transfer runs on
     // the copy engine while batch N is still accumulating. On one stream they
     // serialize, and the transfer is the longer of the two.
-    CUstream_st* st_copy_ = nullptr;
-    CUstream_st* st_compute_ = nullptr;
+    CUstream_st *st_copy_ = nullptr;
+    CUstream_st *st_compute_ = nullptr;
     // These two stay void*: they point at types defined inside the .cu, which
     // is where they belong -- the descriptor layout is not this header's
     // business.
@@ -171,13 +171,13 @@ private:
     // atomics, then the last block to finish copies the finished array across
     // and re-arms it. Mapped rather than copied because it is one value per
     // column -- measured, that wins below ~64 values and loses badly above.
-    int* occupancy_device_ = nullptr;  // staging, device
-    int* occupancy_host_ = nullptr;    // mapped, written by the last block
-    unsigned* ticket_ = nullptr;       // device, elects that block
+    int *occupancy_device_ = nullptr;  // staging, device
+    int *occupancy_host_ = nullptr;    // mapped, written by the last block
+    unsigned *ticket_ = nullptr;       // device, elects that block
 
-    void* descriptors_ = nullptr;  // device ColumnDesc[]
+    void *descriptors_ = nullptr;  // device ColumnDesc[]
     bool descriptors_stale_ = true;
-    void* survey_out_ =
+    void *survey_out_ =
         nullptr;  // device survey results, for device-side input
 
     Slot slots_[2];

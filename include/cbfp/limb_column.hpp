@@ -21,17 +21,17 @@ public:
     LimbColumn(std::size_t rows, std::size_t index);
     ~LimbColumn();
 
-    LimbColumn(LimbColumn&& other) noexcept;
-    LimbColumn& operator=(LimbColumn&& other) noexcept;
-    LimbColumn(const LimbColumn&) = delete;
-    LimbColumn& operator=(const LimbColumn&) = delete;
+    LimbColumn(LimbColumn &&other) noexcept;
+    LimbColumn &operator=(LimbColumn &&other) noexcept;
+    LimbColumn(const LimbColumn &) = delete;
+    LimbColumn &operator=(const LimbColumn &) = delete;
 
-    std::uint64_t* data() noexcept { return data_; }
-    const std::uint64_t* data() const noexcept { return data_; }
+    std::uint64_t *data() noexcept { return data_; }
+    const std::uint64_t *data() const noexcept { return data_; }
 
 private:
-    void* alloc_ = nullptr;
-    std::uint64_t* data_ = nullptr;
+    void *alloc_ = nullptr;
+    std::uint64_t *data_ = nullptr;
 };
 
 // Rows rounded up to a whole vector block.

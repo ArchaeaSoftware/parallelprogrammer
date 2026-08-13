@@ -26,3 +26,10 @@ AllowShortFunctionsOnASingleLine: Inline
 # reach the first column anyway, and All would also break the short accessors
 # above out into multi-line bodies.
 AlwaysBreakAfterReturnType: TopLevel
+# The * binds to the variable, not the type: `limb_t *p`, not `limb_t* p`.
+# DerivePointerAlignment must be off as well -- Google's base style turns it on,
+# which makes clang-format infer the alignment per file and quietly ignore the
+# setting below. ReferenceAlignment defaults to following PointerAlignment, so
+# references go the same way: `const Column &c`.
+DerivePointerAlignment: false
+PointerAlignment: Right

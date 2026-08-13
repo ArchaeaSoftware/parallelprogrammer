@@ -146,6 +146,11 @@ namespaces, and control statements keep theirs on the same line). Short
 accessors defined inside a class may stay on one line; the few that wrap do so
 only because they exceed the 80-column limit.
 
+Pointers and references bind to the variable, not the type — `limb_t *dst`,
+`const Column &c`. `DerivePointerAlignment` has to be off for that to hold:
+the Google base style turns it on, which makes clang-format infer the
+alignment from each file and quietly ignore the setting.
+
 The return type of anything at namespace scope goes on its own line, so a
 function name always begins in the first column and `grep '^name'` finds its
 definition. Declarations inside a class are exempt — they are indented and

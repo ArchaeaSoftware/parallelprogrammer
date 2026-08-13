@@ -15,7 +15,7 @@ int g_failures = 0;
 int g_checks = 0;
 
 void
-check(bool ok, const char* expr, const char* file, int line)
+check(bool ok, const char *expr, const char *file, int line)
 {
     ++g_checks;
     if (!ok) {
@@ -27,7 +27,7 @@ check(bool ok, const char* expr, const char* file, int line)
 #define CHECK(expr) check((expr), #expr, __FILE__, __LINE__)
 
 void
-check_eq_double(double got, double want, const char* what, int line)
+check_eq_double(double got, double want, const char *what, int line)
 {
     ++g_checks;
     const bool ok = (std::isnan(got) && std::isnan(want)) ||
@@ -42,7 +42,7 @@ check_eq_double(double got, double want, const char* what, int line)
 #define CHECK_DOUBLE(got, want) check_eq_double((got), (want), #got, __LINE__)
 
 void
-check_eq_str(const std::string& got, const std::string& want, const char* what,
+check_eq_str(const std::string &got, const std::string &want, const char *what,
              int line)
 {
     ++g_checks;
@@ -317,7 +317,7 @@ test_add_then_subtract_is_zero()
     }
     for (std::size_t i = 0; i < rows; ++i) {
         for (std::size_t j = 0; j < cols; ++j) {
-            auto& cell = per_cell[i * cols + j];
+            auto &cell = per_cell[i * cols + j];
             std::shuffle(cell.begin(), cell.end(), rng);
             for (double v : cell) m.sub(i, j, v);
             CHECK(m.is_zero(i, j));
@@ -422,7 +422,7 @@ test_errors()
     bool threw = false;
     try {
         m.add(0, 0, std::numeric_limits<double>::infinity());
-    } catch (const std::domain_error&) {
+    } catch (const std::domain_error &) {
         threw = true;
     }
     CHECK(threw);
@@ -430,7 +430,7 @@ test_errors()
     threw = false;
     try {
         m.add(5, 0, 1.0);
-    } catch (const std::out_of_range&) {
+    } catch (const std::out_of_range &) {
         threw = true;
     }
     CHECK(threw);
@@ -778,7 +778,7 @@ test_streamed_columns()
     bool threw = false;
     try {
         b.add_column(cols, col_major.data());
-    } catch (const std::out_of_range&) {
+    } catch (const std::out_of_range &) {
         threw = true;
     }
     CHECK(threw);
@@ -989,7 +989,7 @@ test_zero_crossing_preserves_value()
 
     const std::vector<double> big = fill(100);
     std::vector<double> neg_big = big;
-    for (double& x : neg_big) x = -x;             // cancels `big` exactly
+    for (double &x : neg_big) x = -x;             // cancels `big` exactly
     const std::vector<double> tiny = fill(-200);  // forces a deep rescale
     const std::vector<double> mid = fill(40);
 
