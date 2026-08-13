@@ -120,8 +120,8 @@ private:
     struct Slot {
         double* pinned = nullptr;
         double* device = nullptr;
-        CUevent_st* copied = nullptr;  // H2D into `device` finished
-        CUevent_st* done = nullptr;    // last kernel to read it finished
+        CUevent_st* ev_copied = nullptr;  // H2D into `device` finished
+        CUevent_st* ev_done = nullptr;    // last kernel to read it finished
         bool in_flight = false;
     };
 
@@ -147,8 +147,8 @@ private:
     // Copy and compute are separate streams so batch N+1's transfer runs on
     // the copy engine while batch N is still accumulating. On one stream they
     // serialize, and the transfer is the longer of the two.
-    CUstream_st* copy_stream_ = nullptr;
-    CUstream_st* compute_stream_ = nullptr;
+    CUstream_st* st_copy_ = nullptr;
+    CUstream_st* st_compute_ = nullptr;
     // These two stay void*: they point at types defined inside the .cu, which
     // is where they belong -- the descriptor layout is not this header's
     // business.
