@@ -202,10 +202,13 @@ survey_kernel(const double *__restrict__ values,
               const ColumnShape *__restrict__ shapes,
               std::size_t col_stride, Survey *__restrict__ out)
 {
+    // Only the extents need a tree. `any` is not reduced at all -- it is
+    // implied by whether the minimum is still its sentinel -- and `nonfinite`
+    // is written directly by whichever threads see one, which in the ordinary
+    // case is none of them. Two arrays instead of four, so 2 KB a block rather
+    // than 4, and half the work in every step of the tree below.
     __shared__ int s_min[kBlock];
     __shared__ int s_max[kBlock];
-    __shared__ int s_any[kBlock];
-    __shared__ int s_bad[kBlock];
 
     const unsigned tid = threadIdx.x;
     const unsigned j = blockIdx.y;
@@ -216,7 +219,6 @@ survey_kernel(const double *__restrict__ values,
 
     int tmin = INT_MAX;
     int tmax = INT_MIN;
-    int tany = 0;
     int tbad = 0;
 
     const std::size_t step = static_cast<std::size_t>(gridDim.x) * blockDim.x;
@@ -229,7 +231,6 @@ survey_kernel(const double *__restrict__ values,
         split_device(col[i], m, e, top, neg, bad);
         if (bad) tbad = 1;
         if (0 != m) {
-            tany = 1;
             if (e < tmin) tmin = e;
             if (top > tmax) tmax = top;
         }
@@ -237,29 +238,27 @@ survey_kernel(const double *__restrict__ values,
 
     s_min[tid] = tmin;
     s_max[tid] = tmax;
-    s_any[tid] = tany;
-    s_bad[tid] = tbad;
+    // Rare, and unreduced: a plain store of true from every thread that saw a
+    // non-finite value. They all write the same value, so the race is benign,
+    // and a clean batch performs no store at all.
+    if (tbad) out[j].nonfinite = true;
     __syncthreads();
     for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
             if (s_min[tid + s] < s_min[tid]) s_min[tid] = s_min[tid + s];
             if (s_max[tid + s] > s_max[tid]) s_max[tid] = s_max[tid + s];
-            s_any[tid] |= s_any[tid + s];
-            s_bad[tid] |= s_bad[tid + s];
         }
         __syncthreads();
     }
 
-    // One atomic per block rather than one per thread. The extents need them;
-    // the flags do not, because every block that writes one writes true, so
-    // concurrent stores of the same value race benignly.
-    if (0 == tid) {
-        if (s_any[0]) {
-            atomicMin(&out[j].min_exponent, s_min[0]);
-            atomicMax(&out[j].max_top, s_max[0]);
-            out[j].any = true;
-        }
-        if (s_bad[0]) out[j].nonfinite = true;
+    // One atomic per block rather than one per thread. A minimum still at its
+    // sentinel means no lane in this block was live, which is exactly what an
+    // `any` reduction would have told us -- no biased exponent can reach
+    // INT_MAX, so the sentinel is unambiguous.
+    if (0 == tid && INT_MAX != s_min[0]) {
+        atomicMin(&out[j].min_exponent, s_min[0]);
+        atomicMax(&out[j].max_top, s_max[0]);
+        out[j].any = true;
     }
 }
 
@@ -304,8 +303,10 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols, InputSet in,
         static_cast<std::size_t>(j) * col_stride + sh.first_row;
     const std::size_t rows = sh.rows;
 
+    // Only the occupancy needs a tree. The flags are ORed straight into the
+    // per-column staging by whichever threads raise one, which in the ordinary
+    // case is none: a clean batch performs no atomic and needs no array.
     __shared__ int s_lim[kBlock];
-    __shared__ unsigned s_flg[kBlock];
     const unsigned tid = threadIdx.x;
     // Highest limb position this thread disturbs. The carry loop already knows
     // where it stopped, so this costs a comparison rather than a pass.
@@ -405,18 +406,17 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols, InputSet in,
     // Fold the per-thread maxima, reduce across blocks in device memory with
     // ordinary atomics, then elect one block to carry the finished array to
     // host memory. Atomics never cross PCIe: measured, that costs 260x.
+    if (0 != t_flags) atomicOr(&flags_device[j], t_flags);
+
     s_lim[tid] = t_lim;
-    s_flg[tid] = t_flags;
     __syncthreads();
     for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
             if (s_lim[tid + s] > s_lim[tid]) s_lim[tid] = s_lim[tid + s];
-            s_flg[tid] |= s_flg[tid + s];
         }
         __syncthreads();
     }
     if (0 == tid && s_lim[0] >= 0) atomicMax(&occupancy_device[j], s_lim[0]);
-    if (0 == tid && 0 != s_flg[0]) atomicOr(&flags_device[j], s_flg[0]);
 
     // Every block must publish before the elected one reads.
     __threadfence();

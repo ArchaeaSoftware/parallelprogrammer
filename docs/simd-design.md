@@ -1206,6 +1206,23 @@ at radix 52 came off it by being measured rather than by being done.
    a way for the producer to deliver into a buffer the accumulator will read --
    the device-side counterpart of `acquire_input`.
 
+   The block reductions were since cut back to what actually needs one. Only
+   the extents and the occupancy are reduced through a shared-memory tree;
+   `any` is implied by whether the minimum is still its sentinel, and the
+   non-finite and detector flags are written straight to their staging by
+   whichever threads raise one -- which in a clean batch is none, so the
+   ordinary case performs no atomic and needs no array. Shared memory halves,
+   4096 to 2048 bytes for the survey and 2049 to 1025 for the accumulate, and
+   throughput is unchanged to within noise.
+
+   Occupancy does *not* change on this card, which is worth saying because it
+   was the reason to expect a gain. Both kernels are register-bound: the
+   survey at 22 registers is limited to 11 resident blocks and the accumulate
+   at 46 to 5, while shared memory allowed 25 and 49 before the change. Halving
+   it moves those to 50 and 99, and the binding constraint never moves. The
+   simplification stands on being simpler; the headroom would only matter on a
+   part with less shared memory a SM, or if the registers came down first.
+
    The per-block fixed cost, by contrast, is not worth chasing: measured at
    ~12.7 ns a block against ~0.12 ns an element, which is 2.5% of a block at
    4096 rows a column. It is 62% at 64 rows, but the whole launch there is
