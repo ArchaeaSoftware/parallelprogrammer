@@ -3,9 +3,10 @@
 **Status: largely implemented.** The limb-major layout, the skewed aligned
 allocation and the AVX-512 survey and accumulate kernels have all landed, and
 the measurements below are from the real kernels unless a section says
-otherwise. What remains open is the radix (see the table — the CPU, not the
-GPU, is where it would pay). Threading, producer-supplied surveys on both
-targets, symmetric storage and multi-batch folding have all landed since. This
+otherwise. The radix question is now closed too: carry-save at
+52 was implemented and measured, and 64 stays. Threading, producer-supplied
+surveys on both targets, symmetric storage and multi-batch folding have all
+landed since. This
 header previously read "design, not implemented", which stopped being true at
 `fdc8b75`.
 
@@ -30,7 +31,7 @@ RTX 3060 (sm_86, CUDA 12.9).
 | Bit-manipulation `decompose` | landed (`8565474`) |
 | Flat free-function kernels; runtime dispatch via target attributes | settled |
 | No templates in the public API; radix templated in kernels only | settled |
-| Radix: 52-bit carry-save vs 64-bit canonical | **open, but on the CPU** |
+| Radix: 52-bit carry-save vs 64-bit canonical | **closed: stays at 64** |
 | Whether limb arrays get separate allocations on CUDA | measured neutral, kept separate |
 | Survey supplied by the producer; accumulator pre-sized from it | landed, both targets |
 | Symmetric matrices store one triangle, LAPACK `uplo` | landed, both targets |
@@ -41,8 +42,10 @@ Storage width is closed: 32-bit limbs were measured slower than 64-bit on both
 targets, so `uint64_t` is the plan of record everywhere and the limb type does
 not need to be a template parameter.
 
-The **radix** is a separate question and remains open — but on the opposite
-target from the one this document spent its time on.
+The **radix** was a separate question, open for most of this document's life
+and now closed — on the opposite target from the one it spent its time on, and
+against the change. The reasoning below is kept because the path from "2.8x on
+the GPU" to "measured, and not worth doing on either" is the useful part.
 
 An earlier draft had it that carry-save was a GPU win (2.8x, below) and that
 the CPU was simply unmeasured. Bounding it on both targets says the reverse.
@@ -79,7 +82,7 @@ So the CPU path stays canonical at radix 64 for now, which is what the code
 does, but the reason has changed again -- see below, where it was implemented
 and measured rather than bounded.
 
-### Radix 52 implemented and measured
+### Radix 52: implemented, measured, not pursued
 
 The bound above was collected by deleting the carry chain, which is not an
 implementation. A real radix-52 carry-save AVX-512 accumulate was then written
@@ -123,6 +126,16 @@ does not compute the detector flags the shipped radix-64 kernel does (worth
 0.8-4.8%), and it does not interleave two row blocks the way that kernel does
 (worth ~7-10% at 2-4 limbs). Treat 1.3-1.5x as the shape of the answer, not a
 figure to three digits.
+
+**Decision: the radix stays at 64 and this line of work is closed.** Per-column
+selection is the only form that measures well, and it buys 1.3-1.5x on middling
+columns at the price of a second accumulate kernel, a second normalization
+path, a second readback, and a width-dependent branch in the container -- for
+something that is a loss on the narrowest columns and nearly gone on the widest
+once past L3. The kernels stay templated on the radix, so the hook remains if
+the column-width distribution of a real workload ever argues differently, but
+nothing further is planned. Reopening this should mean new evidence about
+column widths, not a fresh look at the same numbers.
 
 ## The layout: limb-major `LimbColumn`
 
@@ -1017,24 +1030,15 @@ it the GPU does, and the ratio at the top is just the bandwidth ratio.
 
 Ping-pong input buffers, multi-batch folding on the CPU, and taking the survey
 out of the library have all landed since the last revision of this list, along
-with symmetric storage and readback residuals, which were not on it.
+with symmetric storage and readback residuals, which were not on it. Carry-save
+at radix 52 came off it by being measured rather than by being done.
 
-1. **Carry-save at radix 52 on the CPU, per column and not globally.** Now
-   measured with a real kernel rather than bounded: 1.33-1.55x at 2-4 limbs
-   and holding past L3, but **0.81-0.96x at one limb** and collapsing to 1.18x
-   at eight limbs once the accumulator outgrows cache. A global switch would
-   make the most common column shape slower. Selecting per column on width is
-   what the measurement argues for, and the container already carries a
-   per-column exponent and limb count to hang it on; the cost is two kernels
-   and two readback paths. De-risk as prescribed above: instantiate both
-   radices and assert bit-identical `to_exact_decimal` over the corpus.
-
-2. **Why the triangle gains less on the GPU than the CPU** -- 1.4-1.5x against
+1. **Why the triangle gains less on the GPU than the CPU** -- 1.4-1.5x against
    2.0-2.2x. The candidate is grid load imbalance, one column per y index, and
    it is unmeasured. Cheap to settle and it either recovers the missing 2x or
    removes a wrong explanation from this document.
 
-3. **Multi-batch folding on the device.** Previously ruled out on the grounds
+2. **Multi-batch folding on the device.** Previously ruled out on the grounds
    that every input matrix has to be vetted separately; pre-sizing removed that
    vetting, so the premise is gone. Folding cuts *device* traffic, so it would
    show with input already resident and not on the host-input path, where PCIe
