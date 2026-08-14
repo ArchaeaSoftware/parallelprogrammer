@@ -607,24 +607,34 @@ above shows the same thing as throughput; this is where it comes from.
 because `validate_host_survey` passes the column's current exponent as the
 floor, so the significand pass is skipped once a column is settled.
 
-**Fusing the copy with the survey was tried and does not pay.** The staged path
-walks 33.6 MB twice, once to copy and once to survey, and a column's 512 KB
-slice ought to be hot in cache the instant its copy finishes. Surveying it
-there measured *slower* through the library -- 3206 us a batch against 2969
-median, ranges not overlapping -- and isolated from the library it is
-1.01-1.04x, which is nothing:
+**Fusing the copy with the survey was tried properly and does not pay.** The
+staged path walks 33.6 MB twice, to copy and then to survey. A real fusion
+shares the *loads*: eight values arrive in a vector register on their way to the
+destination and the survey's first pass reads them there, so that pass costs no
+memory traffic at all. It was written that way -- streaming stores, alignment
+prologue for triangular slices, `sfence` -- and measured at each step, against a
+mapped destination:
 
-| staging destination | two-pass | fused | |
-| --- | --- | --- | --- |
-| ordinary memory | 2541 us | 2434 | 0.96x |
-| `cudaHostAlloc`, mapped | 2571 | 2550 | 0.99x |
+| | mapped dest |
+| --- | --- |
+| interleaved per column, no shared loads | ~0.92x |
+| shared loads, ordinary stores | 1.01x |
+| + non-temporal stores | 1.03x |
+| + two independent accumulator sets | **1.09x** |
 
-So the two passes are not paying for locality that fusing could recover. A
-batch is 33.6 MB against 32 MiB of L3, so it just misses either way, and the
-survey is not memory-bound enough for a per-column slice to matter. The
-regression inside the library on top of that is the interleaving itself:
-`require_fit` runs between column copies and touches column state, where the
-unfused form leaves the copy loop a clean streaming run.
+Two things surfaced getting there. The copy is not the weak part: an AVX-512
+loop with streaming stores beats `memcpy` outright, 1136 us against 1172. And
+the single-accumulator fused version was slower than running both operations
+*separately* -- 2758 against 1136 + 1340 -- because the survey's min and max are
+loop-carried, and one set of them serializes iterations the copy could
+otherwise overlap. Two sets recover most of that, the same reason the
+accumulate kernel interleaves two row blocks.
+
+So the fusion does work, at 1.09x of host copy+survey. It is **invisible end to
+end**: 2952-3167 us a batch against a 2941-2997 baseline, because the batch is
+not purely host-bound and the kernel's PCIe time absorbs the saving. Reverted
+on that basis -- a third kernel variant, non-temporal stores with an alignment
+prologue and a memory-ordering fence, for a component nobody measures.
 
 The staging copy therefore stays a copy. What removes it is `acquire_input`,
 which removes it entirely rather than making it cheaper -- 705 us a batch
