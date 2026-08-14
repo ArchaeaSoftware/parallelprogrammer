@@ -419,6 +419,24 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols, InputSet in,
     if (0 == tid) *ticket = 0;
 }
 
+// One limb array to be zeroed, and the kernel that does the lot.
+struct ZeroTarget {
+    limb_t *p;
+    unsigned rows;
+};
+
+__global__ void
+zero_kernel(const ZeroTarget *__restrict__ targets)
+{
+    const ZeroTarget z = targets[blockIdx.y];
+    const std::size_t step = static_cast<std::size_t>(gridDim.x) * blockDim.x;
+    for (std::size_t i =
+             static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         i < z.rows; i += step) {
+        z.p[i] = 0;
+    }
+}
+
 // A newly appended limb array holds the sign extension of the one below it:
 // all-ones where that limb is negative, all-zeros otherwise. This is the whole
 // cost of widening in a limb-major layout -- nothing already allocated moves.
@@ -721,6 +739,7 @@ CudaColumnBlockMatrix::~CudaColumnBlockMatrix()
         cudaFree(c.dev_bases);
     }
     cudaFree(descriptors_);
+    cudaFree(zero_targets_);
     cudaFreeHost(desc_host_);
     if (nullptr != ev_desc_) cudaEventDestroy(ev_desc_);
     cudaFree(survey_out_);
@@ -785,7 +804,9 @@ CudaColumnBlockMatrix::reserve_column(std::size_t j, int exponent,
         c.bases.resize(c.nlimbs);
         for (std::size_t k = 0; k < c.nlimbs; ++k) {
             cuda(MallocAsync(&c.bases[k], bytes, 0));
-            cuda(MemsetAsync(c.bases[k], 0, bytes, 0));
+            // Zeroed later, all of them together -- see flush_pending_zero.
+            zero_ptr_.push_back(c.bases[k]);
+            zero_rows_.push_back(c.rows);
         }
         cuda(Malloc(&c.dev_bases, c.nlimbs * sizeof(limb_t *)));
         cuda(Memcpy(c.dev_bases, c.bases.data(), c.nlimbs * sizeof(limb_t *),
@@ -807,6 +828,7 @@ CudaColumnBlockMatrix::grow_column(std::size_t j, std::size_t needed)
 {
     Column &c = cols_state_[j];
     if (c.nlimbs >= needed) return;
+    flush_pending_zero();
     synchronize();
 
     const std::size_t bytes = c.rows * sizeof(limb_t);
@@ -988,6 +1010,7 @@ int
 CudaColumnBlockMatrix::column_occupancy(std::size_t j) const
 {
     if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    flush_pending_zero();
     synchronize();
     const_cast<CudaColumnBlockMatrix *>(this)->harvest_occupancy();
     return cols_state_[j].max_limb_used;
@@ -1012,6 +1035,41 @@ CudaColumnBlockMatrix::memory_bytes() const
         total += c.nlimbs * c.rows * sizeof(limb_t);
     }
     return total;
+}
+
+// One launch over every array still owing a zero. The y extent is one block
+// row per array, so a short column costs a block that exits at once rather
+// than a separate API call that does not.
+void
+CudaColumnBlockMatrix::flush_pending_zero() const
+{
+    if (zero_ptr_.empty()) return;
+    const std::size_t n = zero_ptr_.size();
+
+    if (zero_capacity_ < n) {
+        cudaFree(zero_targets_);
+        zero_targets_ = nullptr;
+        cuda(Malloc(&zero_targets_, n * sizeof(ZeroTarget)));
+        zero_capacity_ = n;
+    }
+    std::vector<ZeroTarget> host(n);
+    std::size_t widest = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        host[i].p = zero_ptr_[i];
+        host[i].rows = static_cast<unsigned>(zero_rows_[i]);
+        if (zero_rows_[i] > widest) widest = zero_rows_[i];
+    }
+    cuda(Memcpy(zero_targets_, host.data(), n * sizeof(ZeroTarget),
+                cudaMemcpyHostToDevice));
+
+    unsigned gx = static_cast<unsigned>((widest + kBlock - 1) / kBlock);
+    if (gx > kMaxBlocks) gx = kMaxBlocks;
+    if (0 == gx) gx = 1;
+    zero_kernel<<<dim3(gx, static_cast<unsigned>(n)), kBlock, 0, st_compute_>>>(
+        static_cast<const ZeroTarget *>(zero_targets_));
+
+    zero_ptr_.clear();
+    zero_rows_.clear();
 }
 
 void
@@ -1360,6 +1418,7 @@ CudaColumnBlockMatrix::launch_accumulate(const double *const *b,
                                          std::size_t count,
                                          std::size_t col_stride)
 {
+    flush_pending_zero();
     for (std::size_t j = 0; j < cols_; ++j) {
         if (!cols_state_[j].reserved) {
             throw std::runtime_error(
@@ -1385,6 +1444,7 @@ std::vector<limb_t>
 CudaColumnBlockMatrix::entry_limbs(std::size_t i, std::size_t j) const
 {
     check_index(i, j);
+    flush_pending_zero();
     synchronize();
     std::size_t col = 0, slot = 0;
     locate(i, j, col, slot);
@@ -1403,6 +1463,7 @@ std::vector<limb_t>
 CudaColumnBlockMatrix::download_column(std::size_t j) const
 {
     if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    flush_pending_zero();
     synchronize();
     const Column &c = cols_state_[j];
     std::vector<limb_t> out(c.nlimbs * c.rows);

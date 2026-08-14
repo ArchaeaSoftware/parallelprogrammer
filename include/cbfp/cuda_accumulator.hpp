@@ -367,6 +367,11 @@ private:
     void grow_column(std::size_t j, std::size_t needed);
     void rescale_column(std::size_t j, int new_exponent);
     void ensure_slots(std::size_t words);
+    // Zeroes every limb array reserved since the last flush, in one launch.
+    // Const because it settles deferred work rather than changing what the
+    // accumulator holds -- the limbs read as zero either way, and readback
+    // paths are const and must be able to settle it.
+    void flush_pending_zero() const;
 
     std::size_t rows_;
     std::size_t cols_;
@@ -408,6 +413,17 @@ private:
     // the device has finished reading it. cudaMemcpyAsync from *pageable*
     // memory synchronizes the stream before it starts, so copying out of an
     // ordinary vector would drain the pipeline however asynchronous it looks.
+    // Limb arrays allocated but not yet zeroed. reserve_column issues one
+    // allocation per limb position, and zeroing each with its own
+    // cudaMemsetAsync costs far more than one kernel over all of them: at 512
+    // arrays, 827 us of memsets against 59 for a single launch. Deferred to
+    // the first launch or readback so a whole pre-sized accumulator is zeroed
+    // at once, which is where the count is largest.
+    mutable std::vector<limbs::limb_t *> zero_ptr_;
+    mutable std::vector<std::size_t> zero_rows_;
+    mutable void *zero_targets_ = nullptr;  // device ZeroTarget[]
+    mutable std::size_t zero_capacity_ = 0;
+
     void *desc_host_ = nullptr;  // pinned ColumnDesc[]
     CUevent_st *ev_desc_ = nullptr;
     bool desc_in_flight_ = false;

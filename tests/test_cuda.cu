@@ -1310,6 +1310,69 @@ test_device_ping_pong()
     for (int i = 0; i < 2; ++i) cudaFree(buf[i]);
 }
 
+// Zeroing a freshly reserved column is deferred to the first launch or
+// readback, so that a whole pre-sized accumulator is zeroed in one kernel
+// rather than one cudaMemsetAsync per limb position. A reader must not be able
+// to see that: the limbs read as zero whether or not anything has been added.
+void
+test_deferred_zeroing()
+{
+    const std::size_t rows = 300, cols = 5;
+
+    // Read back before anything is accumulated -- the readback path has to
+    // settle the pending zeroing itself.
+    {
+        cbfp::CudaColumnBlockMatrix g(rows, cols);
+        for (std::size_t j = 0; j < cols; ++j) g.reserve_column(j, 0, 256);
+        bool zero = true;
+        for (std::size_t j = 0; j < cols; ++j) {
+            const std::vector<std::uint64_t> col = g.download_column(j);
+            for (std::uint64_t w : col) zero = zero && (0 == w);
+            for (std::size_t i = 0; i < rows; i += 97) {
+                for (std::uint64_t w : g.entry_limbs(i, j)) {
+                    zero = zero && (0 == w);
+                }
+            }
+        }
+        check(zero, "a reserved column reads as zero before any accumulation");
+    }
+
+    // And a column reserved but never written stays zero while its neighbours
+    // are accumulated into, which is what would break if the flush zeroed only
+    // what the launch happens to touch.
+    {
+        std::vector<double> v(rows * cols, 0.0);
+        for (std::size_t j = 0; j < cols; ++j) {
+            for (std::size_t i = 0; i < rows; ++i) {
+                v[j * rows + i] = (j == 2) ? 0.0 : random_value(6);
+            }
+        }
+        cbfp::ColumnBlockMatrix cpu(rows, cols);
+        submit(cpu, v);
+        cbfp::CudaColumnBlockMatrix g(rows, cols);
+        g.reserve_like(cpu);
+        submit(g, v);
+        g.synchronize();
+
+        bool zero = true;
+        for (std::uint64_t w : g.download_column(2)) zero = zero && (0 == w);
+        check(zero, "an all-zero column stays zero through a launch");
+
+        std::size_t bad = 0;
+        for (std::size_t j = 0; j < cols; ++j) {
+            const std::vector<std::uint64_t> dev = g.download_column(j);
+            for (std::size_t i = 0; i < rows; ++i) {
+                const std::vector<std::uint64_t> h = cpu.entry_limbs(i, j);
+                for (std::size_t k = 0; k < h.size(); ++k) {
+                    if (h[k] != dev[k * rows + i]) ++bad;
+                }
+            }
+        }
+        check(bad == 0, "and the rest matches the host: " +
+                            std::to_string(bad) + " mismatches");
+    }
+}
+
 }  // namespace
 
 int
@@ -1334,6 +1397,7 @@ main()
     test_in_place_input();
     test_device_fold();
     test_device_ping_pong();
+    test_deferred_zeroing();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

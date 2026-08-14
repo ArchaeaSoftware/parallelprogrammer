@@ -1241,11 +1241,29 @@ at radix 52 came off it by being measured rather than by being done.
    whole difference between a pipeline and a queue. The header says so at the
    entry point.
 
-Smaller, known: `reserve_column` issues a `cudaMemsetAsync` per limb position,
-`cols * nlimbs` of them, one-time at reserve rather than per batch. And
-measured occupancy could relax the derived width bound where cancellation has
-kept a column small, which is worth under a limb in the ordinary case and is
-the lowest-value item here.
+~~`reserve_column` issues a `cudaMemsetAsync` per limb position.~~ **Done.**
+The zeroing is deferred and then done in one launch, which is 14x cheaper than
+the calls it replaces -- 512 arrays took 827 us of `cudaMemsetAsync` against 59
+us for a single kernel. Reserving a whole pre-sized accumulator is where the
+count is largest, so that is where it pays:
+
+| shape | limb arrays | before | after | |
+| --- | --- | --- | --- | --- |
+| 65536x64, 2 limbs | 128 | 935 us | 563 | 1.66x |
+| 65536x64, 6 limbs | 384 | 1575 | 567 | **2.78x** |
+| 4096x256 | 512 | 2083 | 1175 | 1.77x |
+| 16384x1024 | 2048 | 7435 | 3835 | 1.94x |
+
+Worth knowing what is left: the allocations, not the zeroing. At 512 arrays
+`cudaMallocAsync` costs 944 us against the zeroing's 59, so allocation is now
+the whole of it. One slab carved into slices would fix that and would give up
+the property the layout exists for -- widening appends without moving anything
+-- so it is not obviously worth having.
+
+Still known: measured occupancy could relax the derived width bound where
+cancellation has kept a column small, which is worth under a limb in the
+ordinary case and is the lowest-value item here. It is a candidate for deleting
+from this list rather than doing.
 
 ## Measurement caveats
 
