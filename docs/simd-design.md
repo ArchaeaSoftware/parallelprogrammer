@@ -1181,6 +1181,22 @@ at radix 52 came off it by being measured rather than by being done.
    33.6 MB, so it arrives long before the matrix does and the accumulator is
    sized before the first byte of bulk data lands.
 
+   Its `out` is a **device** pointer, and that is the interesting part of the
+   signature. Device memory keeps the survey where a caller feeding it to
+   something else on the device wants it, with no copy at all; a caller wanting
+   it on the host passes a mapped pinned pointer and thereby says so. Returning
+   it in host memory would have made that choice for everyone and hidden a copy
+   inside a function whose whole point is that 768 bytes need not travel the
+   same road as 33.6 MB.
+
+   Writing the caller's buffer directly also removed the internal
+   `DeviceSurvey`. It existed because `Survey`'s two bools are not
+   atomic-friendly -- but only the two extents need atomics, and they are ints
+   at offsets 0 and 4 with the struct's 12-byte size keeping every entry
+   4-aligned. The flags need none: every block that sets one sets it true, so
+   concurrent stores of the same value race benignly. The twin bought nothing
+   but a conversion at every boundary.
+
    Still missing, and known: neither side has a survey entry point that covers
    only a symmetric accumulator's *stored triangle*. A caller pre-sizing a
    triangular accumulator has to walk `column_rows(j)` values from

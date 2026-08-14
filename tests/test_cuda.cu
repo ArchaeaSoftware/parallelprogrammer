@@ -1396,7 +1396,15 @@ test_device_survey()
 
     std::vector<cbfp::Survey> host(cols), device(cols);
     cbfp::survey_matrix_col_major(src.data(), rows, cols, host.data());
-    cbfp::survey_matrix_col_major_device(dev, rows, cols, device.data());
+
+    // The device writes `out`, so it goes to device memory and comes back by
+    // an explicit copy the caller chose to make.
+    cbfp::Survey *d_out = nullptr;
+    cudaMalloc(&d_out, cols * sizeof(cbfp::Survey));
+    cbfp::survey_matrix_col_major_device(dev, rows, cols, d_out);
+    cudaMemcpy(device.data(), d_out, cols * sizeof(cbfp::Survey),
+               cudaMemcpyDeviceToHost);
+    cudaFree(d_out);
 
     std::size_t bad = 0;
     for (std::size_t j = 0; j < cols; ++j) {
@@ -1411,6 +1419,19 @@ test_device_survey()
                         std::to_string(bad) + " of " + std::to_string(cols) +
                         " columns differ");
     check(!host[1].any && !device[1].any, "and both report the empty column");
+
+    // Ordinary pageable output is refused rather than faulting in the kernel.
+    {
+        std::vector<cbfp::Survey> pageable(cols);
+        bool threw = false;
+        try {
+            cbfp::survey_matrix_col_major_device(dev, rows, cols,
+                                                 pageable.data());
+        } catch (const std::invalid_argument &) {
+            threw = true;
+        }
+        check(threw, "a pageable output pointer is rejected");
+    }
 
     // A survey taken on the device must size an accumulator the same way one
     // taken on the host does -- which is the whole point of sending it ahead.
@@ -1435,10 +1456,16 @@ test_device_survey()
         cudaMalloc(&d2, rows * 2 * sizeof(double));
         cudaMemcpy(d2, bad_in.data(), rows * 2 * sizeof(double),
                    cudaMemcpyHostToDevice);
-        std::vector<cbfp::Survey> s(2);
-        cbfp::survey_matrix_col_major_device(d2, rows, 2, s.data());
-        check(!s[0].nonfinite && s[1].nonfinite,
+        // Mapped pinned output: the other kind of memory the device can
+        // write, and how a caller asks for the answer on the host.
+        cbfp::Survey *mapped = nullptr;
+        cudaHostAlloc(&mapped, 2 * sizeof(cbfp::Survey), cudaHostAllocMapped);
+        cbfp::survey_matrix_col_major_device(d2, rows, 2, mapped);
+        check(!mapped[0].nonfinite && mapped[1].nonfinite,
               "the device survey flags a non-finite column and only that one");
+        check(mapped[0].any && 0 == mapped[1].min_exponent,
+              "and a mapped pinned output is readable on return");
+        cudaFreeHost(mapped);
         cudaFree(d2);
     }
     cudaFree(dev);

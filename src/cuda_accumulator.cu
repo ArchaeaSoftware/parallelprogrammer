@@ -95,20 +95,41 @@ launch_grid(std::size_t rows, std::size_t cols)
     return dim3(gx, static_cast<unsigned>(cols));
 }
 
-// What the first pass learns about a column, mirroring kernels::Survey. Reduced
-// across the whole column with atomics, so every field is an atomic-friendly
-// type rather than the host struct's bools.
+// The survey kernel reduces straight into the public Survey. Its two extents
+// are ints at offsets 0 and 4, and the struct's 12-byte size keeps every entry
+// 4-aligned, so both take atomics directly. The bools need none: every writer
+// writes true, so the race is benign and a plain store is correct.
 //
-// The exponents are int, the same width the host Survey uses, so the two agree
-// field for field and nothing narrows at the boundary. A double's exponent
-// lives in [-1074, 1024], so 32 bits is six orders of magnitude more than
-// enough -- and it buys 32-bit atomics and halves this kernel's shared memory.
-struct DeviceSurvey {
-    int min_exponent;
-    int max_top;
-    int any;
-    int nonfinite;
-};
+// There is deliberately no device-side twin of this struct. One existed, with
+// int in place of the bools, and it bought nothing but a conversion at every
+// boundary.
+
+// Sentinels for the reduction, and the tidy-up afterwards. Both are one thread
+// a column and cost a launch each; they exist so a caller never sees a
+// sentinel and cannot tell which side computed the survey.
+__global__ void
+survey_init_kernel(Survey *__restrict__ out, unsigned ncols)
+{
+    const unsigned j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= ncols) return;
+    out[j].min_exponent = INT_MAX;
+    out[j].max_top = INT_MIN;
+    out[j].any = false;
+    out[j].nonfinite = false;
+}
+
+__global__ void
+survey_finish_kernel(Survey *__restrict__ out, unsigned ncols)
+{
+    const unsigned j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= ncols) return;
+    // An empty or non-finite column reports zero extents, as the host survey
+    // does -- the sentinels above are not a value any caller should see.
+    if (!out[j].any || out[j].nonfinite) {
+        out[j].min_exponent = 0;
+        out[j].max_top = 0;
+    }
+}
 
 // A column's stored length and where it starts. Fixed at construction, so
 // unlike ColumnDesc this never goes stale and both kernels can read it
@@ -179,7 +200,7 @@ split_device(double v, unsigned long long &mantissa, int &exponent, int &top,
 __global__ void
 survey_kernel(const double *__restrict__ values,
               const ColumnShape *__restrict__ shapes,
-              std::size_t col_stride, DeviceSurvey *__restrict__ out)
+              std::size_t col_stride, Survey *__restrict__ out)
 {
     __shared__ int s_min[kBlock];
     __shared__ int s_max[kBlock];
@@ -229,14 +250,16 @@ survey_kernel(const double *__restrict__ values,
         __syncthreads();
     }
 
-    // One atomic per block rather than one per thread.
+    // One atomic per block rather than one per thread. The extents need them;
+    // the flags do not, because every block that writes one writes true, so
+    // concurrent stores of the same value race benignly.
     if (0 == tid) {
         if (s_any[0]) {
             atomicMin(&out[j].min_exponent, s_min[0]);
             atomicMax(&out[j].max_top, s_max[0]);
-            atomicOr(&out[j].any, 1);
+            out[j].any = true;
         }
-        if (s_bad[0]) atomicOr(&out[j].nonfinite, 1);
+        if (s_bad[0]) out[j].nonfinite = true;
     }
 }
 
@@ -549,42 +572,43 @@ survey_matrix_col_major_device(const double *b, std::size_t rows,
     if (0 == rows || 0 == cols) return;
     const std::size_t stride = col_stride ? col_stride : rows;
 
-    // Every column is the full height here: this surveys a matrix, not an
+    // `out` is written by the kernel, so it has to be somewhere the device can
+    // write. Device memory, or host memory that is page-locked and mapped --
+    // which is how a caller asks for the answer on the host without this
+    // function copying it there and guessing that is what they wanted.
+    cudaPointerAttributes attr{};
+    const cudaError_t st = cudaPointerGetAttributes(&attr, out);
+    if (cudaSuccess != st || nullptr == attr.devicePointer) {
+        cudaGetLastError();  // an unregistered pointer leaves this sticky
+        throw std::invalid_argument(
+            "cbfp: survey_matrix_col_major_device writes `out` from the "
+            "device, so it must be device memory or page-locked mapped host "
+            "memory -- cudaMalloc, cudaHostAlloc with cudaHostAllocMapped, or "
+            "cudaHostRegister with cudaHostRegisterMapped");
+    }
+    Survey *dst = static_cast<Survey *>(attr.devicePointer);
+
+    // Every column is the full height: this surveys a matrix, not an
     // accumulator's stored triangle, so there is no per-column shape to carry.
     std::vector<ColumnShape> host_shapes(cols);
     for (auto &sh : host_shapes) {
         sh.rows = static_cast<unsigned>(rows);
         sh.first_row = 0;
     }
-    std::vector<DeviceSurvey> host_out(cols,
-                                       DeviceSurvey{INT_MAX, INT_MIN, 0, 0});
-
     ColumnShape *shapes = nullptr;
-    DeviceSurvey *res = nullptr;
     cuda(Malloc(&shapes, cols * sizeof(ColumnShape)));
-    cuda(Malloc(&res, cols * sizeof(DeviceSurvey)));
     cuda(Memcpy(shapes, host_shapes.data(), cols * sizeof(ColumnShape),
                 cudaMemcpyHostToDevice));
-    cuda(Memcpy(res, host_out.data(), cols * sizeof(DeviceSurvey),
-                cudaMemcpyHostToDevice));
 
-    survey_kernel<<<launch_grid(rows, cols), kBlock>>>(b, shapes, stride, res);
-    cuda(Memcpy(host_out.data(), res, cols * sizeof(DeviceSurvey),
-                cudaMemcpyDeviceToHost));
+    const unsigned n = static_cast<unsigned>(cols);
+    const unsigned init_blocks = (n + kBlock - 1) / kBlock;
+    survey_init_kernel<<<init_blocks, kBlock>>>(dst, n);
+    survey_kernel<<<launch_grid(rows, cols), kBlock>>>(b, shapes, stride, dst);
+    survey_finish_kernel<<<init_blocks, kBlock>>>(dst, n);
+    // Blocking, so the result is readable on return whichever kind of memory
+    // `out` is. The temporary below cannot be freed before that anyway.
+    cuda(DeviceSynchronize());
     cudaFree(shapes);
-    cudaFree(res);
-
-    for (std::size_t j = 0; j < cols; ++j) {
-        const DeviceSurvey &d = host_out[j];
-        out[j].any = 0 != d.any;
-        out[j].nonfinite = 0 != d.nonfinite;
-        // An empty or non-finite column reports zeros for the extents, which
-        // is what the host survey does; the sentinels the reduction started
-        // from are not a value any caller should see.
-        const bool have = out[j].any && !out[j].nonfinite;
-        out[j].min_exponent = have ? d.min_exponent : 0;
-        out[j].max_top = have ? d.max_top : 0;
-    }
 }
 
 bool
@@ -635,7 +659,7 @@ CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t rows, std::size_t cols)
         cuda(HostAlloc(&desc_host_, cols_ * sizeof(ColumnDesc),
                        cudaHostAllocDefault));
         cuda(EventCreateWithFlags(&ev_desc_, cudaEventDisableTiming));
-        cuda(Malloc(&survey_out_, cols_ * sizeof(DeviceSurvey)));
+        cuda(Malloc(&survey_out_, cols_ * sizeof(Survey)));
     }
     init_columns();
 }
@@ -1006,14 +1030,14 @@ CudaColumnBlockMatrix::reserve_for_device(const double *b, std::size_t count,
     if (0 == cols_ || 0 == rows_) return;
     const std::size_t stride = col_stride ? col_stride : rows_;
 
-    std::vector<DeviceSurvey> surveys(cols_);
-    for (auto &s : surveys) s = DeviceSurvey{INT_MAX, INT_MIN, 0, 0};
-    cuda(MemcpyAsync(survey_out_, surveys.data(), cols_ * sizeof(DeviceSurvey),
+    std::vector<Survey> surveys(cols_);
+    for (auto &d : surveys) d = Survey{INT_MAX, INT_MIN, false, false};
+    cuda(MemcpyAsync(survey_out_, surveys.data(), cols_ * sizeof(Survey),
                      cudaMemcpyHostToDevice, st_compute_));
     survey_kernel<<<launch_grid(rows_, cols_), kBlock, 0, st_compute_>>>(
         b, static_cast<const ColumnShape *>(shapes_), stride,
-        static_cast<DeviceSurvey *>(survey_out_));
-    cuda(MemcpyAsync(surveys.data(), survey_out_, cols_ * sizeof(DeviceSurvey),
+        static_cast<Survey *>(survey_out_));
+    cuda(MemcpyAsync(surveys.data(), survey_out_, cols_ * sizeof(Survey),
                      cudaMemcpyDeviceToHost, st_compute_));
     synchronize();
 
@@ -1293,16 +1317,16 @@ CudaColumnBlockMatrix::survey_device_inputs(const double *const *b,
                                             std::size_t col_stride)
 {
     const dim3 grid = launch_grid(rows_, cols_);
-    std::vector<DeviceSurvey> surveys(cols_);
-    for (auto &d : surveys) d = DeviceSurvey{INT_MAX, INT_MIN, 0, 0};
-    cuda(MemcpyAsync(survey_out_, surveys.data(), cols_ * sizeof(DeviceSurvey),
+    std::vector<Survey> surveys(cols_);
+    for (auto &d : surveys) d = Survey{INT_MAX, INT_MIN, false, false};
+    cuda(MemcpyAsync(survey_out_, surveys.data(), cols_ * sizeof(Survey),
                      cudaMemcpyHostToDevice, st_compute_));
     for (std::size_t k = 0; k < count; ++k) {
         survey_kernel<<<grid, kBlock, 0, st_compute_>>>(
             b[k], static_cast<const ColumnShape *>(shapes_), col_stride,
-            static_cast<DeviceSurvey *>(survey_out_));
+            static_cast<Survey *>(survey_out_));
     }
-    cuda(MemcpyAsync(surveys.data(), survey_out_, cols_ * sizeof(DeviceSurvey),
+    cuda(MemcpyAsync(surveys.data(), survey_out_, cols_ * sizeof(Survey),
                      cudaMemcpyDeviceToHost, st_compute_));
     synchronize();
 
@@ -1430,18 +1454,18 @@ CudaColumnBlockMatrix::accumulate_device(const double *b,
     // First pass: learn each column's exponent range, and reject anything the
     // reservation cannot hold. The decisions the CPU makes by rescaling and
     // widening are errors here, because neither is possible mid-launch.
-    std::vector<DeviceSurvey> surveys(cols_);
-    for (auto &s : surveys) s = DeviceSurvey{INT_MAX, INT_MIN, 0, 0};
-    cuda(MemcpyAsync(survey_out_, surveys.data(), cols_ * sizeof(DeviceSurvey),
+    std::vector<Survey> surveys(cols_);
+    for (auto &d : surveys) d = Survey{INT_MAX, INT_MIN, false, false};
+    cuda(MemcpyAsync(survey_out_, surveys.data(), cols_ * sizeof(Survey),
                      cudaMemcpyHostToDevice, st_compute_));
 
     survey_kernel<<<grid, kBlock, 0, st_compute_>>>(
         b, static_cast<const ColumnShape *>(shapes_), col_stride,
-        static_cast<DeviceSurvey *>(survey_out_));
+        static_cast<Survey *>(survey_out_));
     // This is the drain the host path avoids: with the input already on the
     // device there is nothing to survey on the host, so the verdict has to come
     // back before the accumulate can be allowed to run.
-    cuda(MemcpyAsync(surveys.data(), survey_out_, cols_ * sizeof(DeviceSurvey),
+    cuda(MemcpyAsync(surveys.data(), survey_out_, cols_ * sizeof(Survey),
                      cudaMemcpyDeviceToHost, st_compute_));
     synchronize();
 

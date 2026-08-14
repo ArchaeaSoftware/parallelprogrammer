@@ -92,9 +92,15 @@ private:
 // accumulating while the matrix itself is still in flight: 768 bytes against
 // 33.6 MB at 65536x64.
 //
-// Blocking, and allocates its own temporaries, so it is a setup call rather
-// than something to put in a loop. A producer surveying every matrix it emits
-// should expect one launch and one round trip per call.
+// **`out` is written by the device**, so it must be device memory or host
+// memory that is page-locked and mapped -- cudaMalloc, or cudaHostAlloc /
+// cudaHostRegister with the mapped flag. That is checked. A caller wanting the
+// answer on the host passes a mapped pinned pointer and says so, rather than
+// this function copying it there and assuming that is what was wanted; a
+// caller feeding it to something else on the device pays for no copy at all.
+//
+// Blocking, so the result is readable on return whichever kind of memory `out`
+// is. A setup call rather than something to put in a loop.
 void
 survey_matrix_col_major_device(const double *b, std::size_t rows,
                                std::size_t cols, Survey *out,
