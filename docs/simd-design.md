@@ -874,13 +874,25 @@ Slightly *over* 2x single-threaded on the CPU rather than exactly 2x: at
 n = 2048 full storage is 34.8 MB against 32 MiB of L3 while the triangle is
 18.1 MB, so halving the footprint also buys back cache residency.
 
-The GPU's 1.4-1.5x is short of the CPU's 2x, and it is **not** load imbalance
--- that hypothesis was recorded here as a candidate and is now measured and
-wrong. See the per-block fixed cost in the remaining-work list: a uniform
-`n/2 x n` matrix, with no triangle and no imbalance at all, costs the same per
-stored element as the triangle does. Nothing about the triangular shape is
-responsible; the triangle simply keeps one block per column while halving the
-elements, so it pays the whole per-block constant for half the work.
+The GPU's 1.4-1.5x above is short of the CPU's 2x, and **the kernel is not
+where it goes**. Timed on the device path with the accumulator pre-sized, so
+that nothing but the kernel is in the measurement, n = 2048:
+
+| shape | stored | ns/stored |
+| --- | --- | --- |
+| full | 4194304 | 0.1230 |
+| uniform `n/2 x n` | 2097152 | 0.1272 |
+| Upper | 2098176 | 0.1273 |
+| Lower | 2098176 | 0.1271 |
+
+Every shape costs the same per stored element, within 3.5%. The triangle is
+already getting ~1.94x out of the kernel; the shortfall in the 1.4-1.5x figure
+is host-side work in `add_matrix_col_major`, which stages and surveys before it
+launches, and not the device at all.
+
+Two wrong explanations were recorded here before that was measured -- grid load
+imbalance, then a ~470 ns per-block fixed cost -- and both are corrected in the
+caveats below.
 
 ## Readback: the rounded double and its residual
 
@@ -1035,28 +1047,18 @@ out of the library have all landed since the last revision of this list, along
 with symmetric storage and readback residuals, which were not on it. Carry-save
 at radix 52 came off it by being measured rather than by being done.
 
-1. **Cut the per-block fixed cost, or stop paying it per column.** Measured at
-   ~470 ns a block against ~0.72 ns an element, so it is 91% of the work at 64
-   rows a column and still 14% at 4096:
+1. **The host side of `add_matrix_col_major`**, which is where the triangle's
+   missing 2x actually is. The kernel gets ~1.94x on a triangle; the host path
+   gets 1.4-1.5x, and the difference is the staging copy and the host survey
+   that run before the launch. Pre-sizing already removes the survey -- what is
+   left to look at is the staging copy and the per-batch host loop.
 
-   | rows (1024 columns, so 1024 blocks either way) | ns/element | ns/block |
-   | --- | --- | --- |
-   | 64 | 8.058 | 516 |
-   | 256 | 2.289 | 586 |
-   | 1024 | 0.917 | 939 |
-   | 4096 | 0.835 | 3418 |
-
-   Two directions, and they compose: make the epilogue cheaper -- the occupancy
-   and flag reductions are an 8-step shared-memory tree, then a
-   `__threadfence` and a single-address `atomicAdd` that every block pays so
-   one block can be elected -- or launch fewer, fatter blocks. The grid is
-   `(1, cols)` once `cols >= 1024`, so a 4096-column matrix launches 4096
-   blocks and the "cap the whole grid" rule above is quietly not in force
-   there. Capping it for real means a block spanning several columns, which
-   the per-column reductions would have to follow.
-
-   This is what the triangle's missing 2x turned out to be, and it is not a
-   triangle problem: any workload with short columns pays it.
+   The per-block fixed cost, by contrast, is not worth chasing: measured at
+   ~12.7 ns a block against ~0.12 ns an element, which is 2.5% of a block at
+   4096 rows a column. It is 62% at 64 rows, but the whole launch there is
+   20.8 us. Attributing it further: of that ~12 ns, the shared-memory
+   reduction tree is ~6.3, the `__threadfence` and ticket ~2.8, the elected
+   block's copy ~2.0, and the per-column atomics ~0.9.
 
 2. **Multi-batch folding on the device.** Previously ruled out on the grounds
    that every input matrix has to be vetted separately; pre-sizing removed that
@@ -1128,6 +1130,25 @@ being caught. Both are worth remembering when re-measuring.
   neither reallocated, and separating the levers gives 1.81x for folding alone
   against 1.01x for pre-sizing alone. When two changes ship together, measure
   the 2x2 before crediting either.
+
+- The triangle's shortfall on the GPU got two wrong explanations before it got
+  a right one, and the second was worse than the first because it came with a
+  number. First: grid load imbalance, one column per y index. Refuted by a
+  uniform `n/2 x n` matrix -- no triangle, no imbalance -- costing the same per
+  stored element. Second: a ~470 ns fixed cost per block, obtained by sweeping
+  rows at a fixed column count and reading off the intercept. That sweep timed
+  `add_matrix_col_major`, which stages a host copy and runs a full host-side
+  survey before it launches anything, so what was divided by the block count
+  was mostly host work that has no block in it at all. Re-run on the device
+  path with the accumulator pre-sized, the intercept is **12.7 ns**, and an
+  independent mimic of just the epilogue agrees at ~12. Then the real answer
+  fell out: every shape costs the same per stored element, so the kernel was
+  never the problem and the loss is host-side.
+
+  The lesson is narrow and worth stating plainly: an intercept is only a fixed
+  *per-block* cost if the only thing that varies with the sweep is per-block
+  work. Timing an API call instead of a kernel puts host work in the intercept,
+  where it looks exactly like a device constant.
 
 The synthetic carry walk used throughout has none of the real work: no
 decompose, no per-lane variable shifts, no masked selects. Treat anything still
