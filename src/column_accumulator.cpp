@@ -526,6 +526,117 @@ ColumnBlockMatrix::accumulate_columns(const double *b, std::size_t column_step,
 }
 
 void
+ColumnBlockMatrix::add_matrices_col_major(const double *const *b,
+                                          std::size_t count,
+                                          std::size_t col_stride)
+{
+    if (0 == count) return;
+    if (0 == rows_ || 0 == cols_) return;
+    if (presized_) {
+        submitted_matrices_ += count;
+        if (submitted_matrices_ > declared_matrices_) {
+            throw std::runtime_error(
+                "cbfp: more matrices accumulated than were described to the "
+                "constructor; the width bound holds for that many and no more");
+        }
+    }
+    const std::size_t stride = col_stride ? col_stride : rows_;
+
+    const unsigned n = threads();
+    if (1 == n || cols_ < 2) {
+        fold_column_range(b, count, stride, 0, cols_);
+        return;
+    }
+    pool_->run([&](unsigned slot) {
+        std::size_t begin = 0, end = 0;
+        partition_columns(slot, begin, end);
+        fold_column_range(b, count, stride, begin, end);
+    });
+}
+
+void
+ColumnBlockMatrix::fold_column_range(const double *const *b, std::size_t count,
+                                     std::size_t col_stride, std::size_t begin,
+                                     std::size_t end)
+{
+    // One pointer per matrix, rebuilt per column. Small and on the stack of
+    // whichever worker is running, so the columns share nothing.
+    std::vector<const double *> columns(count);
+    for (std::size_t j = begin; j < end; ++j) {
+        const Column &c = cols_state_[j];
+        for (std::size_t k = 0; k < count; ++k) {
+            columns[k] = b[k] + j * col_stride + c.first_row;
+        }
+        fold_column(j, columns.data(), count);
+    }
+}
+
+void
+ColumnBlockMatrix::fold_column(std::size_t j, const double *const *columns,
+                               std::size_t count)
+{
+    Column &c = cols_state_[j];
+
+    // The exponent and width have to be settled before the fold starts: a
+    // rescale partway through would have to re-shift limbs that earlier
+    // matrices in this same fold had already been added to. Pre-sizing settles
+    // them in the constructor; without it, surveying all `count` columns first
+    // and fitting once settles them here, which is the same guarantee arrived
+    // at later.
+    if (!presized_) {
+        bool any = false;
+        long long low = 0, high = 0;
+        for (std::size_t k = 0; k < count; ++k) {
+            const kernels::Survey sv = kernels::survey()(
+                columns[k], c.rows, std::numeric_limits<long long>::max());
+            if (sv.nonfinite) {
+                throw std::domain_error(
+                    "cbfp: cannot accumulate a non-finite value");
+            }
+            if (!sv.any) continue;
+            if (!any) {
+                low = sv.min_exponent;
+                high = sv.max_top;
+                any = true;
+            } else {
+                low = std::min<long long>(low, sv.min_exponent);
+                high = std::max<long long>(high, sv.max_top);
+            }
+        }
+        if (!any) return;
+
+        if (!c.initialized) {
+            c.exponent = static_cast<int>(low);
+            c.initialized = true;
+        }
+        if (low < c.exponent) rescale(c, static_cast<int>(low));
+        c.max_addend_bits = std::max(
+            c.max_addend_bits, static_cast<std::size_t>(high - c.exponent));
+        c.add_count += count;
+        fit_column(c);
+    }
+
+    unsigned flags = 0;
+    if (c.limbs.size() <= kernels::kMaxFoldLimbs) {
+        kernels::accumulate_fold()(c.bases.data(), c.limbs.size(), columns,
+                                   count, c.rows,
+                                   static_cast<std::int32_t>(c.exponent),
+                                   &flags);
+    } else {
+        // Too wide to hold a row in registers. One batch at a time is not a
+        // fallback so much as the better shape here, since that kernel stops
+        // at the first dead carry instead of writing every limb back.
+        for (std::size_t k = 0; k < count; ++k) {
+            kernels::accumulate()(c.bases.data(), c.limbs.size(), columns[k],
+                                  c.rows,
+                                  static_cast<std::int32_t>(c.exponent), 0,
+                                  &flags);
+        }
+    }
+    if (0 != flags) report_contradiction(j, flags);
+}
+
+void
 ColumnBlockMatrix::add_column(std::size_t j, const double *v)
 {
     add_column_scaled_pow2(j, v, 0);

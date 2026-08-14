@@ -107,6 +107,71 @@ survey_column_scalar(const double *values, std::size_t rows,
     return out;
 }
 
+// One row's limbs are loaded once, every batch's addend applied to them in
+// registers, and the result written once. The inner loop is the same carry
+// chain accumulate_one runs, with `v` standing in for the limb arrays.
+void
+accumulate_fold_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
+                       const double *const *columns, std::size_t count,
+                       std::size_t rows, std::int32_t column_exponent,
+                       unsigned *flags)
+{
+    unsigned bad = 0;
+    std::uint64_t v[kMaxFoldLimbs];
+
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t k = 0; k < nlimbs; ++k) v[k] = limbs[k][i];
+
+        for (std::size_t b = 0; b < count; ++b) {
+            const Split s = split(columns[b][i]);
+            if (s.nonfinite) bad |= kBadNonFinite;
+            if (0 == s.mantissa) continue;
+            const long long shift =
+                s.exponent - static_cast<long long>(column_exponent);
+            if (shift < 0) {
+                bad |= kBadExponent;
+                continue;
+            }
+            const std::size_t off = static_cast<std::size_t>(shift) / 64;
+            if (off >= nlimbs) {
+                bad |= kBadWidth;
+                continue;
+            }
+            const unsigned bit = static_cast<unsigned>(shift) % 64;
+            const std::uint64_t lo =
+                0 == bit ? s.mantissa : s.mantissa << bit;
+            const std::uint64_t hi =
+                0 == bit ? 0 : s.mantissa >> (64 - bit);
+
+            std::uint64_t carry = 0;
+            for (std::size_t p = off; p < nlimbs; ++p) {
+                const std::uint64_t a =
+                    (p == off) ? lo : ((p == off + 1) ? hi : 0);
+                const std::uint64_t x = v[p];
+                if (s.negative) {
+                    const std::uint64_t d = x - a;
+                    const std::uint64_t b1 = (x < a) ? 1u : 0u;
+                    const std::uint64_t d2 = d - carry;
+                    const std::uint64_t b2 = (d < carry) ? 1u : 0u;
+                    v[p] = d2;
+                    carry = b1 | b2;
+                } else {
+                    const std::uint64_t t = x + a;
+                    const std::uint64_t c1 = (t < x) ? 1u : 0u;
+                    const std::uint64_t t2 = t + carry;
+                    const std::uint64_t c2 = (t2 < t) ? 1u : 0u;
+                    v[p] = t2;
+                    carry = c1 | c2;
+                }
+                if (0 == carry && p >= off + 1) break;
+            }
+        }
+
+        for (std::size_t k = 0; k < nlimbs; ++k) limbs[k][i] = v[k];
+    }
+    *flags |= bad;
+}
+
 void
 accumulate_one(std::uint64_t *const *limbs, std::size_t nlimbs, std::size_t row,
                std::uint64_t mantissa, std::size_t shift, bool negative)

@@ -43,6 +43,23 @@ accumulate()
     return fn;
 }
 
+// The vector fold is what makes folding pay at all. Scalar, the fold moved
+// less memory but gave up eight lanes to do it, and lost everywhere -- 0.19
+// against 0.57 Gelem/s single-threaded, a flat 3x deficit at every shape. The
+// traffic argument was sound; it just could not cover the cost of leaving
+// AVX-512 behind.
+AccumulateFoldFn
+accumulate_fold()
+{
+#if defined(CBFP_HAVE_AVX512)
+    static const AccumulateFoldFn fn =
+        use_avx512() ? accumulate_fold_avx512 : accumulate_fold_scalar;
+#else
+    static const AccumulateFoldFn fn = accumulate_fold_scalar;
+#endif
+    return fn;
+}
+
 SurveyFn
 survey()
 {

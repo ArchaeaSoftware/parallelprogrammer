@@ -1482,6 +1482,180 @@ test_symmetric_keeps_exactness()
     }
 }
 
+// Folding several matrices into one pass changes only the traffic. Exact
+// accumulation does not care about order or grouping, so the answer has to be
+// identical to adding them one at a time.
+static void
+test_fold_matches_sequential()
+{
+    const std::size_t rows = 137, cols = 7;
+    std::mt19937_64 rng(60613);
+
+    // Three spreads: narrow enough for one limb, wide enough for several, and
+    // wide enough to exceed the fold's register budget and fall back.
+    for (int spread : {6, 90, 900}) {
+        const int nbatches = 5;
+        std::vector<std::vector<double>> batches(
+            nbatches, std::vector<double>(rows * cols));
+        for (auto &b : batches) {
+            for (auto &x : b) {
+                const std::uint64_t m = (rng() | (std::uint64_t{1} << 52)) &
+                                        ((std::uint64_t{1} << 53) - 1);
+                x = std::ldexp(static_cast<double>(m),
+                               static_cast<int>(rng() % (spread + 1)) -
+                                   spread / 2);
+                if (rng() & 1) x = -x;
+            }
+        }
+        std::vector<const double *> ptrs;
+        for (auto &b : batches) ptrs.push_back(b.data());
+
+        cbfp::ColumnBlockMatrix seq(rows, cols);
+        for (auto &b : batches) seq.add_matrix_col_major(b.data());
+
+        cbfp::ColumnBlockMatrix fold(rows, cols);
+        fold.add_matrices_col_major(ptrs.data(), ptrs.size());
+
+        // Exact decimal rather than limbs: an adaptive container that rescaled
+        // partway through can end up allocated wider than one told the extents
+        // up front, which changes the limbs without changing the value.
+        std::size_t bad = 0;
+        for (std::size_t j = 0; j < cols; ++j) {
+            for (std::size_t i = 0; i < rows; ++i) {
+                if (seq.to_exact_decimal(i, j) != fold.to_exact_decimal(i, j)) {
+                    ++bad;
+                }
+            }
+        }
+        CHECK(0 == bad);
+        // The widest spread must actually have exercised the fallback.
+        if (900 == spread) CHECK(fold.column_limbs(0) > 8);
+        if (6 == spread) CHECK(fold.column_limbs(0) <= 8);
+    }
+
+    // Pre-sized on both sides, where the reservation is identical, so the
+    // stored limbs must match bit for bit and not merely the value.
+    {
+        const int nbatches = 6;
+        std::vector<std::vector<double>> batches(
+            nbatches, std::vector<double>(rows * cols));
+        for (auto &b : batches) {
+            for (auto &x : b) {
+                const std::uint64_t m = (rng() | (std::uint64_t{1} << 52)) &
+                                        ((std::uint64_t{1} << 53) - 1);
+                x = std::ldexp(static_cast<double>(m),
+                               static_cast<int>(rng() % 21) - 10);
+                if (rng() & 1) x = -x;
+            }
+        }
+        std::vector<const double *> ptrs;
+        for (auto &b : batches) ptrs.push_back(b.data());
+
+        std::vector<std::vector<cbfp::Survey>> surveys;
+        for (auto &b : batches) {
+            std::vector<cbfp::Survey> s(cols);
+            for (std::size_t j = 0; j < cols; ++j) {
+                s[j] = cbfp::survey_column(b.data() + j * rows, rows);
+            }
+            surveys.push_back(s);
+        }
+
+        cbfp::ColumnBlockMatrix seq(rows, cols, surveys);
+        for (auto &b : batches) seq.add_matrix_col_major(b.data());
+
+        cbfp::ColumnBlockMatrix fold(rows, cols, surveys);
+        fold.add_matrices_col_major(ptrs.data(), ptrs.size());
+
+        std::size_t bad = 0;
+        for (std::size_t j = 0; j < cols; ++j) {
+            if (seq.column_exponent(j) != fold.column_exponent(j) ||
+                seq.column_limbs(j) != fold.column_limbs(j)) {
+                ++bad;
+                continue;
+            }
+            for (std::size_t i = 0; i < rows; ++i) {
+                if (seq.entry_limbs(i, j) != fold.entry_limbs(i, j)) ++bad;
+            }
+        }
+        CHECK(0 == bad);
+
+        // And the declared count is spent by the fold, not by the call.
+        std::vector<const double *> one{ptrs[0]};
+        bool threw = false;
+        try {
+            fold.add_matrices_col_major(one.data(), 1);
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+
+    // Threaded, symmetric, and a degenerate count of one.
+    {
+        const std::size_t n = 64;
+        std::vector<std::vector<double>> batches(3, std::vector<double>(n * n));
+        for (auto &b : batches) {
+            for (std::size_t i = 0; i < n; ++i) {
+                for (std::size_t j = 0; j <= i; ++j) {
+                    const std::uint64_t m = (rng() | (std::uint64_t{1} << 52)) &
+                                            ((std::uint64_t{1} << 53) - 1);
+                    double v = std::ldexp(static_cast<double>(m),
+                                          static_cast<int>(rng() % 13) - 6);
+                    if (rng() & 1) v = -v;
+                    b[j * n + i] = b[i * n + j] = v;
+                }
+            }
+        }
+        std::vector<const double *> ptrs;
+        for (auto &b : batches) ptrs.push_back(b.data());
+
+        cbfp::ColumnBlockMatrix seq(n, cbfp::Uplo::Lower);
+        for (auto &b : batches) seq.add_matrix_col_major(b.data());
+
+        cbfp::ColumnBlockMatrix fold(n, cbfp::Uplo::Lower);
+        fold.set_threads(4);
+        fold.add_matrices_col_major(ptrs.data(), ptrs.size());
+
+        std::size_t bad = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t j = 0; j < n; ++j) {
+                if (seq.to_exact_decimal(i, j) != fold.to_exact_decimal(i, j)) {
+                    ++bad;
+                }
+            }
+        }
+        CHECK(0 == bad);
+
+        cbfp::ColumnBlockMatrix one(n, cbfp::Uplo::Lower);
+        one.add_matrices_col_major(ptrs.data(), 1);
+        cbfp::ColumnBlockMatrix plain(n, cbfp::Uplo::Lower);
+        plain.add_matrix_col_major(batches[0].data());
+        bad = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t j = 0; j < n; ++j) {
+                if (one.entry_limbs(i, j) != plain.entry_limbs(i, j)) ++bad;
+            }
+        }
+        CHECK(0 == bad);
+    }
+
+    // A fold that contradicts its metadata still reports.
+    {
+        std::vector<double> v(64, 0.5);  // exponent -1
+        const double *p[1] = {v.data()};
+        std::vector<std::vector<cbfp::Survey>> lie{
+            {cbfp::Survey{0, 8, true, false}}};
+        cbfp::ColumnBlockMatrix m(64, 1, lie);
+        bool threw = false;
+        try {
+            m.add_matrices_col_major(p, 1);
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+}
+
 // The public survey is what a producer computes so an accumulator need not.
 // It has to agree with what the accumulator would have worked out itself,
 // or preallocating from it is worse than useless.
@@ -1694,6 +1868,7 @@ main()
     test_symmetric_matches_full_storage();
     test_symmetric_entry_points_agree();
     test_symmetric_keeps_exactness();
+    test_fold_matches_sequential();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

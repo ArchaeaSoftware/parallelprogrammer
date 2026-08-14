@@ -47,6 +47,27 @@ inline constexpr unsigned kBadNonFinite = 1;
 inline constexpr unsigned kBadExponent = 2;
 inline constexpr unsigned kBadWidth = 4;
 
+// Folds `count` contiguous columns, one per matrix, into a single pass over
+// the accumulator. Same arithmetic as AccumulateFn applied `count` times; what
+// differs is the traffic. One batch at a time reads and writes every limb it
+// touches once per batch, so K batches pay 8 bytes of input and 16*nlimbs of
+// accumulator per element. Folded, the limbs are read once, all K addends
+// applied to them in registers, and written once: 8*K + 16*nlimbs for the same
+// work. At two limbs and K=8 that is 96 bytes an element against 320.
+//
+// The saving is in accumulator traffic, so it only shows where that traffic is
+// the bound -- past L3, where the CPU is waiting on DRAM rather than issue.
+using AccumulateFoldFn = void (*)(std::uint64_t *const *, std::size_t,
+                                  const double *const *, std::size_t,
+                                  std::size_t, std::int32_t, unsigned *);
+
+// A row's limbs are held in registers across the fold, so the width has to be
+// bounded. Wider columns fall back to one batch at a time, which is no loss:
+// the single-batch kernel stops as soon as a carry dies, while the fold has to
+// write back every limb it loaded, so past this width folding would move more
+// memory rather than less.
+inline constexpr std::size_t kMaxFoldLimbs = 8;
+
 Survey
 survey_column_scalar(const double *values, std::size_t rows,
                      long long floor_exponent);
@@ -56,6 +77,12 @@ accumulate_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
                   const double *values, std::size_t rows,
                   std::int32_t column_exponent, std::size_t first_limb,
                   unsigned *flags);
+
+void
+accumulate_fold_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
+                       const double *const *columns, std::size_t count,
+                       std::size_t rows, std::int32_t column_exponent,
+                       unsigned *flags);
 
 #if defined(CBFP_HAVE_AVX512)
 Survey
@@ -67,6 +94,12 @@ accumulate_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
                   const double *values, std::size_t rows,
                   std::int32_t column_exponent, std::size_t first_limb,
                   unsigned *flags);
+
+void
+accumulate_fold_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
+                       const double *const *columns, std::size_t count,
+                       std::size_t rows, std::int32_t column_exponent,
+                       unsigned *flags);
 #endif
 
 // Chosen once, on first use, from the running CPU's capabilities.
@@ -74,6 +107,8 @@ SurveyFn
 survey();
 AccumulateFn
 accumulate();
+AccumulateFoldFn
+accumulate_fold();
 const char *
 accumulate_name();
 

@@ -233,6 +233,112 @@ struct Addend8 {
 
 }  // namespace
 
+// The fold: one row block's limbs are loaded once, every matrix's addend
+// applied to them, and the result stored once. Same arithmetic as
+// accumulate_avx512's apply, with `v` standing in for the limb arrays -- so
+// the carry chain, the two-limb split and the early termination are unchanged
+// and only the traffic differs.
+void
+accumulate_fold_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
+                       const double *const *columns, std::size_t count,
+                       std::size_t rows, std::int32_t column_exponent,
+                       unsigned *flags)
+{
+    __mmask8 m_bad_nonfinite = 0, m_bad_low = 0, m_bad_high = 0;
+    const __m512i v_zero = _mm512_setzero_si512();
+    const __m512i v_nlimbs = _mm512_set1_epi64(static_cast<long long>(nlimbs));
+    const __m512i kOne = _mm512_set1_epi64(1);
+    const __m512i kOnes = _mm512_set1_epi64(-1);
+    const __m512i k63 = _mm512_set1_epi64(63);
+    const __m512i k64 = _mm512_set1_epi64(64);
+    const __m512i kColExp = _mm512_set1_epi64(column_exponent);
+
+    const auto prepare = [&](std::size_t row, __m512d v_val, __mmask8 m_k) {
+        const Split8 s = split8(v_val);
+        Addend8 q;
+        q.row = row;
+        q.m_live = s.m_live & m_k;
+        q.m_negative = s.m_negative & q.m_live;
+        const __m512i v_shift =
+            _mm512_maskz_sub_epi64(q.m_live, s.v_exponent, kColExp);
+        m_bad_nonfinite |= s.m_nonfinite & m_k;
+        m_bad_low |= _mm512_cmplt_epi64_mask(v_shift, v_zero) & q.m_live;
+        q.v_off = _mm512_srli_epi64(v_shift, 6);
+        m_bad_high |= _mm512_cmpge_epu64_mask(q.v_off, v_nlimbs) & q.m_live;
+        const __m512i v_bit = _mm512_and_si512(v_shift, k63);
+        q.v_lo = _mm512_maskz_sllv_epi64(q.m_live, s.v_mantissa, v_bit);
+        q.v_hi = _mm512_maskz_srlv_epi64(q.m_live, s.v_mantissa,
+                                         _mm512_sub_epi64(k64, v_bit));
+        q.v_off1 = _mm512_add_epi64(q.v_off, kOne);
+        return q;
+    };
+
+    // The one difference from accumulate_avx512: the accumulator lives in `v`
+    // for the whole fold rather than being loaded and stored per addend.
+    const auto apply_reg = [&](const Addend8 &q, __m512i *v) {
+        if (0 == q.m_live) return;
+        __m512i v_carry = _mm512_setzero_si512();
+
+        for (std::size_t p = 0; p < nlimbs; ++p) {
+            const __m512i v_pv = _mm512_set1_epi64(static_cast<long long>(p));
+            const __mmask8 m_active =
+                _mm512_cmple_epi64_mask(q.v_off, v_pv) & q.m_live;
+            if (0 == m_active) continue;
+
+            const __mmask8 m_at_lo =
+                _mm512_cmpeq_epi64_mask(q.v_off, v_pv) & q.m_live;
+            const __mmask8 m_at_hi =
+                _mm512_cmpeq_epi64_mask(q.v_off1, v_pv) & q.m_live;
+
+            __m512i v_addend = _mm512_maskz_mov_epi64(m_at_lo, q.v_lo);
+            v_addend = _mm512_mask_mov_epi64(v_addend, m_at_hi, q.v_hi);
+            v_addend = _mm512_mask_xor_epi64(v_addend, q.m_negative & m_active,
+                                             v_addend, kOnes);
+            v_carry =
+                _mm512_mask_mov_epi64(v_carry, m_at_lo & q.m_negative, kOne);
+
+            const __m512i v_x = v[p];
+            const __m512i v_sum = _mm512_add_epi64(v_x, v_addend);
+            const __mmask8 m_c1 = _mm512_cmplt_epu64_mask(v_sum, v_x);
+            const __m512i v_sum2 = _mm512_add_epi64(v_sum, v_carry);
+            const __mmask8 m_c2 = _mm512_cmplt_epu64_mask(v_sum2, v_sum);
+            v[p] = v_sum2;
+
+            v_carry = _mm512_maskz_set1_epi64(m_c1 | m_c2, 1);
+
+            const __mmask8 m_pending = _mm512_test_epi64_mask(v_carry, v_carry);
+            const __mmask8 m_more =
+                _mm512_cmpgt_epi64_mask(q.v_off1, v_pv) & q.m_live;
+            if (0 == m_more && 0 == ((m_pending ^ q.m_negative) & q.m_live))
+                break;
+        }
+    };
+
+    const auto block = [&](std::size_t row, __mmask8 m_k) {
+        __m512i v[kMaxFoldLimbs];
+        for (std::size_t p = 0; p < nlimbs; ++p) {
+            v[p] = _mm512_loadu_si512(limbs[p] + row);
+        }
+        for (std::size_t b = 0; b < count; ++b) {
+            const __m512d v_val =
+                0xFF == m_k ? load_column(columns[b], row)
+                            : load_column_tail(columns[b], row, m_k);
+            apply_reg(prepare(row, v_val, m_k), v);
+        }
+        for (std::size_t p = 0; p < nlimbs; ++p) {
+            _mm512_storeu_si512(limbs[p] + row, v[p]);
+        }
+    };
+
+    std::size_t row = 0;
+    for (; row + 8 <= rows; row += 8) block(row, 0xFF);
+    if (row < rows) block(row, tail_mask(row, rows));
+
+    *flags |= (0 != m_bad_nonfinite ? kBadNonFinite : 0u) |
+              (0 != m_bad_low ? kBadExponent : 0u) |
+              (0 != m_bad_high ? kBadWidth : 0u);
+}
+
 void
 accumulate_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
                   const double *values, std::size_t rows,
