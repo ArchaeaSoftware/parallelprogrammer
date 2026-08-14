@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "cbfp/limbs.hpp"
+#include "cbfp/survey.hpp"
 #include "cbfp/uplo.hpp"
 
 // CUDA's opaque handle types, forward-declared rather than pulled in from
@@ -58,6 +59,26 @@ public:
     // bytes crossing PCIe halve along with the device memory. The input is
     // taken to be symmetric and that is not checked.
     CudaColumnBlockMatrix(std::size_t n, Uplo uplo);
+
+    // Pre-sized from the surveys of every matrix that will be accumulated,
+    // exactly as ColumnBlockMatrix is: `surveys` is indexed by matrix and
+    // then by column, so its outer size is how many will arrive.
+    //
+    // This buys more here than on the CPU. The device path's survey is a
+    // kernel whose verdict has to reach the host before the accumulate may
+    // launch -- a drain that costs 19.9 us a batch however small the batch
+    // is. Told the extents in advance there is nothing to ask, so the survey
+    // kernel, its round trip and that fixed cost all go away, and
+    // add_matrix_col_major_device stops synchronizing altogether.
+    //
+    // The metadata is taken on trust. A batch that contradicts it is
+    // detected by the accumulate kernel rather than prevented, and reported
+    // at the next synchronization -- see column_contradictions().
+    CudaColumnBlockMatrix(std::size_t rows, std::size_t cols,
+                          const std::vector<std::vector<Survey>> &surveys);
+
+    CudaColumnBlockMatrix(std::size_t n, Uplo uplo,
+                          const std::vector<std::vector<Survey>> &surveys);
 
     // Declared, not implicit: the worker pool is held by unique_ptr to an
     // incomplete type, so the destructor must be defined where that is.
@@ -147,6 +168,15 @@ public:
     // before reusing a caller-owned device buffer.
     void synchronize() const;
 
+    // What the accumulate kernel found that contradicted a column's sizing,
+    // as kernels.hpp's kBad* bits, or 0. Accumulated across every batch, the
+    // way occupancy is. Reading it synchronizes.
+    //
+    // synchronize() throws on a nonzero value, so a caller normally learns
+    // about a contradiction rather than asking; this is here for a caller
+    // that wants to know which column without catching.
+    unsigned column_contradictions(std::size_t j) const;
+
     // --- readback ----------------------------------------------------------
 
     int column_exponent(std::size_t j) const;
@@ -220,6 +250,10 @@ private:
     };
 
     void check_index(std::size_t i, std::size_t j) const;
+    void reserve_from_surveys(const std::vector<std::vector<Survey>> &s);
+    // Throws if any column reported a contradiction. Const because it only
+    // reads mapped memory the device wrote.
+    void report_contradictions() const;
     // Logical (i, j) to the column that stores it and the slot within it.
     void locate(std::size_t i, std::size_t j, std::size_t &col,
                 std::size_t &slot) const;
@@ -265,6 +299,11 @@ private:
     int *occupancy_host_ = nullptr;    // mapped, written by the last block
     unsigned *ticket_ = nullptr;       // device, elects that block
 
+    // The same pair for the detector's verdict, carried across by the same
+    // elected block in the same pass.
+    unsigned *flags_device_ = nullptr;
+    unsigned *flags_host_ = nullptr;
+
     void *descriptors_ = nullptr;  // device ColumnDesc[]
     bool descriptors_stale_ = true;
     void *survey_out_ =
@@ -274,6 +313,13 @@ private:
     // construction and never rewritten, so both kernels can read it without
     // the staleness the descriptors have to manage.
     void *shapes_ = nullptr;  // device ColumnShape[]
+
+    // Set when the constructor was given surveys. The accumulate path then
+    // skips the survey entirely -- on this path that means not launching a
+    // kernel and not draining the stream to read its answer.
+    bool presized_ = false;
+    std::size_t declared_matrices_ = 0;
+    std::size_t submitted_matrices_ = 0;
 
     Slot slots_[2];
     int slot_ = 0;

@@ -767,6 +767,201 @@ test_symmetric()
     }
 }
 
+// Surveys of a column-major batch, one entry per column, taken over exactly
+// the slice the accumulator will read.
+std::vector<cbfp::Survey>
+survey_batch(const std::vector<double> &b, const cbfp::ColumnBlockMatrix &shape)
+{
+    std::vector<cbfp::Survey> out(shape.cols());
+    for (std::size_t j = 0; j < shape.cols(); ++j) {
+        out[j] = cbfp::survey_column(
+            b.data() + j * shape.rows() + shape.column_first_row(j),
+            shape.column_rows(j));
+    }
+    return out;
+}
+
+void
+test_presized()
+{
+    // Pre-sized on both sides from the same surveys. Both containers run the
+    // same reservation arithmetic, so they must agree on exponent and width
+    // and therefore on every stored limb -- which a comparison against an
+    // adaptively sized container could not check, since headroom would leave
+    // it at a different width.
+    for (int variant = 0; variant < 3; ++variant) {
+        const std::size_t rows = variant == 2 ? 257 : 1024;
+        const std::size_t cols = variant == 2 ? 9 : 16;
+        const int nbatches = 3;
+
+        std::vector<std::vector<double>> batches(
+            nbatches, std::vector<double>(rows * cols, 0.0));
+        for (int b = 0; b < nbatches; ++b) {
+            for (auto &x : batches[b]) x = random_value(variant == 1 ? 300 : 8);
+        }
+
+        cbfp::ColumnBlockMatrix shape(rows, cols);
+        std::vector<std::vector<cbfp::Survey>> surveys;
+        for (int b = 0; b < nbatches; ++b) {
+            surveys.push_back(survey_batch(batches[b], shape));
+        }
+
+        cbfp::ColumnBlockMatrix cpu(rows, cols, surveys);
+        cbfp::CudaColumnBlockMatrix gpu(rows, cols, surveys);
+        for (int b = 0; b < nbatches; ++b) {
+            cpu.add_matrix_col_major(batches[b].data());
+            gpu.add_matrix_col_major(batches[b].data());
+        }
+
+        std::size_t mismatches = 0;
+        for (std::size_t j = 0; j < cols; ++j) {
+            if (gpu.column_exponent(j) != cpu.column_exponent(j) ||
+                gpu.column_limbs(j) != cpu.column_limbs(j)) {
+                ++mismatches;
+                continue;
+            }
+            const std::vector<std::uint64_t> dev = gpu.download_column(j);
+            const std::size_t nl = cpu.column_limbs(j);
+            for (std::size_t i = 0; i < rows; ++i) {
+                const std::vector<std::uint64_t> host = cpu.entry_limbs(i, j);
+                for (std::size_t k = 0; k < nl; ++k) {
+                    if (host[k] != dev[k * rows + i]) ++mismatches;
+                }
+            }
+        }
+        check(mismatches == 0, "presized device matches presized host, variant " +
+                                   std::to_string(variant) + ": " +
+                                   std::to_string(mismatches) + " mismatches");
+    }
+
+    // Symmetric and pre-sized together.
+    {
+        const std::size_t n = 129;
+        std::vector<double> b(n * n, 0.0);
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t j = 0; j <= i; ++j) {
+                const double v = random_value(12);
+                b[j * n + i] = b[i * n + j] = v;
+            }
+        }
+        cbfp::ColumnBlockMatrix shape(n, cbfp::Uplo::Lower);
+        std::vector<std::vector<cbfp::Survey>> surveys{survey_batch(b, shape)};
+
+        cbfp::ColumnBlockMatrix cpu(n, cbfp::Uplo::Lower, surveys);
+        cbfp::CudaColumnBlockMatrix gpu(n, cbfp::Uplo::Lower, surveys);
+        cpu.add_matrix_col_major(b.data());
+        gpu.add_matrix_col_major(b.data());
+
+        std::size_t mismatches = 0;
+        for (std::size_t j = 0; j < n; ++j) {
+            if (gpu.column_exponent(j) != cpu.column_exponent(j) ||
+                gpu.column_limbs(j) != cpu.column_limbs(j)) {
+                ++mismatches;
+                continue;
+            }
+            const std::vector<std::uint64_t> dev = gpu.download_column(j);
+            const std::size_t cr = cpu.column_rows(j);
+            const std::size_t f0 = cpu.column_first_row(j);
+            for (std::size_t s2 = 0; s2 < cr; ++s2) {
+                const std::vector<std::uint64_t> host =
+                    cpu.entry_limbs(f0 + s2, j);
+                for (std::size_t k = 0; k < cpu.column_limbs(j); ++k) {
+                    if (host[k] != dev[k * cr + s2]) ++mismatches;
+                }
+            }
+        }
+        check(mismatches == 0, "presized symmetric device matches host: " +
+                                   std::to_string(mismatches) + " mismatches");
+    }
+
+    // The count is the one thing checked, because it costs nothing.
+    {
+        std::vector<double> v(64 * 2, 1.0);
+        cbfp::ColumnBlockMatrix shape(64, 2);
+        std::vector<std::vector<cbfp::Survey>> surveys{survey_batch(v, shape),
+                                                       survey_batch(v, shape)};
+        cbfp::CudaColumnBlockMatrix gpu(64, 2, surveys);
+        gpu.add_matrix_col_major(v.data());
+        gpu.add_matrix_col_major(v.data());
+        bool threw = false;
+        try {
+            gpu.add_matrix_col_major(v.data());
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        check(threw, "a third matrix past two declared is an error");
+    }
+}
+
+// Pre-sizing removes the survey, so nothing prevents a batch that contradicts
+// the metadata. The accumulate kernel has to notice instead, and the failure
+// it is guarding is silent: a negative shift makes the limb offset enormous
+// and the carry loop simply never runs, dropping the value without a word.
+void
+test_device_detector()
+{
+    const std::size_t rows = 128;
+
+    // An exponent below what the column was sized for.
+    {
+        std::vector<double> v(rows, 0.5);  // exponent -1
+        cbfp::Survey lie{0, 8, true, false};  // claims nothing below 2^0
+        std::vector<std::vector<cbfp::Survey>> surveys{{lie}};
+        cbfp::CudaColumnBlockMatrix gpu(rows, 1, surveys);
+        gpu.add_matrix_col_major(v.data());
+        const unsigned f = gpu.column_contradictions(0);
+        check(0 != (f & 2u), "a too-low exponent is detected");
+
+        bool threw = false;
+        try {
+            gpu.synchronize();
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        check(threw, "and reported at the next synchronization");
+    }
+
+    // An addend past the column's width.
+    {
+        std::vector<double> v(rows, std::ldexp(1.0, 300));
+        cbfp::Survey lie{0, 8, true, false};
+        std::vector<std::vector<cbfp::Survey>> surveys{{lie}};
+        cbfp::CudaColumnBlockMatrix gpu(rows, 1, surveys);
+        gpu.add_matrix_col_major(v.data());
+        check(0 != (gpu.column_contradictions(0) & 4u),
+              "an addend past the width is detected");
+    }
+
+    // A non-finite value, which the survey would have rejected outright.
+    {
+        std::vector<double> v(rows, 1.0);
+        v[rows / 2] = std::numeric_limits<double>::infinity();
+        cbfp::Survey ok{0, 8, true, false};
+        std::vector<std::vector<cbfp::Survey>> surveys{{ok}};
+        cbfp::CudaColumnBlockMatrix gpu(rows, 1, surveys);
+        gpu.add_matrix_col_major(v.data());
+        check(0 != (gpu.column_contradictions(0) & 1u),
+              "a non-finite value is detected");
+    }
+
+    // And an honest batch reports nothing, so the detector is not simply
+    // always firing.
+    {
+        std::vector<double> v(rows * 3);
+        for (auto &x : v) x = random_value(6);
+        cbfp::ColumnBlockMatrix shape(rows, 3);
+        std::vector<std::vector<cbfp::Survey>> surveys{survey_batch(v, shape)};
+        cbfp::CudaColumnBlockMatrix gpu(rows, 3, surveys);
+        gpu.add_matrix_col_major(v.data());
+        gpu.synchronize();  // must not throw
+        bool clean = true;
+        for (std::size_t j = 0; j < 3; ++j) {
+            clean = clean && 0 == gpu.column_contradictions(j);
+        }
+        check(clean, "an honest batch reports no contradiction");
+    }
+}
+
 }  // namespace
 
 int
@@ -786,6 +981,8 @@ main()
     test_acquired_input();
     test_errors();
     test_symmetric();
+    test_presized();
+    test_device_detector();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

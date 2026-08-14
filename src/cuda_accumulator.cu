@@ -65,6 +65,11 @@ cuda_check(cudaError_t status, const char *call, const char *file, int line)
 
 constexpr unsigned kBlock = 256;  // a power of two; the reductions rely on it
 
+// Mirrors kernels.hpp, which this file cannot include from device code.
+constexpr unsigned kBadNonFinite = 1;
+constexpr unsigned kBadExponent = 2;
+constexpr unsigned kBadWidth = 4;
+
 // Blocks in the whole grid, not just its x extent. Both kernels grid-stride,
 // so any smaller grid stays correct -- it only gives each thread more rows.
 //
@@ -244,6 +249,8 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols,
                   const ColumnShape *__restrict__ shapes,
                   std::size_t col_stride, int *__restrict__ occupancy_device,
                   int *__restrict__ occupancy_host,
+                  unsigned *__restrict__ flags_device,
+                  unsigned *__restrict__ flags_host,
                   unsigned *__restrict__ ticket, unsigned ncols)
 {
     // The addend split, the offset arithmetic and the limb mask below are all
@@ -265,10 +272,18 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols,
     const std::size_t rows = sh.rows;
 
     __shared__ int s_lim[kBlock];
+    __shared__ unsigned s_flg[kBlock];
     const unsigned tid = threadIdx.x;
     // Highest limb position this thread disturbs. The carry loop already knows
     // where it stopped, so this costs a comparison rather than a pass.
     int t_lim = -1;
+    // Where this batch contradicts what the column was sized for. Pre-sized
+    // from producer metadata there is no survey to catch it, and the loop
+    // below would otherwise drop such a value without a word: a negative
+    // shift converts to an enormous `off` and the carry loop simply never
+    // runs. Recorded, not acted on -- the arithmetic is left exactly as it
+    // was so the checks cost three comparisons and no divergence.
+    unsigned t_flags = 0;
 
     const std::size_t step = static_cast<std::size_t>(gridDim.x) * blockDim.x;
     for (std::size_t i =
@@ -278,14 +293,16 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols,
         int e, top;
         bool neg, bad;
         split_device(col[i], m, e, top, neg, bad);
+        if (bad) t_flags |= kBadNonFinite;
         if (0 == m) continue;
 
-        // The host has already checked that every value fits the column it
-        // was reserved for, so the shift cannot be negative. Were it ever
-        // negative anyway, the unsigned conversion puts `off` far above
-        // nlimbs and the loop below simply does not run.
+        // A negative shift converts to an `off` far above nlimbs, so the
+        // loop below does not run and the value is silently dropped. That
+        // is the failure the flags exist to name.
         const int shift = e - c.exponent;
         const unsigned off = static_cast<unsigned>(shift) / kRadix;
+        if (shift < 0) t_flags |= kBadExponent;
+        if (off >= c.nlimbs) t_flags |= kBadWidth;
         const unsigned bit = static_cast<unsigned>(shift) % kRadix;
 
         // A 53-bit significand at intra-limb offset `bit` spans two limbs at
@@ -346,12 +363,17 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols,
     // ordinary atomics, then elect one block to carry the finished array to
     // host memory. Atomics never cross PCIe: measured, that costs 260x.
     s_lim[tid] = t_lim;
+    s_flg[tid] = t_flags;
     __syncthreads();
     for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s && s_lim[tid + s] > s_lim[tid]) s_lim[tid] = s_lim[tid + s];
+        if (tid < s) {
+            if (s_lim[tid + s] > s_lim[tid]) s_lim[tid] = s_lim[tid + s];
+            s_flg[tid] |= s_flg[tid + s];
+        }
         __syncthreads();
     }
     if (0 == tid && s_lim[0] >= 0) atomicMax(&occupancy_device[j], s_lim[0]);
+    if (0 == tid && 0 != s_flg[0]) atomicOr(&flags_device[j], s_flg[0]);
 
     // Every block must publish before the elected one reads.
     __threadfence();
@@ -372,6 +394,7 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols,
     // batch's maximum, which lost limbs that earlier batches had needed.
     for (unsigned k = tid; k < ncols; k += blockDim.x) {
         occupancy_host[k] = occupancy_device[k];
+        flags_host[k] = flags_device[k];
     }
     if (0 == tid) *ticket = 0;
 }
@@ -479,6 +502,11 @@ CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t rows, std::size_t cols)
         cuda(HostAlloc(&occupancy_host_, cols_ * sizeof(int),
                        cudaHostAllocMapped));
         for (std::size_t j = 0; j < cols_; ++j) occupancy_host_[j] = -1;
+        cuda(Malloc(&flags_device_, cols_ * sizeof(unsigned)));
+        cuda(Memset(flags_device_, 0, cols_ * sizeof(unsigned)));
+        cuda(HostAlloc(&flags_host_, cols_ * sizeof(unsigned),
+                       cudaHostAllocMapped));
+        for (std::size_t j = 0; j < cols_; ++j) flags_host_[j] = 0;
         cuda(Malloc(&ticket_, sizeof(unsigned)));
         cuda(Memset(ticket_, 0, sizeof(unsigned)));
         cuda(Malloc(&descriptors_, cols_ * sizeof(ColumnDesc)));
@@ -520,6 +548,72 @@ CudaColumnBlockMatrix::init_columns()
     }
     cuda(Memcpy(shapes_, shapes.data(), cols_ * sizeof(ColumnShape),
                 cudaMemcpyHostToDevice));
+}
+
+CudaColumnBlockMatrix::CudaColumnBlockMatrix(
+    std::size_t rows, std::size_t cols,
+    const std::vector<std::vector<Survey>> &surveys)
+    : CudaColumnBlockMatrix(rows, cols)
+{
+    reserve_from_surveys(surveys);
+}
+
+CudaColumnBlockMatrix::CudaColumnBlockMatrix(
+    std::size_t n, Uplo uplo, const std::vector<std::vector<Survey>> &surveys)
+    : CudaColumnBlockMatrix(n, uplo)
+{
+    reserve_from_surveys(surveys);
+}
+
+// The same aggregate ColumnBlockMatrix forms: minimum of the minima, maximum
+// of the maxima, count from the outer size. Reducing to one reservation per
+// column is what makes submission order irrelevant -- any matrix inside these
+// extents fits, so the accumulator never needs to know which one it is being
+// handed.
+//
+// Unlike the CPU, a column with nothing in it is still reserved: the device
+// can grow a column but only from the host between launches, and a pre-sized
+// accumulator is meant never to go back to the host at all.
+void
+CudaColumnBlockMatrix::reserve_from_surveys(
+    const std::vector<std::vector<Survey>> &surveys)
+{
+    if (surveys.empty()) {
+        throw std::invalid_argument(
+            "cbfp: pre-sizing needs the surveys of at least one matrix");
+    }
+    for (const auto &one : surveys) {
+        if (one.size() != cols_) {
+            throw std::invalid_argument(
+                "cbfp: each survey must have one entry per column");
+        }
+    }
+
+    const std::size_t headroom = ceil_log2(surveys.size() + 1) + 1;
+    for (std::size_t j = 0; j < cols_; ++j) {
+        bool any = false;
+        int low = 0, high = 0;
+        for (const auto &one : surveys) {
+            if (!one[j].any) continue;
+            if (!any) {
+                low = one[j].min_exponent;
+                high = one[j].max_top;
+                any = true;
+            } else {
+                low = std::min(low, one[j].min_exponent);
+                high = std::max(high, one[j].max_top);
+            }
+        }
+        if (!any) {
+            reserve_column(j, 0, limbs::kLimbBits);
+            continue;
+        }
+        reserve_column(j, low,
+                       static_cast<std::size_t>(high - low) + headroom);
+    }
+
+    presized_ = true;
+    declared_matrices_ = surveys.size();
 }
 
 std::size_t
@@ -570,6 +664,8 @@ CudaColumnBlockMatrix::~CudaColumnBlockMatrix()
     cudaFree(shapes_);
     cudaFree(occupancy_device_);
     cudaFreeHost(occupancy_host_);
+    cudaFree(flags_device_);
+    cudaFreeHost(flags_host_);
     cudaFree(ticket_);
     for (Slot &s : slots_) {
         if (s.mapped) cudaFreeHost(s.mapped);
@@ -961,7 +1057,20 @@ CudaColumnBlockMatrix::add_matrix_col_major(const double *b,
         }
     }
 
-    validate_host_survey(s.mapped, rows_);
+    if (presized_) {
+        // Nothing to learn: the extents were supplied, so no rescale or
+        // widen can be due and the survey would only confirm what is
+        // already known. A batch that contradicts that is caught by the
+        // accumulate kernel and reported at the next synchronization.
+        if (++submitted_matrices_ > declared_matrices_) {
+            throw std::runtime_error(
+                "cbfp: more matrices accumulated than were described to "
+                "the constructor; the width bound holds for that many and "
+                "no more");
+        }
+    } else {
+        validate_host_survey(s.mapped, rows_);
+    }
     launch_accumulate(s.mapped, rows_);
     cuda(EventRecord(s.ev_done, st_compute_));
     s.in_flight = true;
@@ -992,6 +1101,40 @@ void
 CudaColumnBlockMatrix::synchronize() const
 {
     cuda(StreamSynchronize(st_compute_));
+    report_contradictions();
+}
+
+unsigned
+CudaColumnBlockMatrix::column_contradictions(std::size_t j) const
+{
+    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    cuda(StreamSynchronize(st_compute_));  // not synchronize(): do not throw
+    return nullptr == flags_host_ ? 0u : flags_host_[j];
+}
+
+// A batch reached outside what its column was sized for. Pre-sized from
+// producer metadata that means the metadata was wrong; sized from a survey
+// taken here it means the survey and the accumulate disagree, which is a
+// bug. Either way the sums are already wrong, so this reports rather than
+// recovers -- the same contract, and the same wording, as the CPU container.
+void
+CudaColumnBlockMatrix::report_contradictions() const
+{
+    if (nullptr == flags_host_) return;
+    for (std::size_t j = 0; j < cols_; ++j) {
+        const unsigned flags = flags_host_[j];
+        if (0 == flags) continue;
+        std::ostringstream os;
+        os << "cbfp: column " << j
+           << " received values it was not sized for:";
+        if (0 != (flags & kBadNonFinite)) os << " a non-finite value;";
+        if (0 != (flags & kBadExponent)) {
+            os << " an exponent below the column's;";
+        }
+        if (0 != (flags & kBadWidth)) os << " an addend past its width;";
+        os << " the accumulator is no longer consistent";
+        throw std::runtime_error(os.str());
+    }
 }
 
 void
@@ -1004,6 +1147,20 @@ CudaColumnBlockMatrix::accumulate_device(const double *b,
                 "cbfp: every device column must be reserved before "
                 "accumulation");
         }
+    }
+    if (presized_) {
+        // The drain below is this path's fixed cost, and pre-sizing is what
+        // removes it: with the extents known there is no question to ask the
+        // device, so the accumulate launches straight away and this call
+        // never blocks.
+        if (++submitted_matrices_ > declared_matrices_) {
+            throw std::runtime_error(
+                "cbfp: more matrices accumulated than were described to "
+                "the constructor; the width bound holds for that many and "
+                "no more");
+        }
+        launch_accumulate(b, col_stride);
+        return;
     }
     sync_descriptors();
 
@@ -1059,8 +1216,8 @@ CudaColumnBlockMatrix::launch_accumulate(const double *b,
     accumulate_kernel<64><<<grid, kBlock, 0, st_compute_>>>(
         static_cast<const ColumnDesc *>(descriptors_), b,
         static_cast<const ColumnShape *>(shapes_), col_stride,
-        occupancy_device_, occupancy_host_, ticket_,
-        static_cast<unsigned>(cols_));
+        occupancy_device_, occupancy_host_, flags_device_, flags_host_,
+        ticket_, static_cast<unsigned>(cols_));
 }
 
 std::vector<limb_t>
