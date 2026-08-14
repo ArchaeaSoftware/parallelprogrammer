@@ -1150,6 +1150,12 @@ CudaColumnBlockMatrix::add_matrix_col_major(const double *b,
         slot_ ^= 1;
     }
 
+    return record_input_read();
+}
+
+InputRead
+CudaColumnBlockMatrix::record_input_read()
+{
     CUevent_st *ev = nullptr;
     cuda(EventCreateWithFlags(&ev, cudaEventDisableTiming));
     cuda(EventRecord(ev, st_compute_));
@@ -1188,12 +1194,12 @@ CudaColumnBlockMatrix::survey_device_inputs(const double *const *b,
     }
 }
 
-void
+InputRead
 CudaColumnBlockMatrix::add_matrices_col_major_device(const double *const *b,
                                                      std::size_t count,
                                                      std::size_t col_stride)
 {
-    if (0 == count || 0 == rows_ || 0 == cols_) return;
+    if (0 == count || 0 == rows_ || 0 == cols_) return InputRead();
     if (count > kMaxFoldInputs) {
         std::ostringstream os;
         os << "cbfp: at most " << kMaxFoldInputs
@@ -1218,14 +1224,16 @@ CudaColumnBlockMatrix::add_matrices_col_major_device(const double *const *b,
     }
     sync_descriptors();
     launch_accumulate(b, count, stride);
+    return record_input_read();
 }
 
-void
+InputRead
 CudaColumnBlockMatrix::add_matrix_col_major_device(const double *b,
                                                    std::size_t col_stride)
 {
-    if (0 == rows_ || 0 == cols_) return;
+    if (0 == rows_ || 0 == cols_) return InputRead();
     accumulate_device(b, col_stride ? col_stride : rows_);
+    return record_input_read();
 }
 
 void

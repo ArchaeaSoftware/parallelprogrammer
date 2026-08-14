@@ -1239,6 +1239,77 @@ test_device_fold()
     }
 }
 
+// The pattern the device path exists for: a producer cycling device buffers,
+// filling one while the accumulator reads another. The handle is what makes it
+// possible to wait for the one buffer about to be overwritten instead of
+// draining the whole stream.
+void
+test_device_ping_pong()
+{
+    const std::size_t rows = 4096, cols = 16, n = rows * cols;
+    const int batches = 6;
+
+    std::vector<std::vector<double>> host(batches, std::vector<double>(n));
+    for (auto &v : host)
+        for (auto &x : v) x = random_value(10);
+
+    cbfp::ColumnBlockMatrix cpu(rows, cols);
+    for (auto &v : host) submit(cpu, v);
+
+    // Two device buffers in rotation, which is all a real producer would keep.
+    double *buf[2] = {nullptr, nullptr};
+    for (int i = 0; i < 2; ++i) cudaMalloc(&buf[i], n * sizeof(double));
+
+    cbfp::CudaColumnBlockMatrix g(rows, cols);
+    g.reserve_like(cpu);
+    cbfp::InputRead h[2];
+    for (int r = 0; r < batches; ++r) {
+        const int slot = r & 1;
+        // Wait only for the buffer about to be refilled -- never for the
+        // stream. On the first two rounds the handles are empty and this is a
+        // no-op, which is what a default-constructed handle is for.
+        h[slot].wait();
+        cudaMemcpy(buf[slot], host[r].data(), n * sizeof(double),
+                   cudaMemcpyHostToDevice);
+        h[slot] = g.add_matrix_col_major_device(buf[slot]);
+    }
+    h[0].wait();
+    h[1].wait();
+    g.synchronize();
+
+    std::size_t bad = 0;
+    for (std::size_t j = 0; j < cols; ++j) {
+        if (g.column_exponent(j) != cpu.column_exponent(j) ||
+            g.column_limbs(j) != cpu.column_limbs(j)) {
+            ++bad;
+            continue;
+        }
+        const std::vector<std::uint64_t> dev = g.download_column(j);
+        for (std::size_t i = 0; i < rows; ++i) {
+            const std::vector<std::uint64_t> hl = cpu.entry_limbs(i, j);
+            for (std::size_t k = 0; k < hl.size(); ++k)
+                if (hl[k] != dev[k * rows + i]) ++bad;
+        }
+    }
+    check(bad == 0, "two device buffers in rotation match sequential: " +
+                        std::to_string(bad) + " mismatches");
+
+    // The handle really does gate the read: a buffer whose handle has cleared
+    // may be overwritten, and doing so must not disturb what was accumulated.
+    {
+        const std::vector<std::uint64_t> before = g.download_column(0);
+        h[0].wait();
+        h[1].wait();
+        cudaMemset(buf[0], 0xFF, n * sizeof(double));
+        cudaMemset(buf[1], 0xFF, n * sizeof(double));
+        cudaDeviceSynchronize();
+        check(g.download_column(0) == before,
+              "overwriting a cleared buffer does not disturb the accumulator");
+    }
+
+    for (int i = 0; i < 2; ++i) cudaFree(buf[i]);
+}
+
 }  // namespace
 
 int
@@ -1262,6 +1333,7 @@ main()
     test_device_detector();
     test_in_place_input();
     test_device_fold();
+    test_device_ping_pong();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

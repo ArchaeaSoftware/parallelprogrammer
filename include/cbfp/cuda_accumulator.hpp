@@ -223,13 +223,35 @@ public:
     // not share, so one launch could not serve them.
     //
     // At most 16 matrices a call; they ride in the kernel's parameter block.
-    void add_matrices_col_major_device(const double *const *b,
-                                       std::size_t count,
-                                       std::size_t col_stride = 0);
+    //
+    // Returns the same completion handle as everything else here, so a
+    // producer can keep the buffers it is about to overwrite straight.
+    InputRead add_matrices_col_major_device(const double *const *b,
+                                            std::size_t count,
+                                            std::size_t col_stride = 0);
 
-    // The same, for input already resident in device memory.
-    void add_matrix_col_major_device(const double *b,
-                                     std::size_t col_stride = 0);
+    // A += B, for B already resident in device memory.
+    //
+    // The returned handle is what lets a producer cycle device buffers: fill
+    // one while the accumulator reads another, wait on the handle for the one
+    // about to be overwritten, and never synchronize the stream. Without it a
+    // caller's only recourse is synchronize(), which drains everything and
+    // gives up exactly the overlap a rotation exists for.
+    //
+    // **Fill on your own stream, not the default one.** This accumulator's
+    // stream is a blocking stream, so it implicitly synchronizes with the
+    // legacy null stream: a producer using cudaMemcpy (or anything else on the
+    // null stream) serializes against the accumulate and gets no overlap at
+    // all. Measured at 65536x64, a two-buffer rotation costs 1776 us a batch
+    // that way and 1301 us with the producer on its own stream, against 1256
+    // for the fill alone -- so the accumulate is 96% hidden when the streams
+    // are kept apart and not hidden whatsoever when they are not.
+    //
+    // Order your fill before submitting (a synchronize on your own stream is
+    // enough; it waits for your copy, not for the accumulate), and wait on the
+    // handle before refilling that buffer.
+    InputRead add_matrix_col_major_device(const double *b,
+                                          std::size_t col_stride = 0);
 
     // Blocks until every submitted accumulation has finished. Accumulation is
     // asynchronous: a call returns once the work is queued, so a caller
@@ -329,6 +351,8 @@ private:
                 std::size_t &slot) const;
     void init_columns();
     void accumulate_device(const double *b, std::size_t col_stride);
+    // Creates an event, records it on the compute stream, wraps it.
+    InputRead record_input_read();
     void launch_accumulate(const double *const *b, std::size_t count,
                            std::size_t col_stride);
     void survey_device_inputs(const double *const *b, std::size_t count,

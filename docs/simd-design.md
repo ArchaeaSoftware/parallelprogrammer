@@ -1203,6 +1203,32 @@ at radix 52 came off it by being measured rather than by being done.
    beginning to cost. The same effect was worth 2.75x on the CPU and is worth
    about 7% here, which is what a machine built to hide memory latency buys.
 
+   **When folding is worth anything, stated plainly, because it usually is
+   not.** Sixteen resident matrices is not a workload; cycling two or three
+   buffers is. And at PCIe rates the accumulator is not the bottleneck to begin
+   with, so making it faster changes nothing:
+
+   | 65536x64 | us a batch |
+   | --- | --- |
+   | producer filling a device buffer, H2D at 26.7 GB/s | 1255 |
+   | accumulator alone, K=1 | 516 |
+   | two buffers rotating, producer on its own stream | 1301 |
+   | two buffers rotating, producer on the null stream | 1776 |
+
+   The accumulator already has 2.4x of headroom under a PCIe-fed producer, and
+   a rotation hides it to within 4% of the fill. Folding would take 516 us to
+   166 and the batch would still cost 1256. It earns its keep only where input
+   arrives faster than about 65 GB/s -- GPUDirect from a NIC, NVLink, or data
+   generated on the device -- which is the same conclusion the GPUDirect item
+   above reaches from the other direction.
+
+   **The null-stream result is a usage trap worth naming.** This accumulator's
+   stream is a blocking stream, so it implicitly synchronizes with the legacy
+   null stream. A producer using plain `cudaMemcpy` serializes against the
+   accumulate and gets none of the overlap -- 1776 against 1301, which is the
+   whole difference between a pipeline and a queue. The header says so at the
+   entry point.
+
 Smaller, known: `reserve_column` issues a `cudaMemsetAsync` per limb position,
 `cols * nlimbs` of them, one-time at reserve rather than per batch. And
 measured occupancy could relax the derived width bound where cancellation has
