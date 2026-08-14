@@ -153,11 +153,11 @@ survey_column_avx512(const double *values, std::size_t rows,
     const std::uint64_t max_abs =
         static_cast<std::uint64_t>(_mm512_reduce_max_epu64(v_max_abs));
     const std::uint64_t max_biased = max_abs >> 52;
-    out.max_top = 0 != max_biased ? static_cast<long long>(max_biased) - 1022
+    out.max_top = 0 != max_biased ? static_cast<int>(max_biased) - 1022
                                   : -1074 + (64 - __builtin_clzll(max_abs));
 
     if (min_raw >= floor_exponent) {
-        out.min_exponent = min_raw;
+        out.min_exponent = static_cast<int>(min_raw);
         return out;
     }
 
@@ -196,7 +196,9 @@ survey_column_avx512(const double *values, std::size_t rows,
         const __mmask8 m_k = tail_mask(row, rows);
         ulp_step(_mm512_castpd_si512(load_column_tail(values, row, m_k)), m_k);
     }
-    out.min_exponent = _mm512_reduce_min_epi64(v_ulp);
+    // The reduction is 64-bit because the lanes are; the result is a true-ulp
+    // exponent and so always inside int.
+    out.min_exponent = static_cast<int>(_mm512_reduce_min_epi64(v_ulp));
     return out;
 }
 

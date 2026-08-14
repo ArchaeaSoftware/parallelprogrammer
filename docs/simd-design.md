@@ -621,8 +621,15 @@ minuscule beside the payload it describes:
 | | 65536x64 |
 | --- | --- |
 | matrix elements | 33.6 MB |
-| per-column survey | 1.024 KB |
-| ratio | 1 : 32768 |
+| per-column survey | 768 B |
+| ratio | 1 : 43690 |
+
+`Survey` is 12 bytes: two `int` exponents and two `bool` flags. The exponents
+were `long long` at first, which made the struct 24 bytes rather than the 16 a
+count of its fields suggests -- alignment padding, and two of the four fields
+being one byte each. A double's true-ulp exponent lives in [-1074, 1023] and
+its top in [-1073, 1024], so `int` carries six orders of magnitude more range
+than the format can produce, and a `static_assert` now pins the size.
 
 So it can simply be carried alongside the matrix. What that buys is out of
 proportion to its size:

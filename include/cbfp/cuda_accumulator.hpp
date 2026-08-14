@@ -198,9 +198,9 @@ private:
     void validate_host_survey(const double *b, std::size_t col_stride);
     void sync_descriptors();
     void harvest_occupancy();
-    void reserve_from_extents(const long long *low, const long long *high,
+    void reserve_from_extents(const int *low, const int *high,
                               const char *any, std::size_t count);
-    void require_fit(std::size_t j, long long min_exponent, long long max_top);
+    void require_fit(std::size_t j, int min_exponent, int max_top);
     void grow_column(std::size_t j, std::size_t needed);
     void rescale_column(std::size_t j, int new_exponent);
     void ensure_slots(std::size_t words);

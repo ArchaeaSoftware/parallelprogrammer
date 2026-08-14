@@ -94,10 +94,10 @@ launch_grid(std::size_t rows, std::size_t cols)
 // across the whole column with atomics, so every field is an atomic-friendly
 // type rather than the host struct's bools.
 //
-// The exponents are int where the host struct uses long long. A double's
-// exponent lives in [-1074, 1077] and the container caps its own at 2^24, so
-// 32 bits is three orders of magnitude more than enough -- and it buys 32-bit
-// atomics and halves this kernel's shared memory.
+// The exponents are int, the same width the host Survey uses, so the two agree
+// field for field and nothing narrows at the boundary. A double's exponent
+// lives in [-1074, 1024], so 32 bits is six orders of magnitude more than
+// enough -- and it buys 32-bit atomics and halves this kernel's shared memory.
 struct DeviceSurvey {
     int min_exponent;
     int max_top;
@@ -619,8 +619,8 @@ CudaColumnBlockMatrix::rescale_column(std::size_t j, int new_exponent)
 // what the column was actually reserved for. Called once per column per batch,
 // after the survey has established that batch's extent.
 void
-CudaColumnBlockMatrix::require_fit(std::size_t j, long long min_exponent,
-                                   long long max_top)
+CudaColumnBlockMatrix::require_fit(std::size_t j, int min_exponent,
+                                   int max_top)
 {
     if (min_exponent < cols_state_[j].exponent) {
         rescale_column(j, static_cast<int>(min_exponent));
@@ -641,8 +641,7 @@ CudaColumnBlockMatrix::require_fit(std::size_t j, long long min_exponent,
 // deliberate difference -- a column with nothing in it is still reserved,
 // since the device cannot grow one later.
 void
-CudaColumnBlockMatrix::reserve_from_extents(const long long *low,
-                                            const long long *high,
+CudaColumnBlockMatrix::reserve_from_extents(const int *low, const int *high,
                                             const char *any, std::size_t count)
 {
     const std::size_t headroom =
@@ -652,7 +651,7 @@ CudaColumnBlockMatrix::reserve_from_extents(const long long *low,
             reserve_column(j, 0, limbs::kLimbBits);
             continue;
         }
-        reserve_column(j, static_cast<int>(low[j]),
+        reserve_column(j, low[j],
                        static_cast<std::size_t>(high[j] - low[j]) + headroom);
     }
 }
@@ -663,7 +662,7 @@ CudaColumnBlockMatrix::reserve_for(const double *b, std::size_t count,
 {
     if (0 == cols_) return;
     const std::size_t stride = col_stride ? col_stride : rows_;
-    std::vector<long long> low(cols_, 0), high(cols_, 0);
+    std::vector<int> low(cols_, 0), high(cols_, 0);
     std::vector<char> any(cols_, 0);
 
     for (std::size_t j = 0; j < cols_; ++j) {
@@ -700,7 +699,7 @@ CudaColumnBlockMatrix::reserve_for_device(const double *b, std::size_t count,
                      cudaMemcpyDeviceToHost, st_compute_));
     synchronize();
 
-    std::vector<long long> low(cols_, 0), high(cols_, 0);
+    std::vector<int> low(cols_, 0), high(cols_, 0);
     std::vector<char> any(cols_, 0);
     for (std::size_t j = 0; j < cols_; ++j) {
         if (surveys[j].nonfinite) {

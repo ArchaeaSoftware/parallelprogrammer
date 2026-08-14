@@ -85,11 +85,11 @@ survey_column_scalar(const double *values, std::size_t rows,
     if (!out.any) return out;
 
     const std::uint64_t max_biased = max_abs >> 52;
-    out.max_top = 0 != max_biased ? static_cast<long long>(max_biased) - 1022
+    out.max_top = 0 != max_biased ? static_cast<int>(max_biased) - 1022
                                   : -1074 + (64 - __builtin_clzll(max_abs));
 
     if (min_raw >= floor_exponent) {
-        out.min_exponent = min_raw;
+        out.min_exponent = static_cast<int>(min_raw);
         return out;
     }
 
@@ -100,7 +100,7 @@ survey_column_scalar(const double *values, std::size_t rows,
         const Split s = split(values[i]);
         if (0 == s.mantissa) continue;
         if (first || s.exponent < out.min_exponent) {
-            out.min_exponent = s.exponent;
+            out.min_exponent = static_cast<int>(s.exponent);
             first = false;
         }
     }

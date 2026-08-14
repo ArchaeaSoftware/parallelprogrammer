@@ -166,7 +166,7 @@ ColumnBlockMatrix::ColumnBlockMatrix(
     const std::size_t headroom = ceil_log2(surveys.size() + 1) + 1;
     for (std::size_t j = 0; j < cols_; ++j) {
         bool any = false;
-        long long low = 0, high = 0;
+        int low = 0, high = 0;
         for (const auto &one : surveys) {
             if (!one[j].any) continue;
             if (!any) {
@@ -179,7 +179,7 @@ ColumnBlockMatrix::ColumnBlockMatrix(
             }
         }
         if (!any) continue;
-        reserve_column(j, static_cast<int>(low),
+        reserve_column(j, low,
                        static_cast<std::size_t>(high - low) + headroom);
     }
 
@@ -467,8 +467,12 @@ ColumnBlockMatrix::accumulate_column(std::size_t j, const double *column,
     }
     if (!sc.any) return;
 
-    const long long min_exponent = sc.min_exponent + log2_scale;
-    const long long max_top = sc.max_top + log2_scale;
+    // Widened before the add, not after: both operands are int, and log2_scale
+    // comes from the caller, so summing in int would overflow on the way to the
+    // very check below that exists to reject it.
+    const long long min_exponent =
+        static_cast<long long>(sc.min_exponent) + log2_scale;
+    const long long max_top = static_cast<long long>(sc.max_top) + log2_scale;
     if (min_exponent < -kExponentLimit || max_top > kExponentLimit) {
         throw std::domain_error("cbfp: log2_scale puts the value out of range");
     }
