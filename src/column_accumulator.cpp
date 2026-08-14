@@ -561,15 +561,27 @@ ColumnBlockMatrix::is_zero(std::size_t i, std::size_t j) const
     return true;
 }
 
-double
-ColumnBlockMatrix::to_double(std::size_t i, std::size_t j) const
-{
-    bool neg = false;
-    const std::vector<limb_t> mag = magnitude(i, j, &neg);
-    const std::size_t b = limbs::bit_length(mag.data(), mag.size());
-    if (0 == b) return 0.0;
+namespace {
 
-    const long long exp = cols_state_[j].exponent;
+// A rounded double together with the exact reconstruction of it:
+// `value == m * 2^scale`, with `scale >= exp` always. Carrying m and scale out
+// of the rounding is what lets the residual be an exact limb subtraction --
+// `m << (scale - exp)` lands back in the same fixed point the entry is stored
+// in, so no second rounding creeps in on the way.
+struct Rounded {
+    double value;
+    std::uint64_t m;
+    long long scale;
+};
+
+// The correctly rounded double nearest a non-negative magnitude whose bit 0
+// has weight 2^exp.
+Rounded
+round_magnitude(const limb_t *mag, std::size_t n, long long exp)
+{
+    const std::size_t b = limbs::bit_length(mag, n);
+    if (0 == b) return Rounded{0.0, 0, exp};
+
     const long long top = static_cast<long long>(b) - 1 + exp;  // 2^top <= |x|
 
     // Normal range: keep 53 significant bits. Subnormal range: round directly
@@ -578,20 +590,76 @@ ColumnBlockMatrix::to_double(std::size_t i, std::size_t j) const
     const long long drop =
         (top < -1022) ? (-1074 - exp) : (static_cast<long long>(b) - 53);
 
-    double r;
     if (drop <= 0) {
-        const std::uint64_t m = limbs::extract_u64(mag.data(), mag.size(), 0);
-        r = std::ldexp(static_cast<double>(m), static_cast<int>(exp));
-    } else {
-        const std::size_t d = static_cast<std::size_t>(drop);
-        const bool round_bit = limbs::get_bit(mag.data(), mag.size(), d - 1);
-        const bool sticky =
-            limbs::any_bits_below(mag.data(), mag.size(), d - 1);
-        std::uint64_t m = limbs::extract_u64(mag.data(), mag.size(), d);
-        if (round_bit && (sticky || 0 != (m & 1))) ++m;
-        r = std::ldexp(static_cast<double>(m), static_cast<int>(exp + drop));
+        // Every significant bit fits in the significand, so this is exact and
+        // the residual derived from it is zero.
+        const std::uint64_t m = limbs::extract_u64(mag, n, 0);
+        return Rounded{
+            std::ldexp(static_cast<double>(m), static_cast<int>(exp)), m, exp};
     }
-    return neg ? -r : r;
+    const std::size_t d = static_cast<std::size_t>(drop);
+    const bool round_bit = limbs::get_bit(mag, n, d - 1);
+    const bool sticky = limbs::any_bits_below(mag, n, d - 1);
+    std::uint64_t m = limbs::extract_u64(mag, n, d);
+    if (round_bit && (sticky || 0 != (m & 1))) ++m;
+    return Rounded{
+        std::ldexp(static_cast<double>(m), static_cast<int>(exp + drop)), m,
+        exp + drop};
+}
+
+// (magnitude - r) at weight 2^exp, rounded to a double. Signed: negative when
+// the rounding went up, which is why the caller applies the entry's own sign
+// afterwards rather than folding it in here.
+double
+residual_of(const std::vector<limb_t> &mag, long long exp, const Rounded &r)
+{
+    // Nothing was discarded: the value is zero, or every bit fit.
+    if (0 == r.m || r.scale == exp) return 0.0;
+    // Beyond double's range the difference is not representable either.
+    if (!std::isfinite(r.value)) return 0.0;
+
+    // Place r.m back at its own weight and subtract, the same 128-bit-at-an-
+    // offset decomposition the accumulate kernel uses. `mag` carries a spare
+    // top limb from magnitude(), so the difference has room for its sign.
+    const std::size_t shift = static_cast<std::size_t>(r.scale - exp);
+    const std::size_t off = shift / limbs::kLimbBits;
+    const unsigned bit = static_cast<unsigned>(shift % limbs::kLimbBits);
+    const limb_t lo = 0 == bit ? r.m : r.m << bit;
+    const limb_t hi = 0 == bit ? 0 : r.m >> (limbs::kLimbBits - bit);
+
+    std::vector<limb_t> diff = mag;
+    limbs::add_shifted(diff.data(), diff.size(), lo, hi, off, true);
+
+    const bool neg = limbs::is_negative(diff.data(), diff.size());
+    std::vector<limb_t> d(diff.size());
+    if (neg) {
+        limbs::negate_into(diff.data(), diff.size(), d.data());
+    } else {
+        d = diff;
+    }
+    const double v = round_magnitude(d.data(), d.size(), exp).value;
+    return neg ? -v : v;
+}
+
+}  // namespace
+
+double
+ColumnBlockMatrix::to_double(std::size_t i, std::size_t j,
+                             double *residual) const
+{
+    bool neg = false;
+    const std::vector<limb_t> mag = magnitude(i, j, &neg);
+    const long long exp = cols_state_[j].exponent;
+    const Rounded r = round_magnitude(mag.data(), mag.size(), exp);
+
+    if (nullptr != residual) {
+        const double lo = residual_of(mag, exp, r);
+        // A zero residual is +0.0 whatever the entry's sign. Negating it would
+        // hand back -0.0, which reads as a rounding direction that was never
+        // taken and compares unequal to the +0.0 an exact readback produces.
+        *residual = (neg && 0.0 != lo) ? -lo : lo;
+    }
+    return neg ? -r.value : r.value;
 }
 
 void
@@ -601,6 +669,19 @@ ColumnBlockMatrix::to_matrix(double *out, std::size_t row_stride) const
     for (std::size_t j = 0; j < cols_; ++j) {
         for (std::size_t i = 0; i < rows_; ++i) {
             out[i * stride + j] = to_double(i, j);
+        }
+    }
+}
+
+void
+ColumnBlockMatrix::to_matrix_with_residual(double *out, double *residual,
+                                           std::size_t row_stride) const
+{
+    const std::size_t stride = row_stride ? row_stride : cols_;
+    for (std::size_t j = 0; j < cols_; ++j) {
+        for (std::size_t i = 0; i < rows_; ++i) {
+            out[i * stride + j] =
+                to_double(i, j, &residual[i * stride + j]);
         }
     }
 }

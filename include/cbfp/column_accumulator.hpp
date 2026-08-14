@@ -118,10 +118,33 @@ public:
     // Correctly rounded (round-to-nearest, ties-to-even) double nearest to the
     // exact stored value. Overflows to +/-inf; underflows through the
     // subnormal range without double rounding.
-    double to_double(std::size_t i, std::size_t j) const;
+    //
+    // With `residual` non-null, also writes what the rounding discarded:
+    // exactly (stored value - returned double), itself correctly rounded to a
+    // double. The subtraction happens in the accumulator's own fixed point, so
+    // the residual is the true difference and not an estimate -- forming it in
+    // floating point would be the cancellation this container exists to avoid.
+    //
+    // Properties worth relying on:
+    //   - the returned double is unaffected by asking for the residual;
+    //   - |residual| <= half an ulp of the returned double, and the residual
+    //     is negative exactly when the rounding went up, so the two together
+    //     are a non-overlapping two-term expansion carrying about 106 bits;
+    //   - the residual is +0.0 when the value is exactly representable, which
+    //     is_exactly_representable() reports independently;
+    //   - a value outside double's range returns +/-inf with a residual of
+    //     0.0, the difference being unrepresentable.
+    double to_double(std::size_t i, std::size_t j,
+                     double *residual = nullptr) const;
 
     // Fills a dense row-major rows() x cols() buffer with to_double() results.
     void to_matrix(double *out, std::size_t row_stride = 0) const;
+
+    // to_matrix, plus the residual of every entry written to a second buffer
+    // of the same shape and stride. residual[i*stride + j] belongs to
+    // out[i*stride + j].
+    void to_matrix_with_residual(double *out, double *residual,
+                                 std::size_t row_stride = 0) const;
 
     // The exact value as a decimal string, e.g. "0.1" accumulated once yields
     // 0.1000000000000000055511151231257827021181583404541015625. Never rounds.

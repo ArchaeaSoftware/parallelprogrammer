@@ -1105,6 +1105,146 @@ test_threaded_matches_serial()
     }
 }
 
+// The residual is the exact difference between the stored value and the double
+// to_double returns. Checking that without a second arbitrary-precision
+// implementation means making the container check itself: accumulate the same
+// values again, subtract the rounded result, and whatever remains must be
+// exactly what the residual reported.
+static void
+test_readback_residual()
+{
+    const std::size_t rows = 48, cols = 4;
+    const int reps = 8;
+    std::mt19937_64 rng(90210);
+
+    // Distinct batches, not one batch added repeatedly: adding the same value
+    // eight times only multiplies it by eight, which is exact and would leave
+    // every residual zero.
+    std::vector<std::vector<double>> batches(reps,
+                                             std::vector<double>(rows * cols));
+    for (auto &batch : batches) {
+        for (auto &x : batch) {
+            const std::uint64_t m = (rng() | (std::uint64_t{1} << 52)) &
+                                    ((std::uint64_t{1} << 53) - 1);
+            // A wide exponent spread, so a cell's terms do not share a scale
+            // and the sum needs far more than 53 bits to hold exactly.
+            x = std::ldexp(static_cast<double>(m),
+                           static_cast<int>(rng() % 80) - 40);
+            if (rng() & 1) x = -x;
+        }
+    }
+
+    cbfp::ColumnBlockMatrix a(rows, cols);
+    for (int r = 0; r < reps; ++r) a.add_matrix(batches[r].data());
+
+    int nonzero_residuals = 0, negative_residuals = 0;
+    for (std::size_t j = 0; j < cols; ++j) {
+        for (std::size_t i = 0; i < rows; ++i) {
+            double lo = 1.0;  // must be overwritten, never left as-is
+            const double hi = a.to_double(i, j, &lo);
+
+            // Asking for the residual must not perturb the value.
+            CHECK_DOUBLE(a.to_double(i, j), hi);
+
+            // The exact statement of what a residual is: re-accumulate the
+            // same value, subtract the double that was returned, and what is
+            // left must round to the residual.
+            cbfp::ColumnBlockMatrix b(1, 1);
+            for (int r = 0; r < reps; ++r) {
+                b.add_column(0, &batches[r][i * cols + j]);
+            }
+            const double minus_hi = -hi;
+            b.add_column(0, &minus_hi);
+            CHECK_DOUBLE(b.to_double(0, 0), lo);
+
+            // A two-term expansion: the residual never reaches a full ulp of
+            // the value it corrects, so the two do not overlap.
+            if (0.0 != hi) {
+                const double ulp =
+                    std::nextafter(std::fabs(hi),
+                                   std::numeric_limits<double>::infinity()) -
+                    std::fabs(hi);
+                CHECK(std::fabs(lo) <= ulp / 2);
+            }
+
+            // Exactly representable and "nothing was discarded" must be the
+            // same predicate.
+            CHECK((0.0 == lo) == a.is_exactly_representable(i, j));
+
+            if (0.0 != lo) ++nonzero_residuals;
+            if (lo < 0.0) ++negative_residuals;
+        }
+    }
+    // The test is only meaningful if it actually exercised rounding in both
+    // directions rather than landing on exact values throughout.
+    CHECK(nonzero_residuals > static_cast<int>(rows * cols / 2));
+    CHECK(negative_residuals > 0);
+
+    // An exactly representable entry reports a residual of zero, positive.
+    cbfp::ColumnBlockMatrix e(1, 1);
+    const double two = 2.0;
+    e.add_column(0, &two);
+    double elo = 1.0;
+    CHECK_DOUBLE(e.to_double(0, 0, &elo), 2.0);
+    CHECK_DOUBLE(elo, 0.0);
+    CHECK(!std::signbit(elo));
+
+    // So does an empty one.
+    cbfp::ColumnBlockMatrix z(1, 1);
+    double zlo = 1.0;
+    CHECK_DOUBLE(z.to_double(0, 0, &zlo), 0.0);
+    CHECK_DOUBLE(zlo, 0.0);
+
+    // The bulk form must agree with the per-entry form, stride included.
+    const std::size_t stride = cols + 3;
+    std::vector<double> mv(rows * stride, -1.0), mr(rows * stride, -1.0);
+    a.to_matrix_with_residual(mv.data(), mr.data(), stride);
+    for (std::size_t j = 0; j < cols; ++j) {
+        for (std::size_t i = 0; i < rows; ++i) {
+            double want_lo = 0.0;
+            const double want_hi = a.to_double(i, j, &want_lo);
+            CHECK_DOUBLE(mv[i * stride + j], want_hi);
+            CHECK_DOUBLE(mr[i * stride + j], want_lo);
+        }
+    }
+}
+
+// The classic case the container exists for: a sum whose exact value needs far
+// more than a double, where the residual says how much the answer was off by.
+static void
+test_residual_recovers_cancellation()
+{
+    cbfp::ColumnBlockMatrix a(1, 1);
+    const double big = 1e300, one = 1.0;
+    a.add_column(0, &big);
+    a.add_column(0, &one);
+
+    // 1e300 + 1 is not representable, so the double is just 1e300 and the
+    // residual is what naive summation silently threw away.
+    double lo = 0.0;
+    const double hi = a.to_double(0, 0, &lo);
+    CHECK_DOUBLE(hi, 1e300);
+    CHECK_DOUBLE(lo, 1.0);
+
+    // 0.1 added ten times. The double 0.1 is 3602879701896397 * 2^-55, so ten
+    // of them come to 4503599627370496.25 * 2^-52 -- a quarter of the way
+    // above 1.0, which rounds down to exactly 1.0 and leaves 2^-54 behind.
+    cbfp::ColumnBlockMatrix t(1, 1);
+    const double tenth = 0.1;
+    for (int k = 0; k < 10; ++k) t.add_column(0, &tenth);
+    double tlo = 0.0;
+    const double thi = t.to_double(0, 0, &tlo);
+    CHECK_DOUBLE(thi, 1.0);
+    CHECK_DOUBLE(tlo, std::ldexp(1.0, -54));
+
+    // And the pair reconstructs: subtracting the double leaves the residual.
+    cbfp::ColumnBlockMatrix u(1, 1);
+    for (int k = 0; k < 10; ++k) u.add_column(0, &tenth);
+    const double minus = -thi;
+    u.add_column(0, &minus);
+    CHECK_DOUBLE(u.to_double(0, 0), tlo);
+}
+
 // The public survey is what a producer computes so an accumulator need not.
 // It has to agree with what the accumulator would have worked out itself,
 // or preallocating from it is worse than useless.
@@ -1312,6 +1452,8 @@ main()
     test_threaded_matches_serial();
     test_public_survey();
     test_presized_matches_adaptive();
+    test_readback_residual();
+    test_residual_recovers_cancellation();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
