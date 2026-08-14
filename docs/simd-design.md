@@ -874,11 +874,13 @@ Slightly *over* 2x single-threaded on the CPU rather than exactly 2x: at
 n = 2048 full storage is 34.8 MB against 32 MiB of L3 while the triangle is
 18.1 MB, so halving the footprint also buys back cache residency.
 
-The GPU's 1.4-1.5x is short of the CPU's 2x and **the reason is not measured**.
-The candidate is that the grid maps one column per y index, so a block on
-column 0 walks `n` entries while a block on column `n-1` walks one, and the
-launch retires at the pace of the longest. Flattening the packed triangle
-across the grid would fix that if so. Untested — do not repeat it as fact.
+The GPU's 1.4-1.5x is short of the CPU's 2x, and it is **not** load imbalance
+-- that hypothesis was recorded here as a candidate and is now measured and
+wrong. See the per-block fixed cost in the remaining-work list: a uniform
+`n/2 x n` matrix, with no triangle and no imbalance at all, costs the same per
+stored element as the triangle does. Nothing about the triangular shape is
+responsible; the triangle simply keeps one block per column while halving the
+elements, so it pays the whole per-block constant for half the work.
 
 ## Readback: the rounded double and its residual
 
@@ -1033,10 +1035,28 @@ out of the library have all landed since the last revision of this list, along
 with symmetric storage and readback residuals, which were not on it. Carry-save
 at radix 52 came off it by being measured rather than by being done.
 
-1. **Why the triangle gains less on the GPU than the CPU** -- 1.4-1.5x against
-   2.0-2.2x. The candidate is grid load imbalance, one column per y index, and
-   it is unmeasured. Cheap to settle and it either recovers the missing 2x or
-   removes a wrong explanation from this document.
+1. **Cut the per-block fixed cost, or stop paying it per column.** Measured at
+   ~470 ns a block against ~0.72 ns an element, so it is 91% of the work at 64
+   rows a column and still 14% at 4096:
+
+   | rows (1024 columns, so 1024 blocks either way) | ns/element | ns/block |
+   | --- | --- | --- |
+   | 64 | 8.058 | 516 |
+   | 256 | 2.289 | 586 |
+   | 1024 | 0.917 | 939 |
+   | 4096 | 0.835 | 3418 |
+
+   Two directions, and they compose: make the epilogue cheaper -- the occupancy
+   and flag reductions are an 8-step shared-memory tree, then a
+   `__threadfence` and a single-address `atomicAdd` that every block pays so
+   one block can be elected -- or launch fewer, fatter blocks. The grid is
+   `(1, cols)` once `cols >= 1024`, so a 4096-column matrix launches 4096
+   blocks and the "cap the whole grid" rule above is quietly not in force
+   there. Capping it for real means a block spanning several columns, which
+   the per-column reductions would have to follow.
+
+   This is what the triangle's missing 2x turned out to be, and it is not a
+   triangle problem: any workload with short columns pays it.
 
 2. **Multi-batch folding on the device.** Previously ruled out on the grounds
    that every input matrix has to be vetted separately; pre-sizing removed that
