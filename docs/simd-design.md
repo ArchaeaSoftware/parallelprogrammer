@@ -607,6 +607,29 @@ above shows the same thing as throughput; this is where it comes from.
 because `validate_host_survey` passes the column's current exponent as the
 floor, so the significand pass is skipped once a column is settled.
 
+**Fusing the copy with the survey was tried and does not pay.** The staged path
+walks 33.6 MB twice, once to copy and once to survey, and a column's 512 KB
+slice ought to be hot in cache the instant its copy finishes. Surveying it
+there measured *slower* through the library -- 3206 us a batch against 2969
+median, ranges not overlapping -- and isolated from the library it is
+1.01-1.04x, which is nothing:
+
+| staging destination | two-pass | fused | |
+| --- | --- | --- | --- |
+| ordinary memory | 2541 us | 2434 | 0.96x |
+| `cudaHostAlloc`, mapped | 2571 | 2550 | 0.99x |
+
+So the two passes are not paying for locality that fusing could recover. A
+batch is 33.6 MB against 32 MiB of L3, so it just misses either way, and the
+survey is not memory-bound enough for a per-column slice to matter. The
+regression inside the library on top of that is the interleaving itself:
+`require_fit` runs between column copies and touches column state, where the
+unfused form leaves the copy loop a clean streaming run.
+
+The staging copy therefore stays a copy. What removes it is `acquire_input`,
+which removes it entirely rather than making it cheaper -- 705 us a batch
+against 2969.
+
 Unresolved: 1257 us for the bare kernel against ~1760 through the container for
 the same work. The container adds per-column descriptor handling the prototype
 had none of, which is the obvious candidate and has not been confirmed. Do not
