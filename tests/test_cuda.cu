@@ -615,6 +615,158 @@ test_errors()
     }
 }
 
+// The same cross-check, on a triangular accumulator. Column j stores
+// column_rows(j) entries beginning at column_first_row(j), so both the
+// download and the host lookup have to be indexed through that rather than by
+// the matrix dimension.
+template <typename Gen>
+void
+cross_check_symmetric(const char *name, std::size_t n, cbfp::Uplo uplo,
+                      int nbatches, Gen gen)
+{
+    std::vector<std::vector<double>> batches(nbatches,
+                                             std::vector<double>(n * n, 0.0));
+    for (int b = 0; b < nbatches; ++b) {
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t j = 0; j <= i; ++j) {
+                const double v = gen(i, j, b);
+                batches[b][j * n + i] = v;  // column-major
+                batches[b][i * n + j] = v;
+            }
+        }
+    }
+
+    cbfp::ColumnBlockMatrix cpu(n, uplo);
+    for (int b = 0; b < nbatches; ++b) {
+        cpu.add_matrix_col_major(batches[b].data());
+    }
+
+    cbfp::CudaColumnBlockMatrix gpu(n, uplo);
+    gpu.reserve_like(cpu);
+    for (int b = 0; b < nbatches; ++b) {
+        gpu.add_matrix_col_major(batches[b].data());
+    }
+
+    std::size_t mismatches = 0;
+    std::string first;
+    for (std::size_t j = 0; j < n; ++j) {
+        if (gpu.column_exponent(j) != cpu.column_exponent(j) ||
+            gpu.column_limbs(j) != cpu.column_limbs(j) ||
+            gpu.column_rows(j) != cpu.column_rows(j) ||
+            gpu.column_first_row(j) != cpu.column_first_row(j)) {
+            ++mismatches;
+            continue;
+        }
+        const std::vector<std::uint64_t> dev = gpu.download_column(j);
+        const std::size_t nl = cpu.column_limbs(j);
+        const std::size_t cr = cpu.column_rows(j);
+        const std::size_t f0 = cpu.column_first_row(j);
+        for (std::size_t s = 0; s < cr; ++s) {
+            const std::vector<std::uint64_t> host = cpu.entry_limbs(f0 + s, j);
+            for (std::size_t k = 0; k < nl; ++k) {
+                if (host[k] == dev[k * cr + s]) continue;
+                ++mismatches;
+                if (first.empty()) {
+                    char buf[256];
+                    std::snprintf(buf, sizeof buf,
+                                  " first at (%zu,%zu) limb %zu: cpu %016llx "
+                                  "gpu %016llx",
+                                  f0 + s, j, k, (unsigned long long)host[k],
+                                  (unsigned long long)dev[k * cr + s]);
+                    first = buf;
+                }
+            }
+        }
+    }
+    check(mismatches == 0, std::string(name) + ": " +
+                               std::to_string(mismatches) + " mismatches" +
+                               first);
+}
+
+void
+test_symmetric()
+{
+    // Both triangles, and a ragged n so the grid-stride tail is exercised on
+    // columns whose lengths are not multiples of a warp.
+    cross_check_symmetric(
+        "sym 512 lower, 3 batches", 512, cbfp::Uplo::Lower, 3,
+        [](std::size_t, std::size_t, int) { return random_value(8); });
+    cross_check_symmetric(
+        "sym 512 upper, 3 batches", 512, cbfp::Uplo::Upper, 3,
+        [](std::size_t, std::size_t, int) { return random_value(8); });
+    cross_check_symmetric(
+        "sym 257 lower ragged, 2 batches", 257, cbfp::Uplo::Lower, 2,
+        [](std::size_t, std::size_t, int) { return random_value(16); });
+    cross_check_symmetric(
+        "sym 129 upper ragged, 2 batches", 129, cbfp::Uplo::Upper, 2,
+        [](std::size_t, std::size_t, int) { return random_value(16); });
+
+    // Divergent exponents, which force rescales and widens on columns whose
+    // lengths differ -- the case where a per-column row count that was left
+    // as the matrix dimension would read or write past the short columns.
+    cross_check_symmetric(
+        "sym 128 lower wide spread, 3 batches", 128, cbfp::Uplo::Lower, 3,
+        [](std::size_t, std::size_t, int) { return random_value(400); });
+
+    // Degenerate sizes, where the last column holds a single entry.
+    cross_check_symmetric(
+        "sym 1", 1, cbfp::Uplo::Lower, 2,
+        [](std::size_t, std::size_t, int) { return random_value(4); });
+    cross_check_symmetric(
+        "sym 8 upper", 8, cbfp::Uplo::Upper, 2,
+        [](std::size_t, std::size_t, int) { return random_value(4); });
+
+    // The shape itself, and half the device memory.
+    {
+        cbfp::CudaColumnBlockMatrix lo(256, cbfp::Uplo::Lower);
+        cbfp::CudaColumnBlockMatrix up(256, cbfp::Uplo::Upper);
+        cbfp::CudaColumnBlockMatrix full(256, 256);
+        bool shape_ok = lo.symmetric() && !full.symmetric();
+        for (std::size_t j = 0; j < 256; ++j) {
+            shape_ok = shape_ok && lo.column_rows(j) == 256 - j &&
+                       lo.column_first_row(j) == j &&
+                       up.column_rows(j) == j + 1 &&
+                       up.column_first_row(j) == 0;
+        }
+        check(shape_ok, "device triangular columns have the right extents");
+
+        cbfp::ColumnBlockMatrix cpu(256, cbfp::Uplo::Lower);
+        std::vector<double> v(256 * 256, 1.0);
+        cpu.add_matrix_col_major(v.data());
+        lo.reserve_like(cpu);
+        full.reserve_like(cbfp::ColumnBlockMatrix(256, 256));
+        check(lo.memory_bytes() < full.memory_bytes(),
+              "and cost less device memory than full storage");
+    }
+
+    // reserve_like has to refuse a mismatched shape: a triangular column is a
+    // different length, so full-storage widths would size the wrong entries.
+    {
+        cbfp::ColumnBlockMatrix cpu_full(64, 64);
+        std::vector<double> v(64 * 64, 1.0);
+        cpu_full.add_matrix_col_major(v.data());
+        cbfp::CudaColumnBlockMatrix gpu_sym(64, cbfp::Uplo::Lower);
+        bool threw = false;
+        try {
+            gpu_sym.reserve_like(cpu_full);
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        check(threw, "reserve_like rejects a mismatched symmetry");
+
+        cbfp::ColumnBlockMatrix cpu_lo(64, cbfp::Uplo::Lower);
+        cpu_lo.add_matrix_col_major(v.data());
+        cbfp::CudaColumnBlockMatrix gpu_up(64, cbfp::Uplo::Upper);
+        threw = false;
+        try {
+            gpu_up.reserve_like(cpu_lo);
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        check(threw, "reserve_like rejects a mismatched uplo");
+    }
+}
+
 }  // namespace
 
 int
@@ -633,6 +785,7 @@ main()
     test_rescale();
     test_acquired_input();
     test_errors();
+    test_symmetric();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

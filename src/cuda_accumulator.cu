@@ -105,6 +105,14 @@ struct DeviceSurvey {
     int nonfinite;
 };
 
+// A column's stored length and where it starts. Fixed at construction, so
+// unlike ColumnDesc this never goes stale and both kernels can read it
+// without being sequenced against a descriptor sync.
+struct ColumnShape {
+    unsigned rows;
+    unsigned first_row;
+};
+
 struct ColumnDesc {
     // One base per limb position, so widening appends rather than moves.
     // A warp's threads all work different rows of the same limb column, so
@@ -156,7 +164,8 @@ split_device(double v, unsigned long long &mantissa, int &exponent, int &top,
 // reading the column, and the trailing-zero count is a few ALU ops on a value
 // already in registers. One exact pass is both simpler and cheaper.
 __global__ void
-survey_kernel(const double *__restrict__ values, std::size_t rows,
+survey_kernel(const double *__restrict__ values,
+              const ColumnShape *__restrict__ shapes,
               std::size_t col_stride, DeviceSurvey *__restrict__ out)
 {
     __shared__ int s_min[kBlock];
@@ -166,7 +175,10 @@ survey_kernel(const double *__restrict__ values, std::size_t rows,
 
     const unsigned tid = threadIdx.x;
     const unsigned j = blockIdx.y;
-    const double *col = values + static_cast<std::size_t>(j) * col_stride;
+    const ColumnShape sh = shapes[j];
+    const double *col = values + static_cast<std::size_t>(j) * col_stride +
+                        sh.first_row;
+    const std::size_t rows = sh.rows;
 
     int tmin = INT_MAX;
     int tmax = INT_MIN;
@@ -228,7 +240,8 @@ survey_kernel(const double *__restrict__ values, std::size_t rows,
 template <int kRadix>
 __global__ void
 accumulate_kernel(const ColumnDesc *__restrict__ cols,
-                  const double *__restrict__ values, std::size_t rows,
+                  const double *__restrict__ values,
+                  const ColumnShape *__restrict__ shapes,
                   std::size_t col_stride, int *__restrict__ occupancy_device,
                   int *__restrict__ occupancy_host,
                   unsigned *__restrict__ ticket, unsigned ncols)
@@ -246,7 +259,10 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols,
 
     const unsigned j = blockIdx.y;
     const ColumnDesc c = cols[j];
-    const double *col = values + static_cast<std::size_t>(j) * col_stride;
+    const ColumnShape sh = shapes[j];
+    const double *col = values + static_cast<std::size_t>(j) * col_stride +
+                        sh.first_row;
+    const std::size_t rows = sh.rows;
 
     __shared__ int s_lim[kBlock];
     const unsigned tid = threadIdx.x;
@@ -468,6 +484,77 @@ CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t rows, std::size_t cols)
         cuda(Malloc(&descriptors_, cols_ * sizeof(ColumnDesc)));
         cuda(Malloc(&survey_out_, cols_ * sizeof(DeviceSurvey)));
     }
+    init_columns();
+}
+
+CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t n, Uplo uplo)
+    : CudaColumnBlockMatrix(n, n)
+{
+    symmetric_ = true;
+    uplo_ = uplo;
+    init_columns();
+}
+
+// Fills in each column's stored length and first row, and publishes them to
+// the device. Called again by the symmetric constructor because the
+// delegated-to one has already run with the full shape.
+void
+CudaColumnBlockMatrix::init_columns()
+{
+    std::vector<ColumnShape> shapes(cols_);
+    for (std::size_t j = 0; j < cols_; ++j) {
+        Column &c = cols_state_[j];
+        if (symmetric_) {
+            c.rows = Uplo::Lower == uplo_ ? rows_ - j : j + 1;
+            c.first_row = Uplo::Lower == uplo_ ? j : 0;
+        } else {
+            c.rows = rows_;
+            c.first_row = 0;
+        }
+        shapes[j].rows = static_cast<unsigned>(c.rows);
+        shapes[j].first_row = static_cast<unsigned>(c.first_row);
+    }
+    if (0 == cols_) return;
+    if (nullptr == shapes_) {
+        cuda(Malloc(&shapes_, cols_ * sizeof(ColumnShape)));
+    }
+    cuda(Memcpy(shapes_, shapes.data(), cols_ * sizeof(ColumnShape),
+                cudaMemcpyHostToDevice));
+}
+
+std::size_t
+CudaColumnBlockMatrix::column_rows(std::size_t j) const
+{
+    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    return cols_state_[j].rows;
+}
+
+std::size_t
+CudaColumnBlockMatrix::column_first_row(std::size_t j) const
+{
+    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    return cols_state_[j].first_row;
+}
+
+// The same fold ColumnBlockMatrix uses: Lower puts (i, j) and (j, i) both in
+// column min(i, j) at slot |i - j|, Upper in column max(i, j) at slot
+// min(i, j).
+void
+CudaColumnBlockMatrix::locate(std::size_t i, std::size_t j, std::size_t &col,
+                              std::size_t &slot) const
+{
+    if (!symmetric_) {
+        col = j;
+        slot = i;
+        return;
+    }
+    if (Uplo::Lower == uplo_) {
+        col = std::min(i, j);
+        slot = i < j ? j - i : i - j;
+    } else {
+        col = std::max(i, j);
+        slot = std::min(i, j);
+    }
 }
 
 CudaColumnBlockMatrix::~CudaColumnBlockMatrix()
@@ -480,6 +567,7 @@ CudaColumnBlockMatrix::~CudaColumnBlockMatrix()
     }
     cudaFree(descriptors_);
     cudaFree(survey_out_);
+    cudaFree(shapes_);
     cudaFree(occupancy_device_);
     cudaFreeHost(occupancy_host_);
     cudaFree(ticket_);
@@ -529,12 +617,12 @@ CudaColumnBlockMatrix::reserve_column(std::size_t j, int exponent,
     c.nlimbs = limbs_for_bits(bits) < 1 ? 1 : limbs_for_bits(bits);
     c.reserved = true;
 
-    if (0 != rows_) {
+    if (0 != c.rows) {
         // One allocation per limb position. The stream-ordered pool is what
         // makes that affordable -- plain cudaMalloc is tens of microseconds a
         // call, and a wide column needs tens of them. Widening later appends
         // to `bases` without disturbing anything already allocated.
-        const std::size_t bytes = rows_ * sizeof(limb_t);
+        const std::size_t bytes = c.rows * sizeof(limb_t);
         c.bases.resize(c.nlimbs);
         for (std::size_t k = 0; k < c.nlimbs; ++k) {
             cuda(MallocAsync(&c.bases[k], bytes, 0));
@@ -562,13 +650,13 @@ CudaColumnBlockMatrix::grow_column(std::size_t j, std::size_t needed)
     if (c.nlimbs >= needed) return;
     synchronize();
 
-    const std::size_t bytes = rows_ * sizeof(limb_t);
-    const dim3 grid = launch_grid(rows_, 1);
+    const std::size_t bytes = c.rows * sizeof(limb_t);
+    const dim3 grid = launch_grid(c.rows, 1);
     for (std::size_t k = c.nlimbs; k < needed; ++k) {
         limb_t *fresh = nullptr;
         cuda(MallocAsync(&fresh, bytes, st_compute_));
         sign_fill_kernel<<<grid, kBlock, 0, st_compute_>>>(
-            fresh, c.bases[k - 1], rows_);
+            fresh, c.bases[k - 1], c.rows);
         c.bases.push_back(fresh);
     }
     c.nlimbs = needed;
@@ -602,8 +690,8 @@ CudaColumnBlockMatrix::rescale_column(std::size_t j, int new_exponent)
         std::max(limbs_for_bits(widened), c.nlimbs + shift / limbs::kLimbBits);
     grow_column(j, ndst);  // synchronizes, and sign-fills what it appends
 
-    shift_left_kernel<<<launch_grid(rows_, 1), kBlock, 0, st_compute_>>>(
-        c.dev_bases, static_cast<unsigned>(c.nlimbs), rows_, shift);
+    shift_left_kernel<<<launch_grid(c.rows, 1), kBlock, 0, st_compute_>>>(
+        c.dev_bases, static_cast<unsigned>(c.nlimbs), c.rows, shift);
 
     c.max_addend_bits += shift;
     c.exponent = new_exponent;
@@ -668,8 +756,10 @@ CudaColumnBlockMatrix::reserve_for(const double *b, std::size_t count,
     for (std::size_t j = 0; j < cols_; ++j) {
         // A column with no scale yet needs the exact true-ulp minimum, so the
         // floor is one nothing can clear.
-        const kernels::Survey sv = kernels::survey()(
-            b + j * stride, rows_, std::numeric_limits<long long>::max());
+        const Column &cj = cols_state_[j];
+        const kernels::Survey sv =
+            kernels::survey()(b + j * stride + cj.first_row, cj.rows,
+                              std::numeric_limits<long long>::max());
         if (sv.nonfinite) {
             throw std::domain_error(
                 "cbfp: cannot reserve from a non-finite value");
@@ -694,7 +784,8 @@ CudaColumnBlockMatrix::reserve_for_device(const double *b, std::size_t count,
     cuda(MemcpyAsync(survey_out_, surveys.data(), cols_ * sizeof(DeviceSurvey),
                      cudaMemcpyHostToDevice, st_compute_));
     survey_kernel<<<launch_grid(rows_, cols_), kBlock, 0, st_compute_>>>(
-        b, rows_, stride, static_cast<DeviceSurvey *>(survey_out_));
+        b, static_cast<const ColumnShape *>(shapes_), stride,
+        static_cast<DeviceSurvey *>(survey_out_));
     cuda(MemcpyAsync(surveys.data(), survey_out_, cols_ * sizeof(DeviceSurvey),
                      cudaMemcpyDeviceToHost, st_compute_));
     synchronize();
@@ -720,6 +811,14 @@ CudaColumnBlockMatrix::reserve_like(const ColumnBlockMatrix &cpu)
     if (cpu.rows() != rows_ || cpu.cols() != cols_) {
         throw std::runtime_error(
             "cbfp: reserve_like requires matching dimensions");
+    }
+    // Same shape, not merely the same extent: a triangular column is a
+    // different length, so copying a full accumulator's widths into a
+    // triangular one would reserve the right bits for the wrong entries.
+    if (cpu.symmetric() != symmetric_ ||
+        (symmetric_ && cpu.uplo() != uplo_)) {
+        throw std::runtime_error(
+            "cbfp: reserve_like requires the same symmetry and uplo");
     }
     for (std::size_t j = 0; j < cols_; ++j) {
         reserve_column(j, cpu.column_exponent(j), cpu.column_bit_width(j));
@@ -751,7 +850,7 @@ CudaColumnBlockMatrix::memory_bytes() const
 {
     std::size_t total = 0;
     for (const auto &c : cols_state_) {
-        total += c.nlimbs * rows_ * sizeof(limb_t);
+        total += c.nlimbs * c.rows * sizeof(limb_t);
     }
     return total;
 }
@@ -810,8 +909,9 @@ CudaColumnBlockMatrix::validate_host_survey(const double *b,
     // measured flat on this path, helped one shape of the staged path and hurt
     // another.
     for (std::size_t j = 0; j < cols_; ++j) {
-        const kernels::Survey sv = kernels::survey()(b + j * col_stride, rows_,
-                                                     cols_state_[j].exponent);
+        const Column &cj = cols_state_[j];
+        const kernels::Survey sv = kernels::survey()(
+            b + j * col_stride + cj.first_row, cj.rows, cj.exponent);
         if (sv.nonfinite) {
             throw std::domain_error(
                 "cbfp: cannot accumulate a non-finite value");
@@ -850,9 +950,14 @@ CudaColumnBlockMatrix::add_matrix_col_major(const double *b,
             cuda(EventSynchronize(s.ev_done));
             s.in_flight = false;
         }
+        // Only the slice the kernel will read, staged at the offset it reads
+        // it from, so a triangular accumulator halves this copy as well as the
+        // bytes that later cross the bus.
         for (std::size_t j = 0; j < cols_; ++j) {
-            std::memcpy(s.mapped + j * rows_, b + j * stride,
-                        rows_ * sizeof(double));
+            const Column &cj = cols_state_[j];
+            std::memcpy(s.mapped + j * rows_ + cj.first_row,
+                        b + j * stride + cj.first_row,
+                        cj.rows * sizeof(double));
         }
     }
 
@@ -913,7 +1018,8 @@ CudaColumnBlockMatrix::accumulate_device(const double *b,
                      cudaMemcpyHostToDevice, st_compute_));
 
     survey_kernel<<<grid, kBlock, 0, st_compute_>>>(
-        b, rows_, col_stride, static_cast<DeviceSurvey *>(survey_out_));
+        b, static_cast<const ColumnShape *>(shapes_), col_stride,
+        static_cast<DeviceSurvey *>(survey_out_));
     // This is the drain the host path avoids: with the input already on the
     // device there is nothing to survey on the host, so the verdict has to come
     // back before the accumulate can be allowed to run.
@@ -951,7 +1057,8 @@ CudaColumnBlockMatrix::launch_accumulate(const double *b,
     const dim3 grid = launch_grid(rows_, cols_);
 
     accumulate_kernel<64><<<grid, kBlock, 0, st_compute_>>>(
-        static_cast<const ColumnDesc *>(descriptors_), b, rows_, col_stride,
+        static_cast<const ColumnDesc *>(descriptors_), b,
+        static_cast<const ColumnShape *>(shapes_), col_stride,
         occupancy_device_, occupancy_host_, ticket_,
         static_cast<unsigned>(cols_));
 }
@@ -961,12 +1068,14 @@ CudaColumnBlockMatrix::entry_limbs(std::size_t i, std::size_t j) const
 {
     check_index(i, j);
     synchronize();
-    const Column &c = cols_state_[j];
+    std::size_t col = 0, slot = 0;
+    locate(i, j, col, slot);
+    const Column &c = cols_state_[col];
     std::vector<limb_t> v(c.nlimbs);
     // One small copy per limb position. This is a readback path, not a hot
     // one; a bulk download would gather whole limb arrays instead.
     for (std::size_t k = 0; k < c.nlimbs; ++k) {
-        cuda(Memcpy(&v[k], c.bases[k] + i, sizeof(limb_t),
+        cuda(Memcpy(&v[k], c.bases[k] + slot, sizeof(limb_t),
                     cudaMemcpyDeviceToHost));
     }
     return v;
@@ -978,10 +1087,10 @@ CudaColumnBlockMatrix::download_column(std::size_t j) const
     if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
     synchronize();
     const Column &c = cols_state_[j];
-    std::vector<limb_t> out(c.nlimbs * rows_);
+    std::vector<limb_t> out(c.nlimbs * c.rows);
     for (std::size_t k = 0; k < c.nlimbs; ++k) {
-        cuda(Memcpy(out.data() + k * rows_, c.bases[k], rows_ * sizeof(limb_t),
-                    cudaMemcpyDeviceToHost));
+        cuda(Memcpy(out.data() + k * c.rows, c.bases[k],
+                    c.rows * sizeof(limb_t), cudaMemcpyDeviceToHost));
     }
     return out;
 }

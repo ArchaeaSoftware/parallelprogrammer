@@ -22,6 +22,7 @@
 #include "cbfp/limb_column.hpp"
 #include "cbfp/limbs.hpp"
 #include "cbfp/survey.hpp"
+#include "cbfp/uplo.hpp"
 
 namespace cbfp {
 
@@ -32,13 +33,6 @@ active_kernel();
 namespace detail {
 class ThreadPool;
 }
-
-// Which triangle of a symmetric matrix is the stored one, following LAPACK's
-// uplo. Lower keeps entries with i >= j, so column j holds rows j..n-1; Upper
-// keeps i <= j, so column j holds rows 0..j. Either way a column's stored rows
-// stay contiguous, which is what lets the vector and coalescing properties of
-// the layout survive being made triangular.
-enum class Uplo { Lower, Upper };
 
 class ColumnBlockMatrix {
 public:

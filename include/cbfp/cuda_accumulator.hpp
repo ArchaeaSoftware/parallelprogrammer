@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "cbfp/limbs.hpp"
+#include "cbfp/uplo.hpp"
 
 // CUDA's opaque handle types, forward-declared rather than pulled in from
 // cuda_runtime.h so this header stays usable from a plain C++ translation unit
@@ -48,6 +49,16 @@ class CudaColumnBlockMatrix {
 public:
     CudaColumnBlockMatrix(std::size_t rows, std::size_t cols);
 
+    // Symmetric n x n, storing one triangle, exactly as ColumnBlockMatrix
+    // does. Column j holds n-j entries (Lower) or j+1 (Upper), and each
+    // column's stored rows stay contiguous, so a warp still reads 32
+    // consecutive rows of one limb column as a single coalesced access.
+    //
+    // The kernels read only the stored slice of an input matrix, so the
+    // bytes crossing PCIe halve along with the device memory. The input is
+    // taken to be symmetric and that is not checked.
+    CudaColumnBlockMatrix(std::size_t n, Uplo uplo);
+
     // Declared, not implicit: the worker pool is held by unique_ptr to an
     // incomplete type, so the destructor must be defined where that is.
     ~CudaColumnBlockMatrix();
@@ -58,6 +69,16 @@ public:
     std::size_t rows() const { return rows_; }
 
     std::size_t cols() const { return cols_; }
+
+    bool symmetric() const { return symmetric_; }
+
+    // Only meaningful when symmetric().
+    Uplo uplo() const { return uplo_; }
+
+    // Entries stored in column j, and the logical row the first of them is.
+    // rows() and 0 unless symmetric.
+    std::size_t column_rows(std::size_t j) const;
+    std::size_t column_first_row(std::size_t j) const;
 
     // --- pre-sizing --------------------------------------------------------
 
@@ -154,6 +175,12 @@ private:
         int exponent = 0;
         bool reserved = false;
         std::size_t nlimbs = 0;
+
+        // Entries stored in this column and the logical row of the first,
+        // held per column because a triangular column has its own length and
+        // every allocation, widen and rescale is sized from it.
+        std::size_t rows = 0;
+        std::size_t first_row = 0;
         // One device allocation per limb position, mirroring the CPU's
         // vector<LimbColumn>. Widening is then an append: the existing
         // allocations are not touched at all.
@@ -193,6 +220,10 @@ private:
     };
 
     void check_index(std::size_t i, std::size_t j) const;
+    // Logical (i, j) to the column that stores it and the slot within it.
+    void locate(std::size_t i, std::size_t j, std::size_t &col,
+                std::size_t &slot) const;
+    void init_columns();
     void accumulate_device(const double *b, std::size_t col_stride);
     void launch_accumulate(const double *b, std::size_t col_stride);
     void validate_host_survey(const double *b, std::size_t col_stride);
@@ -207,6 +238,8 @@ private:
 
     std::size_t rows_;
     std::size_t cols_;
+    bool symmetric_ = false;
+    Uplo uplo_ = Uplo::Lower;
 
     // Deliberately no skew between limb columns, unlike the CPU. The CPU needs
     // it because eight lanes touch nlimbs arrays at the same row offset in
@@ -236,6 +269,11 @@ private:
     bool descriptors_stale_ = true;
     void *survey_out_ =
         nullptr;  // device survey results, for device-side input
+
+    // Per-column stored length and first row, device-side. Fixed at
+    // construction and never rewritten, so both kernels can read it without
+    // the staleness the descriptors have to manage.
+    void *shapes_ = nullptr;  // device ColumnShape[]
 
     Slot slots_[2];
     int slot_ = 0;
