@@ -900,7 +900,7 @@ half-applied, so there is no corrupted state to explain. The survey can also be
 folded into the copy where one is happening anyway, so the data lands in device
 memory and its extent is known from the same pass.
 
-### Design intent: measured occupancy in place of a derived width (still open)
+### Measured occupancy in place of a derived width (considered, dropped)
 
 `fit_column` sizes a column from
 
@@ -1260,10 +1260,19 @@ the whole of it. One slab carved into slices would fix that and would give up
 the property the layout exists for -- widening appends without moving anything
 -- so it is not obviously worth having.
 
-Still known: measured occupancy could relax the derived width bound where
-cancellation has kept a column small, which is worth under a limb in the
-ordinary case and is the lowest-value item here. It is a candidate for deleting
-from this list rather than doing.
+~~Measured occupancy could relax the derived width bound.~~ **Dropped, not
+done.** It is worth under a limb where cancellation has kept a column small,
+against a width bound that has to stay conservative for the kernels to skip
+overflow checks at all -- which is the property the whole accumulate path rests
+on. Trading that for a fraction of a limb is not a trade.
+
+That leaves `column_occupancy` with no consumer inside the library; relaxing the
+bound was what it was for. It stays as a diagnostic, because a caller can use it
+to see whether the surveys they supplied were over-conservative, and because
+removing it would not buy much: the kernel epilogue is 12.7 ns a block in total,
+occupancy is roughly 4 ns of that, and at realistic column lengths that is under
+1% of a block. The detector flags share the same reduction and elected block and
+are load-bearing, so the machinery does not go away either way.
 
 ## Measurement caveats
 
