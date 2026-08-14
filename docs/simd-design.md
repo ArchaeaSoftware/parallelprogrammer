@@ -76,9 +76,53 @@ AVX-512 loop's trip count — it bites hardest in the divergent case where the
 bound looks best. Normalization before readback is not charged either.
 
 So the CPU path stays canonical at radix 64 for now, which is what the code
-does, but the reason has changed: it is no longer "the measurement has not
-been run" but "the measurement says this is where the win is, and collecting
-it means implementing carry-save properly.
+does, but the reason has changed again -- see below, where it was implemented
+and measured rather than bounded.
+
+### Radix 52 implemented and measured
+
+The bound above was collected by deleting the carry chain, which is not an
+implementation. A real radix-52 carry-save AVX-512 accumulate was then written
+and checked against an independent integer reference before being timed, and
+it charges three things the bound never did:
+
+- **The offset is a division.** `shift/52` where radix 64 has `shift >> 6`.
+  There is no SIMD integer divide, so it is a magic multiply plus a shift, and
+  a second multiply to recover `bit`. Radix 64 pays none of this.
+- **The same range needs more limbs**: 1 -> 2, 2 -> 3, 4 -> 5, 8 -> 10. That
+  is 1.25-2x the accumulator memory, which costs nothing while it fits in
+  cache and a great deal when it does not.
+- **Normalization**, which turned out to be negligible: under 0.002 ns/elem
+  amortized over the 2048 addends the 11 bits of headroom allow.
+
+ns/elem, single-threaded, radix 52 including amortized normalization:
+
+| case | r64 | r52 | | past L3, r64 | r52 | |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 limb, spread 0 | 0.729 | 0.758 | **0.96x** | 0.769 | 0.945 | **0.81x** |
+| 2 limbs, spread 40 | 1.102 | 0.826 | 1.33x | 1.195 | 0.894 | 1.34x |
+| 4 limbs, spread 150 | 1.871 | 1.208 | 1.55x | 2.434 | 1.680 | 1.45x |
+| 8 limbs, spread 400 | 3.229 | 1.914 | 1.69x | 4.650 | 3.928 | 1.18x |
+
+**Carry-save is not a global win, and the bound's shape was misleading.** It
+loses outright on one-limb columns -- the narrowest and most common case, and
+the one the CPU's best single-thread rate is measured on -- because there is
+no carry chain to remove there and the width doubles anyway. And the widest
+case, where the bound looked best at 45-52%, is where the extra limbs cost
+most once the accumulator outgrows L3: 1.69x collapses to 1.18x.
+
+Where it pays is the middle, 2-4 limbs, at 1.33-1.55x, and that holds up past
+L3. So the useful form of this is not a global radix but a **per-column**
+choice on width, which the container is already shaped for since every column
+carries its own exponent and limb count. That doubles the kernel surface and
+every readback path, which is the cost to weigh against 1.3-1.5x on some
+columns and a loss on others.
+
+Two asymmetries in the comparison, in both directions: the radix-52 prototype
+does not compute the detector flags the shipped radix-64 kernel does (worth
+0.8-4.8%), and it does not interleave two row blocks the way that kernel does
+(worth ~7-10% at 2-4 limbs). Treat 1.3-1.5x as the shape of the answer, not a
+figure to three digits.
 
 ## The layout: limb-major `LimbColumn`
 
@@ -975,19 +1019,15 @@ Ping-pong input buffers, multi-batch folding on the CPU, and taking the survey
 out of the library have all landed since the last revision of this list, along
 with symmetric storage and readback residuals, which were not on it.
 
-1. **Carry-save at radix 52 on the CPU.** The largest measured win still
-   uncollected, for the cache-resident sizes where the CPU is issue-bound and
-   every instruction removed is time removed: deleting the carry chain outright
-   is worth 25-36% at 1-4 limbs and 45-52% at eight with divergent exponents.
-   Expect less -- at radix 52 a block's offsets span ~23% further, and that
-   range drives the AVX-512 loop's trip count. De-risk as prescribed above:
-   instantiate both radices and assert bit-identical `to_exact_decimal` over
-   the corpus.
-
-   Note this is a **CPU** item. `cuda_accumulator.cu` carries a `static_assert`
-   calling carry-save "the next milestone" for the device, which contradicts
-   the table above -- the GPU is bandwidth-bound and gains nothing. That
-   comment is stale and points the next reader at the wrong target.
+1. **Carry-save at radix 52 on the CPU, per column and not globally.** Now
+   measured with a real kernel rather than bounded: 1.33-1.55x at 2-4 limbs
+   and holding past L3, but **0.81-0.96x at one limb** and collapsing to 1.18x
+   at eight limbs once the accumulator outgrows cache. A global switch would
+   make the most common column shape slower. Selecting per column on width is
+   what the measurement argues for, and the container already carries a
+   per-column exponent and limb count to hang it on; the cost is two kernels
+   and two readback paths. De-risk as prescribed above: instantiate both
+   radices and assert bit-identical `to_exact_decimal` over the corpus.
 
 2. **Why the triangle gains less on the GPU than the CPU** -- 1.4-1.5x against
    2.0-2.2x. The candidate is grid load imbalance, one column per y index, and
