@@ -1066,57 +1066,7 @@ CudaColumnBlockMatrix::validate_host_survey(const double *b,
 // Validation therefore still happens *before* the accumulate is launched, so a
 // bad batch is rejected without having touched the accumulator -- which a
 // device-side survey cannot do without a round-trip that drains the pipeline.
-void
-CudaColumnBlockMatrix::add_matrix_col_major(const double *b,
-                                            std::size_t col_stride)
-{
-    if (0 == rows_ || 0 == cols_) return;
-    const std::size_t stride = col_stride ? col_stride : rows_;
 
-    // Only buffers this accumulator owns are read in place, because only for
-    // those is it tracking when the device has finished. Anything else is
-    // staged, so the caller's pointer may be reused the moment this returns
-    // whatever kind of memory it is -- the lifetime contract does not depend
-    // on where the caller got it, which is the trap the fast path used to set.
-    ensure_slots(rows_ * cols_);
-    Slot &s = slots_[slot_];
-    const bool borrowed = (b == s.mapped && rows_ == stride);
-    if (!borrowed) {
-        // A slot cannot be refilled until the kernel reading it has finished.
-        if (s.in_flight) {
-            cuda(EventSynchronize(s.ev_done));
-            s.in_flight = false;
-        }
-        // Only the slice the kernel will read, staged at the offset it reads
-        // it from, so a triangular accumulator halves this copy as well as the
-        // bytes that later cross the bus.
-        for (std::size_t j = 0; j < cols_; ++j) {
-            const Column &cj = cols_state_[j];
-            std::memcpy(s.mapped + j * rows_ + cj.first_row,
-                        b + j * stride + cj.first_row,
-                        cj.rows * sizeof(double));
-        }
-    }
-
-    if (presized_) {
-        // Nothing to learn: the extents were supplied, so no rescale or
-        // widen can be due and the survey would only confirm what is
-        // already known. A batch that contradicts that is caught by the
-        // accumulate kernel and reported at the next synchronization.
-        if (++submitted_matrices_ > declared_matrices_) {
-            throw std::runtime_error(
-                "cbfp: more matrices accumulated than were described to "
-                "the constructor; the width bound holds for that many and "
-                "no more");
-        }
-    } else {
-        validate_host_survey(s.mapped, rows_);
-    }
-    launch_accumulate(s.mapped, rows_);
-    cuda(EventRecord(s.ev_done, st_compute_));
-    s.in_flight = true;
-    slot_ ^= 1;
-}
 
 double *
 CudaColumnBlockMatrix::acquire_input()
@@ -1131,7 +1081,7 @@ CudaColumnBlockMatrix::acquire_input()
 }
 
 InputRead
-CudaColumnBlockMatrix::add_matrix_col_major_in_place(const double *b,
+CudaColumnBlockMatrix::add_matrix_col_major(const double *b,
                                                      std::size_t col_stride)
 {
     if (0 == rows_ || 0 == cols_) return InputRead();
@@ -1139,13 +1089,14 @@ CudaColumnBlockMatrix::add_matrix_col_major_in_place(const double *b,
 
     // The kernel dereferences this on the device, so pageable memory faults
     // rather than merely running slowly. Checked here, where the diagnostic
-    // can say what is wrong and what to allocate instead.
+    // can say what is wrong and what to allocate instead -- and checked at
+    // all because this path no longer has a staging copy to fall back on.
     cudaPointerAttributes attr{};
     const cudaError_t st = cudaPointerGetAttributes(&attr, b);
     if (cudaSuccess != st || nullptr == attr.devicePointer) {
         cudaGetLastError();  // an unregistered pointer leaves this sticky
         throw std::invalid_argument(
-            "cbfp: add_matrix_col_major_in_place needs page-locked, "
+            "cbfp: add_matrix_col_major needs page-locked, "
             "device-mapped host memory -- cudaHostAlloc with "
             "cudaHostAllocMapped, or cudaHostRegister with "
             "cudaHostRegisterMapped");
@@ -1164,6 +1115,16 @@ CudaColumnBlockMatrix::add_matrix_col_major_in_place(const double *b,
         validate_host_survey(b, stride);
     }
     launch_accumulate(static_cast<const double *>(attr.devicePointer), stride);
+
+    // A buffer from acquire_input is one of ours, and its slot's event is what
+    // that call blocks on. Keep the rotation's bookkeeping current so both
+    // ways of waiting stay correct: the handle below, and acquire_input.
+    Slot &s = slots_[slot_];
+    if (b == s.mapped && rows_ == stride) {
+        cuda(EventRecord(s.ev_done, st_compute_));
+        s.in_flight = true;
+        slot_ ^= 1;
+    }
 
     CUevent_st *ev = nullptr;
     cuda(EventCreateWithFlags(&ev, cudaEventDisableTiming));

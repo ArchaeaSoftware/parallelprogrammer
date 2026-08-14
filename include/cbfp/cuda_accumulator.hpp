@@ -190,22 +190,22 @@ public:
     // b + j*col_stride and its rows are contiguous (0 means tightly packed).
     // Throws std::domain_error on inf/NaN, and std::runtime_error if a column
     // was reserved too narrow or at too high an exponent for these values.
-    void add_matrix_col_major(const double *b, std::size_t col_stride = 0);
-
-    // A += B, reading B where it lies instead of staging a copy of it.
     //
-    // B must be page-locked and device-mapped -- cudaHostAlloc with
-    // cudaHostAllocMapped, or cudaHostRegister with cudaHostRegisterMapped --
-    // because the kernel dereferences it on the device. That is checked here
-    // rather than left to fault at the launch.
+    // **B must be page-locked and device-mapped** -- cudaHostAlloc with
+    // cudaHostAllocMapped, cudaHostRegister with cudaHostRegisterMapped, or a
+    // buffer from acquire_input(). Pageable memory is rejected, not copied.
     //
-    // B is still being read when this returns. Do not write to it until the
-    // returned handle says the read has finished. This is the same path
-    // acquire_input offers, for a caller that would rather own the buffer; the
-    // staging copy it avoids costs 1331 us at 65536x64, which is most of what
-    // separates the two rows of the table above.
-    InputRead add_matrix_col_major_in_place(const double *b,
-                                            std::size_t col_stride = 0);
+    // The library used to stage a copy of whatever it was handed, which cost
+    // 1331 us at 65536x64 and made the fast path something a caller had to
+    // know to ask for. Requiring pinned input removes the copy and, with it,
+    // the two-contract problem: there is now one rule, the same for every
+    // caller, and it is in the signature.
+    //
+    // That rule is the returned handle. The kernel streams B over PCIe and is
+    // still reading it when this returns, so do not write to B until the
+    // handle says the read has finished. Ignoring the handle is a statement
+    // that B will not be written again.
+    InputRead add_matrix_col_major(const double *b, std::size_t col_stride = 0);
 
     // The same, for input already resident in device memory.
     void add_matrix_col_major_device(const double *b,

@@ -40,6 +40,39 @@ check(bool ok, const std::string &what)
     }
 }
 
+// The CPU container still takes ordinary memory, so this is a pass-through.
+// Having both overloads lets a cross-check read the same on either side.
+void
+submit(cbfp::ColumnBlockMatrix &m, const std::vector<double> &v,
+       std::size_t col_stride = 0)
+{
+    m.add_matrix_col_major(v.data(), col_stride);
+}
+
+// The device path takes page-locked input only, so this is the copy a caller
+// now has to write for themselves -- made once, here, where it is visible.
+// It waits on the handle before the pinned buffer goes out of scope, which is
+// exactly the contract the API states rather than the library guessing at it.
+void
+submit(cbfp::CudaColumnBlockMatrix &g, const std::vector<double> &v,
+       std::size_t col_stride = 0)
+{
+    double *p = nullptr;
+    if (cudaSuccess !=
+        cudaHostAlloc(&p, v.size() * sizeof(double), cudaHostAllocMapped)) {
+        throw std::runtime_error("test: cudaHostAlloc failed");
+    }
+    std::memcpy(p, v.data(), v.size() * sizeof(double));
+    try {
+        cbfp::InputRead h = g.add_matrix_col_major(p, col_stride);
+        h.wait();
+    } catch (...) {
+        cudaFreeHost(p);
+        throw;
+    }
+    cudaFreeHost(p);
+}
+
 // Runs the same column-major batches through both implementations and
 // compares every stored limb.
 //
@@ -65,13 +98,13 @@ cross_check(const char *name, std::size_t rows, std::size_t cols, int nbatches,
 
     cbfp::ColumnBlockMatrix cpu(rows, cols);
     for (int b = 0; b < nbatches; ++b) {
-        cpu.add_matrix_col_major(batches[b].data());
+        submit(cpu, batches[b]);
     }
 
     cbfp::CudaColumnBlockMatrix gpu(rows, cols);
     gpu.reserve_like(cpu);
     for (int b = 0; b < nbatches; ++b) {
-        gpu.add_matrix_col_major(batches[b].data());
+        submit(gpu, batches[b]);
     }
 
     std::size_t mismatches = 0;
@@ -201,7 +234,7 @@ test_occupancy()
         }
         cbfp::CudaColumnBlockMatrix gpu(rows, cols);
         for (std::size_t j = 0; j < cols; ++j) gpu.reserve_column(j, 0, 256);
-        gpu.add_matrix_col_major(v.data());
+        submit(gpu, v);
         check(0 == gpu.column_occupancy(0), "occupancy: all positive, limb 0");
         check(0 == gpu.column_occupancy(1),
               "occupancy: one negative does not saturate to nlimbs-1");
@@ -225,10 +258,10 @@ test_occupancy()
                 for (auto &x : one) x = random_value(spread);
             }
             cbfp::ColumnBlockMatrix cpu(rows, cols);
-            for (auto &one : b) cpu.add_matrix_col_major(one.data());
+            for (auto &one : b) submit(cpu, one);
             cbfp::CudaColumnBlockMatrix gpu(rows, cols);
             gpu.reserve_like(cpu);
-            for (auto &one : b) gpu.add_matrix_col_major(one.data());
+            for (auto &one : b) submit(gpu, one);
 
             for (std::size_t j = 0; j < cols; ++j) {
                 const int occ = gpu.column_occupancy(j);
@@ -277,8 +310,8 @@ test_reserve_for()
     bool threw = false;
     try {
         for (int b = 0; b < nbatches; ++b) {
-            cpu.add_matrix_col_major(batch.data());
-            gpu.add_matrix_col_major(batch.data());
+            submit(cpu, batch);
+            submit(gpu, batch);
         }
     } catch (const std::exception &) {
         threw = true;
@@ -350,8 +383,8 @@ test_accumulated_bound()
     gpu.reserve_column(0, 0, 64);  // one limb, deliberately too narrow
 
     for (int k = 0; k < nbatches; ++k) {
-        gpu.add_matrix_col_major(b.data());
-        cpu.add_matrix_col_major(b.data());
+        submit(gpu, b);
+        submit(cpu, b);
     }
     check(gpu.column_limbs(0) > 1, "the column grew past its reservation");
 
@@ -443,8 +476,8 @@ test_rescale()
     gpu.reserve_for(b[0].data(), 1);
 
     for (int k = 0; k < nbatches; ++k) {
-        cpu.add_matrix_col_major(b[k].data());
-        gpu.add_matrix_col_major(b[k].data());
+        submit(cpu, b[k]);
+        submit(gpu, b[k]);
     }
 
     std::size_t coarse = 0, wrong = 0;
@@ -470,11 +503,11 @@ test_rescale()
             hi[i] = std::ldexp(1.0 + i, 0);
             lo[i] = std::ldexp(1.0 + i, -static_cast<int>(sh));
         }
-        c2.add_matrix_col_major(hi.data());
+        submit(c2, hi);
         g2.reserve_for(hi.data(), 2);
-        g2.add_matrix_col_major(hi.data());
-        c2.add_matrix_col_major(lo.data());
-        g2.add_matrix_col_major(lo.data());
+        submit(g2, hi);
+        submit(c2, lo);
+        submit(g2, lo);
         std::size_t bad = 0;
         for (std::size_t i = 0; i < 8; ++i) {
             if (!same_value(c2, g2, i, 0)) ++bad;
@@ -499,7 +532,7 @@ test_acquired_input()
     for (auto &x : data) x = random_value(150);
 
     cbfp::ColumnBlockMatrix cpu(rows, cols);
-    for (int b = 0; b < nbatches; ++b) cpu.add_matrix_col_major(data.data());
+    for (int b = 0; b < nbatches; ++b) submit(cpu, data);
 
     // Staged: the caller's buffer is copied, so it may be reused at once.
     cbfp::CudaColumnBlockMatrix staged(rows, cols);
@@ -508,7 +541,7 @@ test_acquired_input()
         std::vector<double> buf(n);
         for (int b = 0; b < nbatches; ++b) {
             buf = data;
-            staged.add_matrix_col_major(buf.data());
+            submit(staged, buf);
             std::fill(buf.begin(), buf.end(), 0.0);  // safe: it was copied
         }
     }
@@ -544,7 +577,7 @@ test_errors()
     {
         cbfp::ColumnBlockMatrix cpu(64, 2);
         std::vector<double> ok(64 * 2, 1.0);
-        cpu.add_matrix_col_major(ok.data());
+        submit(cpu, ok);
 
         cbfp::CudaColumnBlockMatrix gpu(64, 2);
         gpu.reserve_like(cpu);
@@ -552,7 +585,7 @@ test_errors()
         bad[70] = std::nan("");
         bool threw = false;
         try {
-            gpu.add_matrix_col_major(bad.data());
+            submit(gpu, bad);
         } catch (const std::domain_error &) {
             threw = true;
         }
@@ -561,7 +594,7 @@ test_errors()
         bad[70] = std::numeric_limits<double>::infinity();
         threw = false;
         try {
-            gpu.add_matrix_col_major(bad.data());
+            submit(gpu, bad);
         } catch (const std::domain_error &) {
             threw = true;
         }
@@ -576,7 +609,7 @@ test_errors()
         std::vector<double> v(64, 0.5);
         bool threw = false;
         try {
-            gpu.add_matrix_col_major(v.data());
+            submit(gpu, v);
         } catch (const std::runtime_error &) {
             threw = true;
         }
@@ -594,7 +627,7 @@ test_errors()
         std::vector<double> v(64, std::ldexp(1.0, 100));
         bool threw = false;
         try {
-            gpu.add_matrix_col_major(v.data());
+            submit(gpu, v);
         } catch (const std::runtime_error &) {
             threw = true;
         }
@@ -609,7 +642,7 @@ test_errors()
         std::vector<double> v(64 * 2, 1.0);
         bool threw = false;
         try {
-            gpu.add_matrix_col_major(v.data());
+            submit(gpu, v);
         } catch (const std::runtime_error &) {
             threw = true;
         }
@@ -640,13 +673,13 @@ cross_check_symmetric(const char *name, std::size_t n, cbfp::Uplo uplo,
 
     cbfp::ColumnBlockMatrix cpu(n, uplo);
     for (int b = 0; b < nbatches; ++b) {
-        cpu.add_matrix_col_major(batches[b].data());
+        submit(cpu, batches[b]);
     }
 
     cbfp::CudaColumnBlockMatrix gpu(n, uplo);
     gpu.reserve_like(cpu);
     for (int b = 0; b < nbatches; ++b) {
-        gpu.add_matrix_col_major(batches[b].data());
+        submit(gpu, batches[b]);
     }
 
     std::size_t mismatches = 0;
@@ -734,7 +767,7 @@ test_symmetric()
 
         cbfp::ColumnBlockMatrix cpu(256, cbfp::Uplo::Lower);
         std::vector<double> v(256 * 256, 1.0);
-        cpu.add_matrix_col_major(v.data());
+        submit(cpu, v);
         lo.reserve_like(cpu);
         full.reserve_like(cbfp::ColumnBlockMatrix(256, 256));
         check(lo.memory_bytes() < full.memory_bytes(),
@@ -746,7 +779,7 @@ test_symmetric()
     {
         cbfp::ColumnBlockMatrix cpu_full(64, 64);
         std::vector<double> v(64 * 64, 1.0);
-        cpu_full.add_matrix_col_major(v.data());
+        submit(cpu_full, v);
         cbfp::CudaColumnBlockMatrix gpu_sym(64, cbfp::Uplo::Lower);
         bool threw = false;
         try {
@@ -757,7 +790,7 @@ test_symmetric()
         check(threw, "reserve_like rejects a mismatched symmetry");
 
         cbfp::ColumnBlockMatrix cpu_lo(64, cbfp::Uplo::Lower);
-        cpu_lo.add_matrix_col_major(v.data());
+        submit(cpu_lo, v);
         cbfp::CudaColumnBlockMatrix gpu_up(64, cbfp::Uplo::Upper);
         threw = false;
         try {
@@ -811,8 +844,8 @@ test_presized()
         cbfp::ColumnBlockMatrix cpu(rows, cols, surveys);
         cbfp::CudaColumnBlockMatrix gpu(rows, cols, surveys);
         for (int b = 0; b < nbatches; ++b) {
-            cpu.add_matrix_col_major(batches[b].data());
-            gpu.add_matrix_col_major(batches[b].data());
+            submit(cpu, batches[b]);
+            submit(gpu, batches[b]);
         }
 
         std::size_t mismatches = 0;
@@ -851,8 +884,8 @@ test_presized()
 
         cbfp::ColumnBlockMatrix cpu(n, cbfp::Uplo::Lower, surveys);
         cbfp::CudaColumnBlockMatrix gpu(n, cbfp::Uplo::Lower, surveys);
-        cpu.add_matrix_col_major(b.data());
-        gpu.add_matrix_col_major(b.data());
+        submit(cpu, b);
+        submit(gpu, b);
 
         std::size_t mismatches = 0;
         for (std::size_t j = 0; j < n; ++j) {
@@ -883,11 +916,11 @@ test_presized()
         std::vector<std::vector<cbfp::Survey>> surveys{survey_batch(v, shape),
                                                        survey_batch(v, shape)};
         cbfp::CudaColumnBlockMatrix gpu(64, 2, surveys);
-        gpu.add_matrix_col_major(v.data());
-        gpu.add_matrix_col_major(v.data());
+        submit(gpu, v);
+        submit(gpu, v);
         bool threw = false;
         try {
-            gpu.add_matrix_col_major(v.data());
+            submit(gpu, v);
         } catch (const std::runtime_error &) {
             threw = true;
         }
@@ -910,7 +943,7 @@ test_device_detector()
         cbfp::Survey lie{0, 8, true, false};  // claims nothing below 2^0
         std::vector<std::vector<cbfp::Survey>> surveys{{lie}};
         cbfp::CudaColumnBlockMatrix gpu(rows, 1, surveys);
-        gpu.add_matrix_col_major(v.data());
+        submit(gpu, v);
         const unsigned f = gpu.column_contradictions(0);
         check(0 != (f & 2u), "a too-low exponent is detected");
 
@@ -929,7 +962,7 @@ test_device_detector()
         cbfp::Survey lie{0, 8, true, false};
         std::vector<std::vector<cbfp::Survey>> surveys{{lie}};
         cbfp::CudaColumnBlockMatrix gpu(rows, 1, surveys);
-        gpu.add_matrix_col_major(v.data());
+        submit(gpu, v);
         check(0 != (gpu.column_contradictions(0) & 4u),
               "an addend past the width is detected");
     }
@@ -941,7 +974,7 @@ test_device_detector()
         cbfp::Survey ok{0, 8, true, false};
         std::vector<std::vector<cbfp::Survey>> surveys{{ok}};
         cbfp::CudaColumnBlockMatrix gpu(rows, 1, surveys);
-        gpu.add_matrix_col_major(v.data());
+        submit(gpu, v);
         check(0 != (gpu.column_contradictions(0) & 1u),
               "a non-finite value is detected");
     }
@@ -954,7 +987,7 @@ test_device_detector()
         cbfp::ColumnBlockMatrix shape(rows, 3);
         std::vector<std::vector<cbfp::Survey>> surveys{survey_batch(v, shape)};
         cbfp::CudaColumnBlockMatrix gpu(rows, 3, surveys);
-        gpu.add_matrix_col_major(v.data());
+        submit(gpu, v);
         gpu.synchronize();  // must not throw
         bool clean = true;
         for (std::size_t j = 0; j < 3; ++j) {
@@ -975,13 +1008,13 @@ test_in_place_input()
 
     // The reference: the same batches through the staging path.
     cbfp::ColumnBlockMatrix cpu(rows, cols);
-    cpu.add_matrix_col_major(host.data());
-    cpu.add_matrix_col_major(host.data());
+    submit(cpu, host);
+    submit(cpu, host);
 
     cbfp::CudaColumnBlockMatrix staged(rows, cols);
     staged.reserve_like(cpu);
-    staged.add_matrix_col_major(host.data());
-    staged.add_matrix_col_major(host.data());
+    submit(staged, host);
+    submit(staged, host);
 
     double *pinned = nullptr;
     check(cudaSuccess == cudaHostAlloc(&pinned, n * sizeof(double),
@@ -991,12 +1024,12 @@ test_in_place_input()
 
     cbfp::CudaColumnBlockMatrix in_place(rows, cols);
     in_place.reserve_like(cpu);
-    cbfp::InputRead r1 = in_place.add_matrix_col_major_in_place(pinned);
+    cbfp::InputRead r1 = in_place.add_matrix_col_major(pinned);
     // The buffer must not be rewritten until the handle clears; wait, then
     // resubmit the same contents so the two accumulators see the same batches.
     r1.wait();
     check(r1.ready(), "the handle reports ready once waited on");
-    cbfp::InputRead r2 = in_place.add_matrix_col_major_in_place(pinned);
+    cbfp::InputRead r2 = in_place.add_matrix_col_major(pinned);
     r2.wait();
 
     std::size_t mismatches = 0;
@@ -1023,7 +1056,7 @@ test_in_place_input()
 
     // Move semantics: the moved-from handle must not double-destroy its event.
     {
-        cbfp::InputRead a = in_place.add_matrix_col_major_in_place(pinned);
+        cbfp::InputRead a = in_place.add_matrix_col_major(pinned);
         cbfp::InputRead b = std::move(a);
         check(a.ready(), "a moved-from handle is inert");
         b.wait();
@@ -1039,15 +1072,17 @@ test_in_place_input()
         g.reserve_like(cpu);
         bool threw = false;
         try {
-            g.add_matrix_col_major_in_place(host.data());
+            // Deliberately NOT through submit(), which would pin it first --
+            // this is the ordinary vector a caller might reach for.
+            g.add_matrix_col_major(host.data());
         } catch (const std::invalid_argument &) {
             threw = true;
         }
-        check(threw, "pageable input to the in-place path is rejected");
+        check(threw, "pageable input is rejected, not copied");
 
         // And the accumulator is still usable afterwards, so the check is a
         // rejection and not a wound.
-        g.add_matrix_col_major(host.data());
+        submit(g, host);
         g.synchronize();
         check(g.column_limbs(0) >= 1, "the accumulator survives the rejection");
     }
@@ -1060,10 +1095,10 @@ test_in_place_input()
         if (cudaSuccess == cudaHostRegister(own.data(), n * sizeof(double),
                                             cudaHostRegisterMapped)) {
             cbfp::ColumnBlockMatrix c2(rows, cols);
-            c2.add_matrix_col_major(own.data());
+            submit(c2, own);
             cbfp::CudaColumnBlockMatrix g(rows, cols);
             g.reserve_like(c2);
-            cbfp::InputRead r = g.add_matrix_col_major_in_place(own.data());
+            cbfp::InputRead r = g.add_matrix_col_major(own.data());
             r.wait();
             std::size_t bad = 0;
             for (std::size_t j = 0; j < cols; ++j) {

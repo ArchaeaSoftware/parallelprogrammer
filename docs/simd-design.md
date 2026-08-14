@@ -550,12 +550,19 @@ behind the bus instead of queueing after it.
 | staged: the library copies the caller's buffer | 2.85 | 2.71 | 1.45 |
 | borrowed from `acquire_input`, read in place | **3.13** | **3.27** | **3.27** |
 
-`acquire_input` is not the only way to reach the second row.
-`add_matrix_col_major_in_place` reads a buffer the *caller* owns, provided it
-is page-locked and device-mapped, and hands back an `InputRead` -- a CUDA event
-recorded after the launch -- that says when the device has finished reading it.
-That puts the lifetime obligation in the signature rather than in a comment,
-which is what the memory-type probe below got wrong. At 65536x64:
+The first row is now history: **`add_matrix_col_major` requires page-locked,
+device-mapped input and rejects anything else.** No staging copy remains to
+fall back on, so the second row is what every caller gets. Either the
+accumulator owns the buffer (`acquire_input`) or the caller does
+(cudaHostAlloc/cudaHostRegister with the mapped flag); either way the call
+returns an `InputRead`, a CUDA event recorded after the launch, and the rule is
+the same for everyone: do not write the buffer until it clears.
+
+That uniformity matters as much as the speed. The staged form had the library
+making a copy the caller could have avoided by knowing to ask, and the version
+before it inferred safety from the pointer's memory type -- one function, two
+lifetime contracts, nothing in the signature to tell them apart, 63% of entries
+corrupted. One rule, stated in the return type, replaces both. At 65536x64:
 
 | | us a batch |
 | --- | --- |
@@ -654,9 +661,9 @@ not purely host-bound and the kernel's PCIe time absorbs the saving. Reverted
 on that basis -- a third kernel variant, non-temporal stores with an alignment
 prologue and a memory-ordering fence, for a component nobody measures.
 
-The staging copy therefore stays a copy. What removes it is `acquire_input`,
-which removes it entirely rather than making it cheaper -- 705 us a batch
-against 2969.
+The staging copy was therefore never going to be made cheaper, and has since
+been removed instead: the host path requires pinned input and reads it where it
+lies.
 
 Unresolved: 1257 us for the bare kernel against ~1760 through the container for
 the same work. The container adds per-column descriptor handling the prototype
@@ -1135,14 +1142,27 @@ out of the library have all landed since the last revision of this list, along
 with symmetric storage and readback residuals, which were not on it. Carry-save
 at radix 52 came off it by being measured rather than by being done.
 
-1. **Make the in-place path the one callers land on.** The staging copy is now
-   avoidable two ways -- `acquire_input` for a buffer the accumulator owns,
-   `add_matrix_col_major_in_place` for one the caller owns -- and either is
-   2.02x on the host path. What remains is that the *default* entry point is
-   still the staged one, so a caller who does not know to ask pays for a copy
-   the library then has to make. That is an API-shape decision rather than an
-   optimization: whether to deprecate the staged form, keep it as the
-   forgiving default, or require pinned input outright.
+1. **Getting the input into device memory in the first place.** With the
+   staging copy gone the host path is as good as it gets, and PCIe is what is
+   left. Measured pre-sized, per batch, from the same data:
+
+   | rows x 64 | staged (since removed) | pinned, in place | device-resident |
+   | --- | --- | --- | --- |
+   | 4096 | 93 us | 88 | 37 |
+   | 16384 | 353 | 322 | 135 |
+   | 65536 | 2278 | 1263 | **516** |
+
+   Device-resident is 2.35-2.45x the best host path, consistently across
+   shapes, and 516 us at 65536x64 is 0.123 ns an element -- exactly the
+   kernel-only figure measured above. So device residency *is* the pure kernel
+   cost, and every microsecond above it is the bus.
+
+   That is the argument for a NIC writing into device memory over GPUDirect, or
+   anything else that skips host memory: it is worth more than any host-side
+   tuning left, because there is no host side left.
+   `add_matrix_col_major_device` already accepts such input; what is missing is
+   a way for the producer to deliver into a buffer the accumulator will read --
+   the device-side counterpart of `acquire_input`.
 
    The per-block fixed cost, by contrast, is not worth chasing: measured at
    ~12.7 ns a block against ~0.12 ns an element, which is 2.5% of a block at
