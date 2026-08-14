@@ -113,12 +113,65 @@ decompose(double v)
 ColumnBlockMatrix::ColumnBlockMatrix(std::size_t rows, std::size_t cols)
     : rows_(rows), cols_(cols), cols_state_(cols)
 {
-    for (auto &c : cols_state_) {
-        c.limbs.emplace_back(rows_, 0);
+    for (std::size_t j = 0; j < cols_; ++j) {
+        Column &c = cols_state_[j];
+        c.rows = rows_;
+        c.first_row = 0;
+        c.limbs.emplace_back(c.rows, 0);
         rebuild_bases(c);
     }
     column_buffers_.resize(1);
     column_buffers_[0].resize(rows_);
+}
+
+ColumnBlockMatrix::ColumnBlockMatrix(std::size_t n, Uplo uplo)
+    : rows_(n), cols_(n), symmetric_(true), uplo_(uplo), cols_state_(n)
+{
+    for (std::size_t j = 0; j < cols_; ++j) {
+        Column &c = cols_state_[j];
+        c.rows = Uplo::Lower == uplo_ ? n - j : j + 1;
+        c.first_row = Uplo::Lower == uplo_ ? j : 0;
+        c.limbs.emplace_back(c.rows, 0);
+        rebuild_bases(c);
+    }
+    // Sized for the longest column, so one buffer serves every column.
+    column_buffers_.resize(1);
+    column_buffers_[0].resize(rows_);
+}
+
+std::size_t
+ColumnBlockMatrix::column_rows(std::size_t j) const
+{
+    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    return cols_state_[j].rows;
+}
+
+std::size_t
+ColumnBlockMatrix::column_first_row(std::size_t j) const
+{
+    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    return cols_state_[j].first_row;
+}
+
+// Lower stores i >= j, so (i, j) and (j, i) both land in column min(i, j) at
+// slot |i - j|. Upper stores i <= j, so both land in column max(i, j) at slot
+// min(i, j). Neither needs a branch on which side of the diagonal it started.
+void
+ColumnBlockMatrix::locate(std::size_t i, std::size_t j, std::size_t &col,
+                          std::size_t &slot) const
+{
+    if (!symmetric_) {
+        col = j;
+        slot = i;
+        return;
+    }
+    if (Uplo::Lower == uplo_) {
+        col = std::min(i, j);
+        slot = i < j ? j - i : i - j;
+    } else {
+        col = std::max(i, j);
+        slot = std::min(i, j);
+    }
 }
 
 ColumnBlockMatrix::~ColumnBlockMatrix() = default;
@@ -146,6 +199,20 @@ ColumnBlockMatrix::ColumnBlockMatrix(
     std::size_t rows, std::size_t cols,
     const std::vector<std::vector<Survey>> &surveys)
     : ColumnBlockMatrix(rows, cols)
+{
+    reserve_from_surveys(surveys);
+}
+
+ColumnBlockMatrix::ColumnBlockMatrix(
+    std::size_t n, Uplo uplo, const std::vector<std::vector<Survey>> &surveys)
+    : ColumnBlockMatrix(n, uplo)
+{
+    reserve_from_surveys(surveys);
+}
+
+void
+ColumnBlockMatrix::reserve_from_surveys(
+    const std::vector<std::vector<Survey>> &surveys)
 {
     if (surveys.empty()) {
         throw std::invalid_argument(
@@ -232,9 +299,9 @@ ColumnBlockMatrix::ensure_limb_count(Column &c, std::size_t needed)
     // the limb below it so negative entries stay negative.
     while (c.limbs.size() < needed) {
         const std::size_t index = c.limbs.size();
-        c.limbs.emplace_back(rows_, index);
+        c.limbs.emplace_back(c.rows, index);
         kernels::sign_fill(c.limbs[index].data(), c.limbs[index - 1].data(),
-                           rows_);
+                           c.rows);
     }
     rebuild_bases(c);
 }
@@ -252,7 +319,7 @@ ColumnBlockMatrix::column_is_zero(const Column &c) const
 {
     for (const auto &lc : c.limbs) {
         const limb_t *p = lc.data();
-        for (std::size_t i = 0; i < rows_; ++i) {
+        for (std::size_t i = 0; i < c.rows; ++i) {
             if (0 != p[i]) return false;
         }
     }
@@ -281,13 +348,13 @@ ColumnBlockMatrix::rescale(Column &c, int new_exponent)
 
     std::vector<LimbColumn> fresh;
     fresh.reserve(ndst);
-    for (std::size_t k = 0; k < ndst; ++k) fresh.emplace_back(rows_, k);
+    for (std::size_t k = 0; k < ndst; ++k) fresh.emplace_back(c.rows, k);
 
     std::vector<limb_t *> fresh_bases(ndst);
     for (std::size_t k = 0; k < ndst; ++k) fresh_bases[k] = fresh[k].data();
 
     kernels::shift_left(fresh_bases.data(), ndst, c.bases.data(),
-                        c.limbs.size(), rows_, shift);
+                        c.limbs.size(), c.rows, shift);
 
     c.limbs = std::move(fresh);
     c.bases = std::move(fresh_bases);
@@ -313,7 +380,9 @@ ColumnBlockMatrix::accumulate(std::size_t i, std::size_t j, double v,
     }
     const int e = static_cast<int>(e64);
 
-    Column &c = cols_state_[j];
+    std::size_t col = 0, slot = 0;
+    locate(i, j, col, slot);
+    Column &c = cols_state_[col];
     if (!c.initialized) {
         c.exponent = e;
         c.initialized = true;
@@ -326,7 +395,7 @@ ColumnBlockMatrix::accumulate(std::size_t i, std::size_t j, double v,
     ++c.add_count;
     fit_column(c);
 
-    kernels::accumulate_one(c.bases.data(), c.limbs.size(), i, p.mantissa,
+    kernels::accumulate_one(c.bases.data(), c.limbs.size(), slot, p.mantissa,
                             shift, p.negative != negate);
 }
 
@@ -381,15 +450,52 @@ ColumnBlockMatrix::accumulate_column_range(const double *b,
         // Both passes want the column contiguous. When the caller's layout
         // already provides that, use it in place; otherwise stage it, because
         // a strided vector gather costs more than the work it feeds.
-        const double *column = b + j * column_step;
+        const Column &c = cols_state_[j];
+        const double *column = b + j * column_step + c.first_row * row_step;
         if (1 != row_step) {
-            for (std::size_t i = 0; i < rows_; ++i) {
+            for (std::size_t i = 0; i < c.rows; ++i) {
                 staging[i] = column[i * row_step];
             }
             column = staging.data();
         }
         accumulate_column(j, column, log2_scale);
     }
+}
+
+// A triangular column's work runs from n entries down to 1, so handing every
+// worker the same number of columns hands one of them most of the matrix.
+// Assign column j to the slot its cumulative entry count falls in: the count
+// rises monotonically, so each slot still gets a contiguous block and a
+// worker's columns stay near one another in memory.
+void
+ColumnBlockMatrix::partition_columns(unsigned slot, std::size_t &begin,
+                                     std::size_t &end) const
+{
+    const unsigned n = threads();
+    if (!symmetric_) {
+        pool_->partition(cols_, slot, begin, end);
+        return;
+    }
+
+    std::size_t total = 0;
+    for (const auto &c : cols_state_) total += c.rows;
+    if (0 == total) {
+        begin = end = 0;
+        return;
+    }
+
+    begin = end = cols_;
+    std::size_t seen = 0;  // entries in the columns before j
+    for (std::size_t j = 0; j < cols_; ++j) {
+        const unsigned owner = static_cast<unsigned>(seen * n / total);
+        if (owner == slot && cols_ == begin) begin = j;
+        if (owner > slot) {
+            end = j;
+            break;
+        }
+        seen += cols_state_[j].rows;
+    }
+    if (cols_ == begin) begin = end = cols_;  // this slot drew nothing
 }
 
 void
@@ -413,7 +519,7 @@ ColumnBlockMatrix::accumulate_columns(const double *b, std::size_t column_step,
     // memory. Columns are independent in storage, so nothing needs locking.
     pool_->run([&](unsigned slot) {
         std::size_t begin = 0, end = 0;
-        pool_->partition(cols_, slot, begin, end);
+        partition_columns(slot, begin, end);
         accumulate_column_range(b, column_step, row_step, log2_scale, begin,
                                 end, slot);
     });
@@ -430,7 +536,7 @@ ColumnBlockMatrix::add_column_scaled_pow2(std::size_t j, const double *v,
                                           int log2_scale)
 {
     if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
-    if (0 == rows_) return;
+    if (0 == cols_state_[j].rows) return;
     accumulate_column(j, v, log2_scale);
 }
 
@@ -450,7 +556,7 @@ ColumnBlockMatrix::accumulate_column(std::size_t j, const double *column,
         // minimum, so every addend starts at or above limb 0.
         unsigned flags = 0;
         kernels::accumulate()(
-            c.bases.data(), c.limbs.size(), column, rows_,
+            c.bases.data(), c.limbs.size(), column, c.rows,
             static_cast<std::int32_t>(c.exponent - log2_scale), 0, &flags);
         if (0 != flags) report_contradiction(j, flags);
         return;
@@ -461,7 +567,8 @@ ColumnBlockMatrix::accumulate_column(std::size_t j, const double *column,
     const long long floor_exponent =
         c.initialized ? static_cast<long long>(c.exponent) - log2_scale
                       : std::numeric_limits<long long>::max();
-    const kernels::Survey sc = kernels::survey()(column, rows_, floor_exponent);
+    const kernels::Survey sc =
+        kernels::survey()(column, c.rows, floor_exponent);
     if (sc.nonfinite) {
         throw std::domain_error("cbfp: cannot accumulate a non-finite value");
     }
@@ -493,7 +600,7 @@ ColumnBlockMatrix::accumulate_column(std::size_t j, const double *column,
     // the kernel free of it.
     unsigned flags = 0;
     kernels::accumulate()(
-        c.bases.data(), c.limbs.size(), column, rows_,
+        c.bases.data(), c.limbs.size(), column, c.rows,
         static_cast<std::int32_t>(c.exponent - log2_scale),
         static_cast<std::size_t>(min_exponent - c.exponent) / kLimbBits,
         &flags);
@@ -507,7 +614,7 @@ ColumnBlockMatrix::set_zero()
 {
     for (auto &c : cols_state_) {
         for (auto &lc : c.limbs) {
-            std::memset(lc.data(), 0, padded_rows(rows_) * sizeof(limb_t));
+            std::memset(lc.data(), 0, padded_rows(c.rows) * sizeof(limb_t));
         }
         c.max_addend_bits = 0;
         c.add_count = 0;
@@ -518,11 +625,13 @@ std::vector<limb_t>
 ColumnBlockMatrix::magnitude(std::size_t i, std::size_t j, bool *negative) const
 {
     check_index(i, j);
-    const Column &c = cols_state_[j];
+    std::size_t col = 0, slot = 0;
+    locate(i, j, col, slot);
+    const Column &c = cols_state_[col];
     const std::size_t n = c.limbs.size();
 
     std::vector<limb_t> value(n);
-    for (std::size_t k = 0; k < n; ++k) value[k] = c.limbs[k].data()[i];
+    for (std::size_t k = 0; k < n; ++k) value[k] = c.limbs[k].data()[slot];
 
     const bool neg = limbs::is_negative(value.data(), n);
     if (negative) *negative = neg;
@@ -542,10 +651,12 @@ std::vector<limb_t>
 ColumnBlockMatrix::entry_limbs(std::size_t i, std::size_t j) const
 {
     check_index(i, j);
-    const Column &c = cols_state_[j];
+    std::size_t col = 0, slot = 0;
+    locate(i, j, col, slot);
+    const Column &c = cols_state_[col];
     std::vector<limb_t> v(c.limbs.size());
     for (std::size_t k = 0; k < c.limbs.size(); ++k) {
-        v[k] = c.limbs[k].data()[i];
+        v[k] = c.limbs[k].data()[slot];
     }
     return v;
 }
@@ -554,9 +665,11 @@ bool
 ColumnBlockMatrix::is_zero(std::size_t i, std::size_t j) const
 {
     check_index(i, j);
-    const Column &c = cols_state_[j];
+    std::size_t col = 0, slot = 0;
+    locate(i, j, col, slot);
+    const Column &c = cols_state_[col];
     for (const auto &lc : c.limbs) {
-        if (0 != lc.data()[i]) return false;
+        if (0 != lc.data()[slot]) return false;
     }
     return true;
 }
@@ -649,7 +762,9 @@ ColumnBlockMatrix::to_double(std::size_t i, std::size_t j,
 {
     bool neg = false;
     const std::vector<limb_t> mag = magnitude(i, j, &neg);
-    const long long exp = cols_state_[j].exponent;
+    std::size_t ecol = 0, eslot = 0;
+    locate(i, j, ecol, eslot);
+    const long long exp = cols_state_[ecol].exponent;
     const Rounded r = round_magnitude(mag.data(), mag.size(), exp);
 
     if (nullptr != residual) {
@@ -694,7 +809,9 @@ ColumnBlockMatrix::is_exactly_representable(std::size_t i, std::size_t j) const
     const std::size_t b = limbs::bit_length(mag.data(), mag.size());
     if (0 == b) return true;
 
-    const long long exp = cols_state_[j].exponent;
+    std::size_t ecol = 0, eslot = 0;
+    locate(i, j, ecol, eslot);
+    const long long exp = cols_state_[ecol].exponent;
     const std::size_t tz = trailing_zeros(mag);
     if (b - tz > 53) return false;                                 // too wide
     if (exp + static_cast<long long>(b) - 1 > 1023) return false;  // overflow
@@ -709,7 +826,9 @@ ColumnBlockMatrix::to_exact_decimal(std::size_t i, std::size_t j) const
     std::vector<limb_t> mag = magnitude(i, j, &neg);
     if (0 == limbs::bit_length(mag.data(), mag.size())) return "0";
 
-    const long long exp = cols_state_[j].exponent;
+    std::size_t ecol = 0, eslot = 0;
+    locate(i, j, ecol, eslot);
+    const long long exp = cols_state_[ecol].exponent;
     std::string digits;
     std::size_t frac_digits = 0;
 
@@ -771,8 +890,9 @@ ColumnBlockMatrix::reserve_for(const double *b, std::size_t count,
     for (std::size_t j = 0; j < cols_; ++j) {
         bool any = false;
         long long low = 0, high = 0;
-        for (std::size_t i = 0; i < rows_; ++i) {
-            const double v = b[i * stride + j];
+        const Column &cj = cols_state_[j];
+        for (std::size_t k = 0; k < cj.rows; ++k) {
+            const double v = b[(cj.first_row + k) * stride + j];
             if (!std::isfinite(v)) continue;
             const DoubleParts p = decompose(v);
             if (0 == p.mantissa) continue;
@@ -799,8 +919,9 @@ std::size_t
 ColumnBlockMatrix::memory_bytes() const
 {
     std::size_t total = sizeof(*this);
-    const std::size_t per_limb = padded_rows(rows_) * sizeof(limb_t) + 512;
     for (const auto &c : cols_state_) {
+        const std::size_t per_limb =
+            padded_rows(c.rows) * sizeof(limb_t) + 512;
         total += sizeof(Column) + c.limbs.size() * per_limb +
                  c.bases.capacity() * sizeof(limb_t *);
     }
@@ -811,8 +932,12 @@ std::string
 ColumnBlockMatrix::describe() const
 {
     std::ostringstream os;
-    os << rows_ << " x " << cols_ << " column-block fixed-point matrix ("
-       << memory_bytes() << " bytes, " << active_kernel() << " kernel)\n";
+    os << rows_ << " x " << cols_ << " column-block fixed-point matrix (";
+    if (symmetric_) {
+        os << "symmetric, " << (Uplo::Lower == uplo_ ? "lower" : "upper")
+           << " stored, ";
+    }
+    os << memory_bytes() << " bytes, " << active_kernel() << " kernel)\n";
     for (std::size_t j = 0; j < cols_; ++j) {
         const Column &c = cols_state_[j];
         os << "  col " << j << ": exponent 2^" << c.exponent << ", width "

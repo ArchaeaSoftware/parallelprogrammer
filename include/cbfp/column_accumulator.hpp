@@ -33,9 +33,29 @@ namespace detail {
 class ThreadPool;
 }
 
+// Which triangle of a symmetric matrix is the stored one, following LAPACK's
+// uplo. Lower keeps entries with i >= j, so column j holds rows j..n-1; Upper
+// keeps i <= j, so column j holds rows 0..j. Either way a column's stored rows
+// stay contiguous, which is what lets the vector and coalescing properties of
+// the layout survive being made triangular.
+enum class Uplo { Lower, Upper };
+
 class ColumnBlockMatrix {
 public:
     ColumnBlockMatrix(std::size_t rows, std::size_t cols);
+
+    // Symmetric n x n, storing one triangle. A(i, j) and A(j, i) are the same
+    // stored entry rather than two that happen to agree, which matters here
+    // beyond halving the memory: every column carries its own exponent and
+    // width, so in full storage the two halves would hold equal values in
+    // different limbs, and symmetry would be a property the data had to keep
+    // earning. Stored once, it cannot drift.
+    //
+    // Accumulating a matrix reads only the stored triangle of the input, so
+    // the input traffic halves as well. The input is taken to be symmetric;
+    // that is not checked, because checking it means reading the half this
+    // exists to avoid reading.
+    ColumnBlockMatrix(std::size_t n, Uplo uplo);
 
     // Pre-sized from the surveys of every matrix that will be accumulated:
     // `surveys` is indexed by matrix and then by column, so its outer size is
@@ -50,6 +70,13 @@ public:
     ColumnBlockMatrix(std::size_t rows, std::size_t cols,
                       const std::vector<std::vector<Survey>> &surveys);
 
+    // Both at once. Each survey describes the stored triangle of one matrix,
+    // column by column: entry j must cover the column_rows(j) values beginning
+    // at row column_first_row(j), since those are the only ones that will be
+    // read.
+    ColumnBlockMatrix(std::size_t n, Uplo uplo,
+                      const std::vector<std::vector<Survey>> &surveys);
+
     // Declared, not implicit: the worker pool is held by unique_ptr to an
     // incomplete type, so the destructor has to be defined where that type is.
     // The moves are spelled out because declaring a destructor would otherwise
@@ -61,6 +88,20 @@ public:
     std::size_t rows() const { return rows_; }
 
     std::size_t cols() const { return cols_; }
+
+    bool symmetric() const { return symmetric_; }
+
+    // Only meaningful when symmetric().
+    Uplo uplo() const { return uplo_; }
+
+    // How many entries column j actually stores: rows() unless symmetric, and
+    // then n-j for Lower or j+1 for Upper. This is the length add_column()
+    // wants, and the length of the slice of an input column that is read.
+    std::size_t column_rows(std::size_t j) const;
+
+    // The logical row index that column j's first stored entry corresponds to:
+    // 0 unless symmetric and Lower, where it is j.
+    std::size_t column_first_row(std::size_t j) const;
 
     // --- exact accumulation ------------------------------------------------
 
@@ -89,10 +130,13 @@ public:
     void add_matrix_col_major_scaled_pow2(const double *b, int log2_scale,
                                           std::size_t col_stride = 0);
 
-    // A(., j) += v, where v is rows() contiguous doubles. Lets a caller stream
-    // one column at a time, so only the accumulator has to be resident -- the
-    // difference between holding a whole input matrix and holding 8*rows()
-    // bytes of it.
+    // A(., j) += v, where v is column_rows(j) contiguous doubles. Lets a caller
+    // stream one column at a time, so only the accumulator has to be resident
+    // -- the difference between holding a whole input matrix and holding
+    // 8*rows() bytes of it.
+    //
+    // When symmetric, v is the stored slice of the column, not the whole
+    // column: element k of v is logical entry (column_first_row(j) + k, j).
     void add_column(std::size_t j, const double *v);
 
     void add_column_scaled_pow2(std::size_t j, const double *v, int log2_scale);
@@ -205,9 +249,32 @@ private:
         std::size_t max_addend_bits = 0;
         std::size_t add_count = 0;
 
+        // How many entries this column stores, and which logical row the first
+        // of them is. Held per column rather than derived from uplo because a
+        // triangular column has its own length, every allocation, rescale and
+        // sweep needs it, and the accumulate loop should not branch on shape.
+        std::size_t rows = 0;
+        std::size_t first_row = 0;
+
         std::vector<LimbColumn> limbs;       // limbs[k] = k-th limb of a row
         std::vector<limbs::limb_t *> bases;  // limbs[k].data(), for kernels
     };
+
+    // Logical (i, j) to the entry that actually holds it: `col` is the storing
+    // column and `slot` the index within it. The identity unless symmetric,
+    // where the triangle folds one index onto the other.
+    void locate(std::size_t i, std::size_t j, std::size_t &col,
+                std::size_t &slot) const;
+
+    // Shared tail of the two survey-taking constructors.
+    void reserve_from_surveys(const std::vector<std::vector<Survey>> &surveys);
+
+    // The columns belonging to worker `slot`. Even by column count normally;
+    // by stored entries when symmetric, since a triangular column's work runs
+    // from n down to 1 and splitting on count alone would leave one worker
+    // with most of the matrix.
+    void partition_columns(unsigned slot, std::size_t &begin,
+                           std::size_t &end) const;
 
     // Column j starts at b + j*column_step, with element i at + i*row_step.
     // Row-major is (1, row_stride); column-major is (col_stride, 1).
@@ -241,6 +308,8 @@ private:
 
     std::size_t rows_;
     std::size_t cols_;
+    bool symmetric_ = false;
+    Uplo uplo_ = Uplo::Lower;
     std::vector<Column> cols_state_;
 
     // Set when the constructor was given surveys. The accumulation path then

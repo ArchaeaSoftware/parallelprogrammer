@@ -1245,6 +1245,243 @@ test_residual_recovers_cancellation()
     CHECK_DOUBLE(u.to_double(0, 0), tlo);
 }
 
+// Storing one triangle has to be invisible in the answers. The reference is a
+// full-storage accumulator fed the same symmetric matrices: every entry must
+// agree, on both sides of the diagonal and for either uplo.
+static void
+test_symmetric_matches_full_storage()
+{
+    const std::size_t n = 37;
+    const int reps = 5;
+    std::mt19937_64 rng(5150);
+
+    std::vector<std::vector<double>> batches(reps, std::vector<double>(n * n));
+    for (auto &b : batches) {
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t j = 0; j <= i; ++j) {
+                const std::uint64_t m = (rng() | (std::uint64_t{1} << 52)) &
+                                        ((std::uint64_t{1} << 53) - 1);
+                double v = std::ldexp(static_cast<double>(m),
+                                      static_cast<int>(rng() % 60) - 30);
+                if (rng() & 1) v = -v;
+                b[i * n + j] = v;
+                b[j * n + i] = v;  // symmetric by construction
+            }
+        }
+    }
+
+    cbfp::ColumnBlockMatrix full(n, n);
+    cbfp::ColumnBlockMatrix lo(n, cbfp::Uplo::Lower);
+    cbfp::ColumnBlockMatrix up(n, cbfp::Uplo::Upper);
+    for (int r = 0; r < reps; ++r) {
+        full.add_matrix(batches[r].data());
+        lo.add_matrix(batches[r].data());
+        up.add_matrix(batches[r].data());
+    }
+
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t j = 0; j < n; ++j) {
+            const double want = full.to_double(i, j);
+            CHECK_DOUBLE(lo.to_double(i, j), want);
+            CHECK_DOUBLE(up.to_double(i, j), want);
+        }
+    }
+
+    // Stored once, so the two halves are the same limbs and not merely the
+    // same value -- which is what full storage cannot promise, since columns
+    // i and j carry their own exponents.
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t j = 0; j < n; ++j) {
+            CHECK(lo.entry_limbs(i, j) == lo.entry_limbs(j, i));
+            CHECK(up.entry_limbs(i, j) == up.entry_limbs(j, i));
+        }
+    }
+
+    // The shape itself.
+    CHECK(lo.symmetric() && !full.symmetric());
+    for (std::size_t j = 0; j < n; ++j) {
+        CHECK(lo.column_rows(j) == n - j);
+        CHECK(lo.column_first_row(j) == j);
+        CHECK(up.column_rows(j) == j + 1);
+        CHECK(up.column_first_row(j) == 0);
+    }
+
+    // The limb payload halves, but memory_bytes() also charges a fixed cost
+    // per limb column, and at small n that cost dominates: the measured ratio
+    // is 0.85 at n=37, 0.71 at 128, 0.57 at 512 and 0.52 at 2048. So check the
+    // saving where the payload actually dominates rather than asserting a
+    // bound the small case cannot meet.
+    CHECK(lo.memory_bytes() < full.memory_bytes());
+    {
+        const std::size_t big = 512;
+        cbfp::ColumnBlockMatrix bf(big, big);
+        cbfp::ColumnBlockMatrix bl(big, cbfp::Uplo::Lower);
+        cbfp::ColumnBlockMatrix bu(big, cbfp::Uplo::Upper);
+        CHECK(bl.memory_bytes() < bf.memory_bytes() * 3 / 4);
+        // The two triangles are the same multiset of column lengths, so they
+        // cost exactly the same however the padding falls.
+        CHECK(bl.memory_bytes() == bu.memory_bytes());
+    }
+
+    // to_matrix fills the whole n x n, mirrored.
+    std::vector<double> out(n * n, -1.0);
+    lo.to_matrix(out.data());
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t j = 0; j < n; ++j) {
+            CHECK_DOUBLE(out[i * n + j], full.to_double(i, j));
+            CHECK_DOUBLE(out[i * n + j], out[j * n + i]);
+        }
+    }
+}
+
+// The column-major entry point, the threaded path and the weighted partition
+// all have to reach the same answer as the serial row-major one.
+static void
+test_symmetric_entry_points_agree()
+{
+    const std::size_t n = 53;
+    std::mt19937_64 rng(2718);
+
+    std::vector<double> rowmajor(n * n), colmajor(n * n);
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t j = 0; j <= i; ++j) {
+            const std::uint64_t m = (rng() | (std::uint64_t{1} << 52)) &
+                                    ((std::uint64_t{1} << 53) - 1);
+            double v = std::ldexp(static_cast<double>(m),
+                                  static_cast<int>(rng() % 40) - 20);
+            if (rng() & 1) v = -v;
+            rowmajor[i * n + j] = rowmajor[j * n + i] = v;
+        }
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t j = 0; j < n; ++j) colmajor[j * n + i] = rowmajor[i * n + j];
+    }
+
+    cbfp::ColumnBlockMatrix a(n, cbfp::Uplo::Lower);
+    a.add_matrix(rowmajor.data());
+
+    cbfp::ColumnBlockMatrix b(n, cbfp::Uplo::Lower);
+    b.add_matrix_col_major(colmajor.data());
+
+    cbfp::ColumnBlockMatrix c(n, cbfp::Uplo::Lower);
+    c.set_threads(4);
+    c.add_matrix(rowmajor.data());
+
+    // Streamed one column at a time: each takes only its stored slice.
+    cbfp::ColumnBlockMatrix d(n, cbfp::Uplo::Lower);
+    for (std::size_t j = 0; j < n; ++j) {
+        d.add_column(j, &colmajor[j * n + d.column_first_row(j)]);
+    }
+
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t j = 0; j < n; ++j) {
+            const double want = a.to_double(i, j);
+            CHECK_DOUBLE(b.to_double(i, j), want);
+            CHECK_DOUBLE(c.to_double(i, j), want);
+            CHECK_DOUBLE(d.to_double(i, j), want);
+            CHECK(a.entry_limbs(i, j) == c.entry_limbs(i, j));
+        }
+    }
+
+    // The upper triangle stored column-major is a different slice, so check it
+    // separately rather than assuming the lower case covered it.
+    cbfp::ColumnBlockMatrix e(n, cbfp::Uplo::Upper);
+    e.add_matrix_col_major(colmajor.data());
+    cbfp::ColumnBlockMatrix f(n, cbfp::Uplo::Upper);
+    f.set_threads(3);
+    f.add_matrix(rowmajor.data());
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t j = 0; j < n; ++j) {
+            CHECK_DOUBLE(e.to_double(i, j), a.to_double(i, j));
+            CHECK_DOUBLE(f.to_double(i, j), a.to_double(i, j));
+        }
+    }
+}
+
+// A symmetric accumulator still has to do everything the general one does:
+// widen, rescale, report exactly, and pre-size from surveys.
+static void
+test_symmetric_keeps_exactness()
+{
+    // The diagonal is stored once and must be added once, not twice.
+    cbfp::ColumnBlockMatrix d(3, cbfp::Uplo::Lower);
+    std::vector<double> m(9, 0.0);
+    m[0] = 2.0;   // (0,0)
+    m[4] = -7.5;  // (1,1)
+    d.add_matrix(m.data());
+    d.add_matrix(m.data());
+    CHECK_DOUBLE(d.to_double(0, 0), 4.0);
+    CHECK_DOUBLE(d.to_double(1, 1), -15.0);
+    CHECK_DOUBLE(d.to_double(2, 2), 0.0);
+
+    // Cancellation across the whole double range, on an off-diagonal entry.
+    cbfp::ColumnBlockMatrix a(4, cbfp::Uplo::Lower);
+    a.add(2, 1, 1e300);
+    a.add(2, 1, 1.0);
+    a.add(1, 2, -1e300);  // the mirrored index reaches the same entry
+    CHECK_DOUBLE(a.to_double(2, 1), 1.0);
+    CHECK_DOUBLE(a.to_double(1, 2), 1.0);
+    CHECK_STR(a.to_exact_decimal(1, 2), "1");
+
+    // sub through the mirror cancels exactly.
+    a.sub(1, 2, 1.0);
+    CHECK(a.is_zero(2, 1));
+
+    // A value far below the column's scale forces a rescale of a triangular
+    // column; nothing is lost and the mirror still agrees.
+    cbfp::ColumnBlockMatrix r(6, cbfp::Uplo::Upper);
+    r.add(4, 2, 1.0);
+    r.add(4, 2, std::ldexp(1.0, -300));
+    CHECK(r.column_exponent(4) == -300);
+    r.sub(2, 4, 1.0);
+    CHECK_DOUBLE(r.to_double(2, 4), std::ldexp(1.0, -300));
+    CHECK(r.is_exactly_representable(4, 2));
+
+    // Residuals work through the mirror too.
+    cbfp::ColumnBlockMatrix q(3, cbfp::Uplo::Lower);
+    for (int k = 0; k < 10; ++k) q.add(2, 0, 0.1);
+    double lo = 0.0;
+    CHECK_DOUBLE(q.to_double(0, 2, &lo), 1.0);
+    CHECK_DOUBLE(lo, std::ldexp(1.0, -54));
+
+    // Pre-sized from surveys of the stored triangle: same answers, and no
+    // rescale or widen during accumulation.
+    const std::size_t n = 16;
+    std::mt19937_64 rng(99);
+    std::vector<double> b(n * n);
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t j = 0; j <= i; ++j) {
+            double v = std::ldexp(1.0 + static_cast<double>(rng() % 1000),
+                                  static_cast<int>(rng() % 20) - 10);
+            b[i * n + j] = b[j * n + i] = v;
+        }
+    }
+    cbfp::ColumnBlockMatrix adaptive(n, cbfp::Uplo::Lower);
+    adaptive.add_matrix(b.data());
+    adaptive.add_matrix(b.data());
+
+    std::vector<std::vector<cbfp::Survey>> surveys(
+        2, std::vector<cbfp::Survey>(n));
+    for (std::size_t j = 0; j < n; ++j) {
+        std::vector<double> slice;
+        for (std::size_t k = 0; k < n - j; ++k) slice.push_back(b[(j + k) * n + j]);
+        surveys[0][j] = surveys[1][j] =
+            cbfp::survey_column(slice.data(), slice.size());
+    }
+    cbfp::ColumnBlockMatrix presized(n, cbfp::Uplo::Lower, surveys);
+    const std::size_t limbs_before = presized.column_limbs(0);
+    const int exp_before = presized.column_exponent(0);
+    presized.add_matrix(b.data());
+    presized.add_matrix(b.data());
+    CHECK(presized.column_limbs(0) == limbs_before);
+    CHECK(presized.column_exponent(0) == exp_before);
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t j = 0; j < n; ++j) {
+            CHECK_DOUBLE(presized.to_double(i, j), adaptive.to_double(i, j));
+        }
+    }
+}
+
 // The public survey is what a producer computes so an accumulator need not.
 // It has to agree with what the accumulator would have worked out itself,
 // or preallocating from it is worse than useless.
@@ -1454,6 +1691,9 @@ main()
     test_presized_matches_adaptive();
     test_readback_residual();
     test_residual_recovers_cancellation();
+    test_symmetric_matches_full_storage();
+    test_symmetric_entry_points_agree();
+    test_symmetric_keeps_exactness();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
