@@ -1639,6 +1639,55 @@ test_fold_matches_sequential()
         CHECK(0 == bad);
     }
 
+    // A fold is not a mode the accumulator is put into: folded and one-at-a-
+    // time calls interleave freely, and a fold may rescale or widen a column
+    // that earlier calls had already put values in. Nothing requires the
+    // folded matrices to be all of them, or to come first.
+    {
+        const std::size_t r2 = 71, c2 = 5;
+        std::vector<std::vector<double>> batches(4,
+                                                 std::vector<double>(r2 * c2));
+        for (std::size_t bi = 0; bi < batches.size(); ++bi) {
+            for (auto &x : batches[bi]) {
+                const std::uint64_t m = (rng() | (std::uint64_t{1} << 52)) &
+                                        ((std::uint64_t{1} << 53) - 1);
+                // Later batches reach lower, so a fold has to rescale a column
+                // that single adds already populated.
+                x = std::ldexp(static_cast<double>(m),
+                               -static_cast<int>(bi) * 40);
+                if (rng() & 1) x = -x;
+            }
+        }
+        cbfp::ColumnBlockMatrix all(r2, c2);
+        for (auto &b : batches) all.add_matrix_col_major(b.data());
+
+        // one, then a fold of two, then one.
+        cbfp::ColumnBlockMatrix mixed(r2, c2);
+        const double *mid[2] = {batches[1].data(), batches[2].data()};
+        mixed.add_matrix_col_major(batches[0].data());
+        mixed.add_matrices_col_major(mid, 2);
+        mixed.add_matrix_col_major(batches[3].data());
+
+        // a fold first, then singles.
+        cbfp::ColumnBlockMatrix fold_first(r2, c2);
+        const double *head[2] = {batches[0].data(), batches[1].data()};
+        fold_first.add_matrices_col_major(head, 2);
+        fold_first.add_matrix_col_major(batches[2].data());
+        fold_first.add_matrix_col_major(batches[3].data());
+
+        std::size_t bad = 0;
+        for (std::size_t j = 0; j < c2; ++j) {
+            for (std::size_t i = 0; i < r2; ++i) {
+                const std::string want = all.to_exact_decimal(i, j);
+                if (mixed.to_exact_decimal(i, j) != want) ++bad;
+                if (fold_first.to_exact_decimal(i, j) != want) ++bad;
+            }
+        }
+        CHECK(0 == bad);
+        // The spread really did force a rescale, so the case above was live.
+        CHECK(all.column_exponent(0) < -100);
+    }
+
     // A fold that contradicts its metadata still reports.
     {
         std::vector<double> v(64, 0.5);  // exponent -1
