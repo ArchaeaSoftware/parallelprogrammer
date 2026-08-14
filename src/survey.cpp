@@ -16,8 +16,8 @@ survey_column(const double *values, std::size_t rows)
 }
 
 void
-survey_matrix_col_major(const double *b, std::size_t rows, std::size_t cols,
-                        Survey *out, std::size_t col_stride)
+survey_matrix_col_major(Survey *out, const double *b, std::size_t rows,
+                        std::size_t cols, std::size_t col_stride)
 {
     const std::size_t stride = col_stride ? col_stride : rows;
     for (std::size_t j = 0; j < cols; ++j) {
@@ -26,7 +26,7 @@ survey_matrix_col_major(const double *b, std::size_t rows, std::size_t cols,
 }
 
 void
-survey_matrix(const double *b, std::size_t rows, std::size_t cols, Survey *out,
+survey_matrix(Survey *out, const double *b, std::size_t rows, std::size_t cols,
               std::size_t row_stride)
 {
     const std::size_t stride = row_stride ? row_stride : cols;

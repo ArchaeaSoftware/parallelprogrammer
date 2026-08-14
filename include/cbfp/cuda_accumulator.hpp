@@ -102,8 +102,8 @@ private:
 // Blocking, so the result is readable on return whichever kind of memory `out`
 // is. A setup call rather than something to put in a loop.
 void
-survey_matrix_col_major_device(const double *b, std::size_t rows,
-                               std::size_t cols, Survey *out,
+survey_matrix_col_major_device(Survey *out, const double *b,
+                               std::size_t rows, std::size_t cols,
                                std::size_t col_stride = 0);
 
 class CudaColumnBlockMatrix {
@@ -372,8 +372,8 @@ private:
     // reads mapped memory the device wrote.
     void report_contradictions() const;
     // Logical (i, j) to the column that stores it and the slot within it.
-    void locate(std::size_t i, std::size_t j, std::size_t &col,
-                std::size_t &slot) const;
+    void locate(std::size_t &col, std::size_t &slot, std::size_t i,
+                std::size_t j) const;
     void init_columns();
     void accumulate_device(const double *b, std::size_t col_stride);
     // Creates an event, records it on the compute stream, wraps it.

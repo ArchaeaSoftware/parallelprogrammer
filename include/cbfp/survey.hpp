@@ -48,15 +48,15 @@ survey_column(const double *values, std::size_t rows);
 // Column j begins at b + j*col_stride and its rows are contiguous; 0 means
 // tightly packed.
 void
-survey_matrix_col_major(const double *b, std::size_t rows, std::size_t cols,
-                        Survey *out, std::size_t col_stride = 0);
+survey_matrix_col_major(Survey *out, const double *b, std::size_t rows,
+                        std::size_t cols, std::size_t col_stride = 0);
 
 // The same for a row-major matrix, whose rows are `row_stride` doubles apart
 // (0 means tightly packed, i.e. cols). Each column is strided, so this is the
 // slower form; it exists so a producer holding a row-major matrix need not
 // transpose one just to describe it.
 void
-survey_matrix(const double *b, std::size_t rows, std::size_t cols, Survey *out,
+survey_matrix(Survey *out, const double *b, std::size_t rows, std::size_t cols,
               std::size_t row_stride = 0);
 
 }  // namespace cbfp

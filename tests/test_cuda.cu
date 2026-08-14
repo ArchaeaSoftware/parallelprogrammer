@@ -1395,13 +1395,13 @@ test_device_survey()
     cudaMemcpy(dev, src.data(), n * sizeof(double), cudaMemcpyHostToDevice);
 
     std::vector<cbfp::Survey> host(cols), device(cols);
-    cbfp::survey_matrix_col_major(src.data(), rows, cols, host.data());
+    cbfp::survey_matrix_col_major(host.data(), src.data(), rows, cols);
 
     // The device writes `out`, so it goes to device memory and comes back by
     // an explicit copy the caller chose to make.
     cbfp::Survey *d_out = nullptr;
     cudaMalloc(&d_out, cols * sizeof(cbfp::Survey));
-    cbfp::survey_matrix_col_major_device(dev, rows, cols, d_out);
+    cbfp::survey_matrix_col_major_device(d_out, dev, rows, cols);
     cudaMemcpy(device.data(), d_out, cols * sizeof(cbfp::Survey),
                cudaMemcpyDeviceToHost);
     cudaFree(d_out);
@@ -1425,8 +1425,8 @@ test_device_survey()
         std::vector<cbfp::Survey> pageable(cols);
         bool threw = false;
         try {
-            cbfp::survey_matrix_col_major_device(dev, rows, cols,
-                                                 pageable.data());
+            cbfp::survey_matrix_col_major_device(pageable.data(), dev, rows,
+                                                 cols);
         } catch (const std::invalid_argument &) {
             threw = true;
         }
@@ -1460,7 +1460,7 @@ test_device_survey()
         // write, and how a caller asks for the answer on the host.
         cbfp::Survey *mapped = nullptr;
         cudaHostAlloc(&mapped, 2 * sizeof(cbfp::Survey), cudaHostAllocMapped);
-        cbfp::survey_matrix_col_major_device(d2, rows, 2, mapped);
+        cbfp::survey_matrix_col_major_device(mapped, d2, rows, 2);
         check(!mapped[0].nonfinite && mapped[1].nonfinite,
               "the device survey flags a non-finite column and only that one");
         check(mapped[0].any && 0 == mapped[1].min_exponent,

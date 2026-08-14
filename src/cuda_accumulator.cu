@@ -565,8 +565,8 @@ InputRead::ready() const
 }
 
 void
-survey_matrix_col_major_device(const double *b, std::size_t rows,
-                               std::size_t cols, Survey *out,
+survey_matrix_col_major_device(Survey *out, const double *b,
+                               std::size_t rows, std::size_t cols,
                                std::size_t col_stride)
 {
     if (0 == rows || 0 == cols) return;
@@ -783,8 +783,8 @@ CudaColumnBlockMatrix::column_first_row(std::size_t j) const
 // column min(i, j) at slot |i - j|, Upper in column max(i, j) at slot
 // min(i, j).
 void
-CudaColumnBlockMatrix::locate(std::size_t i, std::size_t j, std::size_t &col,
-                              std::size_t &slot) const
+CudaColumnBlockMatrix::locate(std::size_t &col, std::size_t &slot,
+                              std::size_t i, std::size_t j) const
 {
     if (!symmetric_) {
         col = j;
@@ -1517,7 +1517,7 @@ CudaColumnBlockMatrix::entry_limbs(std::size_t i, std::size_t j) const
     flush_pending_zero();
     synchronize();
     std::size_t col = 0, slot = 0;
-    locate(i, j, col, slot);
+    locate(col, slot, i, j);
     const Column &c = cols_state_[col];
     std::vector<limb_t> v(c.nlimbs);
     // One small copy per limb position. This is a readback path, not a hot

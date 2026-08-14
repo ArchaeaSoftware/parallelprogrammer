@@ -78,8 +78,8 @@ public:
 
     // The [begin, end) of `total` items belonging to slot `slot`, in
     // contiguous blocks so a worker's items stay near one another in memory.
-    void partition(std::size_t total, unsigned slot, std::size_t &begin,
-                   std::size_t &end) const
+    void partition(std::size_t &begin, std::size_t &end, std::size_t total,
+                   unsigned slot) const
     {
         const std::size_t per = (total + count_ - 1) / count_;
         begin = per * slot;

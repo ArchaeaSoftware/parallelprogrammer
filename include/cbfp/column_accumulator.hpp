@@ -293,8 +293,8 @@ private:
     // Logical (i, j) to the entry that actually holds it: `col` is the storing
     // column and `slot` the index within it. The identity unless symmetric,
     // where the triangle folds one index onto the other.
-    void locate(std::size_t i, std::size_t j, std::size_t &col,
-                std::size_t &slot) const;
+    void locate(std::size_t &col, std::size_t &slot, std::size_t i,
+                std::size_t j) const;
 
     // Shared tail of the two survey-taking constructors.
     void reserve_from_surveys(const std::vector<std::vector<Survey>> &surveys);
@@ -303,8 +303,8 @@ private:
     // by stored entries when symmetric, since a triangular column's work runs
     // from n down to 1 and splitting on count alone would leave one worker
     // with most of the matrix.
-    void partition_columns(unsigned slot, std::size_t &begin,
-                           std::size_t &end) const;
+    void partition_columns(std::size_t &begin, std::size_t &end,
+                           unsigned slot) const;
 
     // Column j starts at b + j*column_step, with element i at + i*row_step.
     // Row-major is (1, row_stride); column-major is (col_stride, 1).
@@ -340,8 +340,8 @@ private:
 
     // Absolute value of entry (i, j) as a magnitude limb vector, plus its
     // sign. Gathers across limb positions, so this is a readback path only.
-    std::vector<limbs::limb_t> magnitude(std::size_t i, std::size_t j,
-                                         bool *negative) const;
+    std::vector<limbs::limb_t> magnitude(bool *negative, std::size_t i,
+                                         std::size_t j) const;
 
     std::size_t rows_;
     std::size_t cols_;

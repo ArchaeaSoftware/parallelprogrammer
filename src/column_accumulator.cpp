@@ -157,8 +157,8 @@ ColumnBlockMatrix::column_first_row(std::size_t j) const
 // slot |i - j|. Upper stores i <= j, so both land in column max(i, j) at slot
 // min(i, j). Neither needs a branch on which side of the diagonal it started.
 void
-ColumnBlockMatrix::locate(std::size_t i, std::size_t j, std::size_t &col,
-                          std::size_t &slot) const
+ColumnBlockMatrix::locate(std::size_t &col, std::size_t &slot, std::size_t i,
+                          std::size_t j) const
 {
     if (!symmetric_) {
         col = j;
@@ -381,7 +381,7 @@ ColumnBlockMatrix::accumulate(std::size_t i, std::size_t j, double v,
     const int e = static_cast<int>(e64);
 
     std::size_t col = 0, slot = 0;
-    locate(i, j, col, slot);
+    locate(col, slot, i, j);
     Column &c = cols_state_[col];
     if (!c.initialized) {
         c.exponent = e;
@@ -468,12 +468,12 @@ ColumnBlockMatrix::accumulate_column_range(const double *b,
 // rises monotonically, so each slot still gets a contiguous block and a
 // worker's columns stay near one another in memory.
 void
-ColumnBlockMatrix::partition_columns(unsigned slot, std::size_t &begin,
-                                     std::size_t &end) const
+ColumnBlockMatrix::partition_columns(std::size_t &begin, std::size_t &end,
+                                     unsigned slot) const
 {
     const unsigned n = threads();
     if (!symmetric_) {
-        pool_->partition(cols_, slot, begin, end);
+        pool_->partition(begin, end, cols_, slot);
         return;
     }
 
@@ -519,7 +519,7 @@ ColumnBlockMatrix::accumulate_columns(const double *b, std::size_t column_step,
     // memory. Columns are independent in storage, so nothing needs locking.
     pool_->run([&](unsigned slot) {
         std::size_t begin = 0, end = 0;
-        partition_columns(slot, begin, end);
+        partition_columns(begin, end, slot);
         accumulate_column_range(b, column_step, row_step, log2_scale, begin,
                                 end, slot);
     });
@@ -549,7 +549,7 @@ ColumnBlockMatrix::add_matrices_col_major(const double *const *b,
     }
     pool_->run([&](unsigned slot) {
         std::size_t begin = 0, end = 0;
-        partition_columns(slot, begin, end);
+        partition_columns(begin, end, slot);
         fold_column_range(b, count, stride, begin, end);
     });
 }
@@ -733,11 +733,11 @@ ColumnBlockMatrix::set_zero()
 }
 
 std::vector<limb_t>
-ColumnBlockMatrix::magnitude(std::size_t i, std::size_t j, bool *negative) const
+ColumnBlockMatrix::magnitude(bool *negative, std::size_t i, std::size_t j) const
 {
     check_index(i, j);
     std::size_t col = 0, slot = 0;
-    locate(i, j, col, slot);
+    locate(col, slot, i, j);
     const Column &c = cols_state_[col];
     const std::size_t n = c.limbs.size();
 
@@ -763,7 +763,7 @@ ColumnBlockMatrix::entry_limbs(std::size_t i, std::size_t j) const
 {
     check_index(i, j);
     std::size_t col = 0, slot = 0;
-    locate(i, j, col, slot);
+    locate(col, slot, i, j);
     const Column &c = cols_state_[col];
     std::vector<limb_t> v(c.limbs.size());
     for (std::size_t k = 0; k < c.limbs.size(); ++k) {
@@ -777,7 +777,7 @@ ColumnBlockMatrix::is_zero(std::size_t i, std::size_t j) const
 {
     check_index(i, j);
     std::size_t col = 0, slot = 0;
-    locate(i, j, col, slot);
+    locate(col, slot, i, j);
     const Column &c = cols_state_[col];
     for (const auto &lc : c.limbs) {
         if (0 != lc.data()[slot]) return false;
@@ -872,9 +872,9 @@ ColumnBlockMatrix::to_double(std::size_t i, std::size_t j,
                              double *residual) const
 {
     bool neg = false;
-    const std::vector<limb_t> mag = magnitude(i, j, &neg);
+    const std::vector<limb_t> mag = magnitude(&neg, i, j);
     std::size_t ecol = 0, eslot = 0;
-    locate(i, j, ecol, eslot);
+    locate(ecol, eslot, i, j);
     const long long exp = cols_state_[ecol].exponent;
     const Rounded r = round_magnitude(mag.data(), mag.size(), exp);
 
@@ -916,12 +916,12 @@ bool
 ColumnBlockMatrix::is_exactly_representable(std::size_t i, std::size_t j) const
 {
     bool neg = false;
-    const std::vector<limb_t> mag = magnitude(i, j, &neg);
+    const std::vector<limb_t> mag = magnitude(&neg, i, j);
     const std::size_t b = limbs::bit_length(mag.data(), mag.size());
     if (0 == b) return true;
 
     std::size_t ecol = 0, eslot = 0;
-    locate(i, j, ecol, eslot);
+    locate(ecol, eslot, i, j);
     const long long exp = cols_state_[ecol].exponent;
     const std::size_t tz = trailing_zeros(mag);
     if (b - tz > 53) return false;                                 // too wide
@@ -934,11 +934,11 @@ std::string
 ColumnBlockMatrix::to_exact_decimal(std::size_t i, std::size_t j) const
 {
     bool neg = false;
-    std::vector<limb_t> mag = magnitude(i, j, &neg);
+    std::vector<limb_t> mag = magnitude(&neg, i, j);
     if (0 == limbs::bit_length(mag.data(), mag.size())) return "0";
 
     std::size_t ecol = 0, eslot = 0;
-    locate(i, j, ecol, eslot);
+    locate(ecol, eslot, i, j);
     const long long exp = cols_state_[ecol].exponent;
     std::string digits;
     std::size_t frac_digits = 0;

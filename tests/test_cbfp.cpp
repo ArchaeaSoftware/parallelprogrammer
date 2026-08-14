@@ -1728,8 +1728,8 @@ test_public_survey()
     }
 
     std::vector<cbfp::Survey> a(cols), b(cols);
-    cbfp::survey_matrix_col_major(colmajor.data(), rows, cols, a.data());
-    cbfp::survey_matrix(rowmajor.data(), rows, cols, b.data());
+    cbfp::survey_matrix_col_major(a.data(), colmajor.data(), rows, cols);
+    cbfp::survey_matrix(b.data(), rowmajor.data(), rows, cols);
 
     for (std::size_t j = 0; j < cols; ++j) {
         CHECK(a[j].any == b[j].any);
@@ -1788,8 +1788,8 @@ test_presized_matches_adaptive()
     std::vector<std::vector<cbfp::Survey>> surveys(
         nbatches, std::vector<cbfp::Survey>(cols));
     for (int b = 0; b < nbatches; ++b) {
-        cbfp::survey_matrix_col_major(batch[b].data(), rows, cols,
-                                      surveys[b].data());
+        cbfp::survey_matrix_col_major(surveys[b].data(), batch[b].data(),
+                                      rows, cols);
     }
 
     cbfp::ColumnBlockMatrix adaptive(rows, cols);
@@ -1839,7 +1839,7 @@ test_presized_matches_adaptive()
         std::vector<std::vector<cbfp::Survey>> one(
             1, std::vector<cbfp::Survey>(1));
         std::vector<double> modest(rows, 1.0);
-        cbfp::survey_matrix_col_major(modest.data(), rows, 1, one[0].data());
+        cbfp::survey_matrix_col_major(one[0].data(), modest.data(), rows, 1);
 
         // ...then hand it something far outside those extents.
         std::vector<double> huge(rows, std::ldexp(1.0, 400));
