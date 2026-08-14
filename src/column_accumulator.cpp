@@ -868,8 +868,14 @@ residual_of(const std::vector<limb_t> &mag, long long exp, const Rounded &r)
 }  // namespace
 
 double
-ColumnBlockMatrix::to_double(std::size_t i, std::size_t j,
-                             double *residual) const
+ColumnBlockMatrix::to_double(std::size_t i, std::size_t j) const
+{
+    return to_double(nullptr, i, j);
+}
+
+double
+ColumnBlockMatrix::to_double(double *residual, std::size_t i,
+                             std::size_t j) const
 {
     bool neg = false;
     const std::vector<limb_t> mag = magnitude(&neg, i, j);
@@ -907,7 +913,7 @@ ColumnBlockMatrix::to_matrix_with_residual(double *out, double *residual,
     for (std::size_t j = 0; j < cols_; ++j) {
         for (std::size_t i = 0; i < rows_; ++i) {
             out[i * stride + j] =
-                to_double(i, j, &residual[i * stride + j]);
+                to_double(&residual[i * stride + j], i, j);
         }
     }
 }

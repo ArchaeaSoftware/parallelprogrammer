@@ -1141,7 +1141,7 @@ test_readback_residual()
     for (std::size_t j = 0; j < cols; ++j) {
         for (std::size_t i = 0; i < rows; ++i) {
             double lo = 1.0;  // must be overwritten, never left as-is
-            const double hi = a.to_double(i, j, &lo);
+            const double hi = a.to_double(&lo, i, j);
 
             // Asking for the residual must not perturb the value.
             CHECK_DOUBLE(a.to_double(i, j), hi);
@@ -1185,14 +1185,14 @@ test_readback_residual()
     const double two = 2.0;
     e.add_column(0, &two);
     double elo = 1.0;
-    CHECK_DOUBLE(e.to_double(0, 0, &elo), 2.0);
+    CHECK_DOUBLE(e.to_double(&elo, 0, 0), 2.0);
     CHECK_DOUBLE(elo, 0.0);
     CHECK(!std::signbit(elo));
 
     // So does an empty one.
     cbfp::ColumnBlockMatrix z(1, 1);
     double zlo = 1.0;
-    CHECK_DOUBLE(z.to_double(0, 0, &zlo), 0.0);
+    CHECK_DOUBLE(z.to_double(&zlo, 0, 0), 0.0);
     CHECK_DOUBLE(zlo, 0.0);
 
     // The bulk form must agree with the per-entry form, stride included.
@@ -1202,7 +1202,7 @@ test_readback_residual()
     for (std::size_t j = 0; j < cols; ++j) {
         for (std::size_t i = 0; i < rows; ++i) {
             double want_lo = 0.0;
-            const double want_hi = a.to_double(i, j, &want_lo);
+            const double want_hi = a.to_double(&want_lo, i, j);
             CHECK_DOUBLE(mv[i * stride + j], want_hi);
             CHECK_DOUBLE(mr[i * stride + j], want_lo);
         }
@@ -1222,7 +1222,7 @@ test_residual_recovers_cancellation()
     // 1e300 + 1 is not representable, so the double is just 1e300 and the
     // residual is what naive summation silently threw away.
     double lo = 0.0;
-    const double hi = a.to_double(0, 0, &lo);
+    const double hi = a.to_double(&lo, 0, 0);
     CHECK_DOUBLE(hi, 1e300);
     CHECK_DOUBLE(lo, 1.0);
 
@@ -1233,7 +1233,7 @@ test_residual_recovers_cancellation()
     const double tenth = 0.1;
     for (int k = 0; k < 10; ++k) t.add_column(0, &tenth);
     double tlo = 0.0;
-    const double thi = t.to_double(0, 0, &tlo);
+    const double thi = t.to_double(&tlo, 0, 0);
     CHECK_DOUBLE(thi, 1.0);
     CHECK_DOUBLE(tlo, std::ldexp(1.0, -54));
 
@@ -1441,7 +1441,7 @@ test_symmetric_keeps_exactness()
     cbfp::ColumnBlockMatrix q(3, cbfp::Uplo::Lower);
     for (int k = 0; k < 10; ++k) q.add(2, 0, 0.1);
     double lo = 0.0;
-    CHECK_DOUBLE(q.to_double(0, 2, &lo), 1.0);
+    CHECK_DOUBLE(q.to_double(&lo, 0, 2), 1.0);
     CHECK_DOUBLE(lo, std::ldexp(1.0, -54));
 
     // Pre-sized from surveys of the stored triangle: same answers, and no

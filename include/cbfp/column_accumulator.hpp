@@ -192,8 +192,14 @@ public:
     // Correctly rounded (round-to-nearest, ties-to-even) double nearest to the
     // exact stored value. Overflows to +/-inf; underflows through the
     // subnormal range without double rounding.
+    double to_double(std::size_t i, std::size_t j) const;
+
+    // The same, and the residual through the passback, which leads because the
+    // function writes through it. Two entry points rather than one defaulted
+    // parameter: a caller who wants the residual says so by which one they
+    // call, and a caller who does not is not made to write nullptr.
     //
-    // With `residual` non-null, also writes what the rounding discarded:
+    // Writes what the rounding discarded:
     // exactly (stored value - returned double), itself correctly rounded to a
     // double. The subtraction happens in the accumulator's own fixed point, so
     // the residual is the true difference and not an estimate -- forming it in
@@ -208,8 +214,7 @@ public:
     //     is_exactly_representable() reports independently;
     //   - a value outside double's range returns +/-inf with a residual of
     //     0.0, the difference being unrepresentable.
-    double to_double(std::size_t i, std::size_t j,
-                     double *residual = nullptr) const;
+    double to_double(double *residual, std::size_t i, std::size_t j) const;
 
     // Fills a dense row-major rows() x cols() buffer with to_double() results.
     void to_matrix(double *out, std::size_t row_stride = 0) const;
