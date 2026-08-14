@@ -550,6 +550,24 @@ behind the bus instead of queueing after it.
 | staged: the library copies the caller's buffer | 2.85 | 2.71 | 1.45 |
 | borrowed from `acquire_input`, read in place | **3.13** | **3.27** | **3.27** |
 
+`acquire_input` is not the only way to reach the second row.
+`add_matrix_col_major_in_place` reads a buffer the *caller* owns, provided it
+is page-locked and device-mapped, and hands back an `InputRead` -- a CUDA event
+recorded after the launch -- that says when the device has finished reading it.
+That puts the lifetime obligation in the signature rather than in a comment,
+which is what the memory-type probe below got wrong. At 65536x64:
+
+| | us a batch |
+| --- | --- |
+| staged, caller's own buffer | 3203 |
+| in place, waiting on the handle each batch | 2024 |
+| in place, two buffers in rotation | **1585** |
+
+2.02x, and 1585 us is within reach of the ~1760 us the kernel spends on the
+bus, so the host has stopped being the limiter. The event costs 0.16 us to
+create and destroy, which is why one per submission is affordable rather than
+needing a pool.
+
 3.27 Gelem/s is 26.1 GB/s of doubles against the 26.7 this link achieves, so
 the path sits at 97% of PCIe — and flat, where the copying version falls off
 as batches outgrow whatever was hiding the copy.
@@ -1117,11 +1135,14 @@ out of the library have all landed since the last revision of this list, along
 with symmetric storage and readback residuals, which were not on it. Carry-save
 at radix 52 came off it by being measured rather than by being done.
 
-1. **The host side of `add_matrix_col_major`**, which is where the triangle's
-   missing 2x actually is. The kernel gets ~1.94x on a triangle; the host path
-   gets 1.4-1.5x, and the difference is the staging copy and the host survey
-   that run before the launch. Pre-sizing already removes the survey -- what is
-   left to look at is the staging copy and the per-batch host loop.
+1. **Make the in-place path the one callers land on.** The staging copy is now
+   avoidable two ways -- `acquire_input` for a buffer the accumulator owns,
+   `add_matrix_col_major_in_place` for one the caller owns -- and either is
+   2.02x on the host path. What remains is that the *default* entry point is
+   still the staged one, so a caller who does not know to ask pays for a copy
+   the library then has to make. That is an API-shape decision rather than an
+   optimization: whether to deprecate the staged form, keep it as the
+   forgiving default, or require pinned input outright.
 
    The per-block fixed cost, by contrast, is not worth chasing: measured at
    ~12.7 ns a block against ~0.12 ns an element, which is 2.5% of a block at

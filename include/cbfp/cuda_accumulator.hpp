@@ -46,6 +46,41 @@ class ColumnBlockMatrix;
 bool
 cuda_available();
 
+// Signals when the device has finished reading an input buffer that was
+// submitted to be read in place, which is what tells a caller its buffer is
+// writable again.
+//
+// The hazard this exists for is real and was measured: the kernel streams the
+// buffer over PCIe and is still reading it after the submitting call returns,
+// so a caller refilling it corrupts about 63% of entries. An earlier design
+// tried to infer safety from the pointer's memory type, which gave one
+// function two lifetime contracts and nothing in the signature to tell them
+// apart. Handing back a handle puts the obligation where the caller can see it.
+//
+// Move-only, and owns a CUDA event. Destroying one without waiting is not an
+// error -- it is a statement that the buffer will not be written again.
+class InputRead {
+public:
+    InputRead() = default;
+    ~InputRead();
+    InputRead(InputRead &&other) noexcept;
+    InputRead &operator=(InputRead &&other) noexcept;
+    InputRead(const InputRead &) = delete;
+    InputRead &operator=(const InputRead &) = delete;
+
+    // Blocks until the device has finished reading. A default-constructed
+    // handle, or one whose submission was empty, returns at once.
+    void wait();
+
+    // The same question without blocking.
+    bool ready() const;
+
+private:
+    friend class CudaColumnBlockMatrix;
+    explicit InputRead(CUevent_st *ev) : ev_(ev) {}
+    CUevent_st *ev_ = nullptr;
+};
+
 class CudaColumnBlockMatrix {
 public:
     CudaColumnBlockMatrix(std::size_t rows, std::size_t cols);
@@ -156,6 +191,21 @@ public:
     // Throws std::domain_error on inf/NaN, and std::runtime_error if a column
     // was reserved too narrow or at too high an exponent for these values.
     void add_matrix_col_major(const double *b, std::size_t col_stride = 0);
+
+    // A += B, reading B where it lies instead of staging a copy of it.
+    //
+    // B must be page-locked and device-mapped -- cudaHostAlloc with
+    // cudaHostAllocMapped, or cudaHostRegister with cudaHostRegisterMapped --
+    // because the kernel dereferences it on the device. That is checked here
+    // rather than left to fault at the launch.
+    //
+    // B is still being read when this returns. Do not write to it until the
+    // returned handle says the read has finished. This is the same path
+    // acquire_input offers, for a caller that would rather own the buffer; the
+    // staging copy it avoids costs 1331 us at 65536x64, which is most of what
+    // separates the two rows of the table above.
+    InputRead add_matrix_col_major_in_place(const double *b,
+                                            std::size_t col_stride = 0);
 
     // The same, for input already resident in device memory.
     void add_matrix_col_major_device(const double *b,

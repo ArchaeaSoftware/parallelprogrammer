@@ -468,6 +468,44 @@ limbs_for_bits(std::size_t bits)
 
 }  // namespace
 
+InputRead::~InputRead()
+{
+    // Deliberately unchecked, as destructors must not throw.
+    if (nullptr != ev_) cudaEventDestroy(ev_);
+}
+
+InputRead::InputRead(InputRead &&other) noexcept : ev_(other.ev_)
+{
+    other.ev_ = nullptr;
+}
+
+InputRead &
+InputRead::operator=(InputRead &&other) noexcept
+{
+    if (this != &other) {
+        if (nullptr != ev_) cudaEventDestroy(ev_);
+        ev_ = other.ev_;
+        other.ev_ = nullptr;
+    }
+    return *this;
+}
+
+void
+InputRead::wait()
+{
+    if (nullptr != ev_) cuda(EventSynchronize(ev_));
+}
+
+bool
+InputRead::ready() const
+{
+    if (nullptr == ev_) return true;
+    const cudaError_t st = cudaEventQuery(ev_);
+    if (cudaSuccess == st) return true;
+    if (cudaErrorNotReady == st) return false;
+    cuda_fail(st, "cudaEventQuery", __FILE__, __LINE__);
+}
+
 bool
 cuda_available()
 {
@@ -1090,6 +1128,47 @@ CudaColumnBlockMatrix::acquire_input()
         s.in_flight = false;
     }
     return s.mapped;
+}
+
+InputRead
+CudaColumnBlockMatrix::add_matrix_col_major_in_place(const double *b,
+                                                     std::size_t col_stride)
+{
+    if (0 == rows_ || 0 == cols_) return InputRead();
+    const std::size_t stride = col_stride ? col_stride : rows_;
+
+    // The kernel dereferences this on the device, so pageable memory faults
+    // rather than merely running slowly. Checked here, where the diagnostic
+    // can say what is wrong and what to allocate instead.
+    cudaPointerAttributes attr{};
+    const cudaError_t st = cudaPointerGetAttributes(&attr, b);
+    if (cudaSuccess != st || nullptr == attr.devicePointer) {
+        cudaGetLastError();  // an unregistered pointer leaves this sticky
+        throw std::invalid_argument(
+            "cbfp: add_matrix_col_major_in_place needs page-locked, "
+            "device-mapped host memory -- cudaHostAlloc with "
+            "cudaHostAllocMapped, or cudaHostRegister with "
+            "cudaHostRegisterMapped");
+    }
+
+    if (presized_) {
+        if (++submitted_matrices_ > declared_matrices_) {
+            throw std::runtime_error(
+                "cbfp: more matrices accumulated than were described to the "
+                "constructor; the width bound holds for that many and no more");
+        }
+    } else {
+        // Surveyed through the host pointer; launched through the device one,
+        // which is the same address under unified addressing but need not be
+        // for a registered range.
+        validate_host_survey(b, stride);
+    }
+    launch_accumulate(static_cast<const double *>(attr.devicePointer), stride);
+
+    CUevent_st *ev = nullptr;
+    cuda(EventCreateWithFlags(&ev, cudaEventDisableTiming));
+    cuda(EventRecord(ev, st_compute_));
+    return InputRead(ev);
 }
 
 void

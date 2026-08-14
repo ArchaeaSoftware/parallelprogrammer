@@ -14,10 +14,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cbfp/column_accumulator.hpp"
@@ -962,6 +964,125 @@ test_device_detector()
     }
 }
 
+// Reading the caller's buffer in place, with an InputRead handle standing in
+// for the staging copy that used to make the lifetime question go away.
+void
+test_in_place_input()
+{
+    const std::size_t rows = 2048, cols = 16, n = rows * cols;
+    std::vector<double> host(n);
+    for (auto &x : host) x = random_value(10);
+
+    // The reference: the same batches through the staging path.
+    cbfp::ColumnBlockMatrix cpu(rows, cols);
+    cpu.add_matrix_col_major(host.data());
+    cpu.add_matrix_col_major(host.data());
+
+    cbfp::CudaColumnBlockMatrix staged(rows, cols);
+    staged.reserve_like(cpu);
+    staged.add_matrix_col_major(host.data());
+    staged.add_matrix_col_major(host.data());
+
+    double *pinned = nullptr;
+    check(cudaSuccess == cudaHostAlloc(&pinned, n * sizeof(double),
+                                       cudaHostAllocMapped),
+          "pinned mapped allocation succeeds");
+    std::memcpy(pinned, host.data(), n * sizeof(double));
+
+    cbfp::CudaColumnBlockMatrix in_place(rows, cols);
+    in_place.reserve_like(cpu);
+    cbfp::InputRead r1 = in_place.add_matrix_col_major_in_place(pinned);
+    // The buffer must not be rewritten until the handle clears; wait, then
+    // resubmit the same contents so the two accumulators see the same batches.
+    r1.wait();
+    check(r1.ready(), "the handle reports ready once waited on");
+    cbfp::InputRead r2 = in_place.add_matrix_col_major_in_place(pinned);
+    r2.wait();
+
+    std::size_t mismatches = 0;
+    for (std::size_t j = 0; j < cols; ++j) {
+        if (in_place.column_exponent(j) != staged.column_exponent(j) ||
+            in_place.column_limbs(j) != staged.column_limbs(j)) {
+            ++mismatches;
+            continue;
+        }
+        const std::vector<std::uint64_t> a = staged.download_column(j);
+        const std::vector<std::uint64_t> b = in_place.download_column(j);
+        if (a != b) ++mismatches;
+    }
+    check(mismatches == 0, "in-place matches the staged path: " +
+                               std::to_string(mismatches) + " mismatches");
+
+    // A default-constructed handle is already clear, and so is one from an
+    // empty accumulator.
+    {
+        cbfp::InputRead none;
+        check(none.ready(), "a default handle is ready");
+        none.wait();
+    }
+
+    // Move semantics: the moved-from handle must not double-destroy its event.
+    {
+        cbfp::InputRead a = in_place.add_matrix_col_major_in_place(pinned);
+        cbfp::InputRead b = std::move(a);
+        check(a.ready(), "a moved-from handle is inert");
+        b.wait();
+        cbfp::InputRead c;
+        c = std::move(b);
+        c.wait();
+        check(c.ready(), "move assignment carries the event");
+    }
+
+    // Pageable memory is refused rather than left to fault in the kernel.
+    {
+        cbfp::CudaColumnBlockMatrix g(rows, cols);
+        g.reserve_like(cpu);
+        bool threw = false;
+        try {
+            g.add_matrix_col_major_in_place(host.data());
+        } catch (const std::invalid_argument &) {
+            threw = true;
+        }
+        check(threw, "pageable input to the in-place path is rejected");
+
+        // And the accumulator is still usable afterwards, so the check is a
+        // rejection and not a wound.
+        g.add_matrix_col_major(host.data());
+        g.synchronize();
+        check(g.column_limbs(0) >= 1, "the accumulator survives the rejection");
+    }
+
+    // Registered rather than allocated: cudaHostRegister is the other way to
+    // get memory this path accepts.
+    {
+        std::vector<double> own(n);
+        for (auto &x : own) x = random_value(6);
+        if (cudaSuccess == cudaHostRegister(own.data(), n * sizeof(double),
+                                            cudaHostRegisterMapped)) {
+            cbfp::ColumnBlockMatrix c2(rows, cols);
+            c2.add_matrix_col_major(own.data());
+            cbfp::CudaColumnBlockMatrix g(rows, cols);
+            g.reserve_like(c2);
+            cbfp::InputRead r = g.add_matrix_col_major_in_place(own.data());
+            r.wait();
+            std::size_t bad = 0;
+            for (std::size_t j = 0; j < cols; ++j) {
+                const std::vector<std::uint64_t> dev = g.download_column(j);
+                for (std::size_t i = 0; i < rows; ++i) {
+                    const std::vector<std::uint64_t> h = c2.entry_limbs(i, j);
+                    for (std::size_t k = 0; k < h.size(); ++k)
+                        if (h[k] != dev[k * rows + i]) ++bad;
+                }
+            }
+            check(bad == 0, "cudaHostRegister'd memory reads in place: " +
+                                std::to_string(bad) + " mismatches");
+            cudaHostUnregister(own.data());
+        }
+    }
+
+    cudaFreeHost(pinned);
+}
+
 }  // namespace
 
 int
@@ -983,6 +1104,7 @@ main()
     test_symmetric();
     test_presized();
     test_device_detector();
+    test_in_place_input();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
