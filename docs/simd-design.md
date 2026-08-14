@@ -4,14 +4,16 @@
 allocation and the AVX-512 survey and accumulate kernels have all landed, and
 the measurements below are from the real kernels unless a section says
 otherwise. What remains open is the radix (see the table — the CPU, not the
-GPU, is where it would pay) and threading. This
+GPU, is where it would pay). Threading, producer-supplied surveys on both
+targets, symmetric storage and multi-batch folding have all landed since. This
 header previously read "design, not implemented", which stopped being true at
 `fdc8b75`.
 
-Targets both AVX-512 on the CPU and a future CUDA implementation. CUDA turned
-out to impose no special constraint on the representation — measurement found
-the two targets want the same thing — so the abstraction is driven by the radix
-choice below rather than by either machine's word size.
+Targets AVX-512 on the CPU and CUDA on the device, both implemented. CUDA
+turned out to impose no special constraint on the representation — measurement
+found the two targets want the same thing — so the abstraction is driven by the
+radix choice below rather than by either machine's word size. This paragraph
+read "a future CUDA implementation" until that stopped being true.
 
 Measurements are from a Ryzen 7 7700X (Zen 4: AVX512F/BW/DQ/VL, VBMI2,
 VPOPCNTDQ; 256-bit datapath, so AVX-512 ops are double-pumped) and an
@@ -29,7 +31,11 @@ RTX 3060 (sm_86, CUDA 12.9).
 | Flat free-function kernels; runtime dispatch via target attributes | settled |
 | No templates in the public API; radix templated in kernels only | settled |
 | Radix: 52-bit carry-save vs 64-bit canonical | **open, but on the CPU** |
-| Whether limb arrays get separate allocations on CUDA | open |
+| Whether limb arrays get separate allocations on CUDA | measured neutral, kept separate |
+| Survey supplied by the producer; accumulator pre-sized from it | landed, both targets |
+| Symmetric matrices store one triangle, LAPACK `uplo` | landed, both targets |
+| Readback returns the residual alongside the rounded double | landed |
+| Multi-batch folding, K matrices per pass | landed, CPU |
 
 Storage width is closed: 32-bit limbs were measured slower than 64-bit on both
 targets, so `uint64_t` is the plan of record everywhere and the limb type does
@@ -603,7 +609,7 @@ produce:
 The election serializes on one counter, so it is O(blocks); it wins below about
 2000 blocks and loses above, which the grid cap keeps it under.
 
-### Design intent: the survey belongs to whoever produced the matrix
+### The survey belongs to whoever produced the matrix (landed)
 
 Every path here pays for a survey — a full read of the batch to learn each
 column's lowest true-ulp exponent and highest bit — and every path pays for it
@@ -730,7 +736,7 @@ half-applied, so there is no corrupted state to explain. The survey can also be
 folded into the copy where one is happening anyway, so the data lands in device
 memory and its extent is known from the same pass.
 
-### Design intent: measured occupancy in place of a derived width
+### Design intent: measured occupancy in place of a derived width (still open)
 
 `fit_column` sizes a column from
 
@@ -768,6 +774,129 @@ between launches, whether the limb arrays it has will hold the batch it is
 about to send — and appending limb arrays disturbs nothing already allocated,
 which is the property per-limb-position allocation exists to preserve.
 
+
+## Symmetric matrices: store one triangle
+
+`ColumnBlockMatrix(n, Uplo)` and `CudaColumnBlockMatrix(n, Uplo)` keep only
+`i >= j` (Lower) or `i <= j` (Upper). Column `j` then holds `n-j` entries or
+`j+1`, and either way its stored rows stay contiguous — which is the whole
+reason the triangle fits this layout at all. A warp still reads 32 consecutive
+rows of one limb column as a single coalesced access; eight SIMD lanes still
+walk one allocation. Only the column's *length* changes, and that was already
+a per-column quantity in `LimbColumn`.
+
+The memory halves, exactly: 268.4 to 134.3 MB of device allocation at
+n = 4096. But the reason to store one copy rather than mirror two is not the
+memory.
+
+**Every column carries its own exponent and width.** In full storage `A(i,j)`
+and `A(j,i)` therefore hold equal values in *different limbs*, and symmetry is
+a property the data has to keep earning rather than one the structure
+guarantees. Stored once it cannot drift, and the tests assert
+`entry_limbs(i,j) == entry_limbs(j,i)` — an assertion full storage could not
+pass.
+
+Accumulation reads only the stored slice of an input matrix, so input traffic
+halves with the storage. The input is taken to be symmetric and that is not
+checked, because checking means reading the half this exists to avoid reading.
+
+Threading needed a different split. A triangular column's work runs from `n`
+entries down to 1, so an equal split by column *count* hands one worker most of
+the matrix; `partition_columns` splits on cumulative stored entries instead,
+which stays contiguous because the count is monotonic.
+
+| n | threads | full | triangular | |
+| --- | --- | --- | --- | --- |
+| 512 | 1 | 0.223 | 0.451 | 2.02x |
+| 2048 | 1 | 0.174 | 0.377 | 2.17x |
+| 2048 | 8 | 0.501 | 0.843 | 1.68x |
+| 1024 | GPU | 2.442 | 3.716 | 1.52x |
+| 4096 | GPU | 1.261 | 1.817 | 1.44x |
+
+Slightly *over* 2x single-threaded on the CPU rather than exactly 2x: at
+n = 2048 full storage is 34.8 MB against 32 MiB of L3 while the triangle is
+18.1 MB, so halving the footprint also buys back cache residency.
+
+The GPU's 1.4-1.5x is short of the CPU's 2x and **the reason is not measured**.
+The candidate is that the grid maps one column per y index, so a block on
+column 0 walks `n` entries while a block on column `n-1` walks one, and the
+launch retires at the pace of the longest. Flattening the packed triangle
+across the grid would fix that if so. Untested — do not repeat it as fact.
+
+## Readback: the rounded double and its residual
+
+`to_double(i, j, &residual)` also returns what the rounding discarded: exactly
+`(stored value - returned double)`, itself correctly rounded.
+
+The subtraction happens in the accumulator's own fixed point, not in floating
+point — forming `exact - hi` in doubles is precisely the cancellation this
+container exists to avoid. The rounding step returns the exact reconstruction
+of what it produced, `m * 2^scale` with `scale >= exp`, so `m << (scale - exp)`
+lands back in the column's fixed point and the difference is one exact limb
+subtraction using the same 128-bit-at-an-offset decomposition the accumulate
+kernel uses.
+
+Verified two ways: the suite re-accumulates each entry, subtracts the returned
+double and requires what remains to equal the reported residual exactly; and
+400 random multi-term sums were compared against exact rational arithmetic
+outside this codebase, matching bit for bit including the sign of zero.
+
+What it is worth, and what it is not. The pair carries ~106 bits against the
+double's ~53 — measured worst relative error 2^-107 against 2^-53 over those
+400 sums. But `lo` is a `double`, so it is a fixed +53 bits and *not* "the rest
+of the value": columns here are routinely 128-192 bits wide, and everything
+below the pair stays in the limbs. And the pair has to be kept unevaluated —
+`hi + lo` in double arithmetic returned `hi` unchanged in 399 of those 400
+cases, because `|lo| <= ulp(hi)/2` by construction.
+
+## Multi-batch: folding K matrices into one pass
+
+`add_matrices_col_major(b, count)` applies `count` matrices to each column in a
+single pass. Identical results to a loop over `add_matrix_col_major` — exact
+accumulation does not care about order or grouping — but one at a time each
+batch reads and writes every limb it touches, while folded the limbs are read
+once, all K addends applied in registers, and written once. Traffic per element
+goes from ~40 bytes to `8 + 32/K`.
+
+Column-major only. Folding row-major input would mean staging K columns per
+worker, and writing and re-reading that staging is the traffic this exists to
+avoid.
+
+| 64 columns, Gelem/s, median of 3 | seq | K=2 | K=4 | K=8 |
+| --- | --- | --- | --- | --- |
+| 65536 rows, 8 threads | 1.14 | 1.84 | 2.65 | 3.01 |
+| any shape, 1 thread | 0.57 | 0.69 | 0.59 | 0.49 |
+
+**2.6x at the DRAM-bound shape, and K is a judgement rather than "as large as
+possible".** Single-threaded only K=2 pays: there is no DRAM pressure to
+relieve, and K input columns are K concurrent streams instead of one. Inside L3
+on eight threads the run-to-run spread swamps the difference — sequential alone
+varies 1.75 to 2.67 across runs — so nothing is claimed there.
+
+Folding does **not** require pre-sizing, and the folded matrices need not be
+all of them or come first. Without surveys the fold surveys its K columns and
+fits the column once before adding any of them, so it settles the column itself
+rather than requiring it settled; folded and single adds interleave in any
+order, including a fold that rescales a column earlier single adds populated.
+
+Separating the two levers at 65536x64 on eight threads:
+
+| | adaptive | pre-sized |
+| --- | --- | --- |
+| one matrix at a time | 1.184 | 1.195 |
+| folded, K=8 | 2.148 | 3.068 |
+
+Folding alone is 1.81x; **pre-sizing alone is 1.01x**. The uplift is
+accumulator traffic, not allocation — both figures in the headline table were
+already pre-sized, so neither reallocated at all. Pre-sizing then adds 1.43x on
+top of folding, because an adaptive fold still reads its K columns to survey
+them, and once folding has removed the dominant traffic those reads are what is
+left to remove.
+
+Columns wider than eight limbs fall back to one batch at a time. Not a
+concession: the single-batch kernel stops at the first dead carry, while the
+fold must write back every limb it loaded, so past that width folding would
+move *more* memory.
 
 ## Implemented
 
@@ -842,36 +971,34 @@ it the GPU does, and the ratio at the top is just the bandwidth ratio.
 
 ## Remaining work, in order
 
-Widening, rescaling, `reserve_for` and threading have all landed since the
-last revision of this list.
+Ping-pong input buffers, multi-batch folding on the CPU, and taking the survey
+out of the library have all landed since the last revision of this list, along
+with symmetric storage and readback residuals, which were not on it.
 
-1. **Ping-pong input buffers**, per "The host-input path" above. A correctness
-   gap rather than an optimization: a caller cannot currently know when it is
-   safe to refill a buffer the device is reading.
-2. **Multi-batch accumulation, on the CPU.** Folding K batches into one
-   accumulator read-modify-write takes traffic from ~40 bytes an element to
-   8 + 32/K. Measured on the GPU as an upper bound — 8.25 to 27.2 Gelem/s at
-   K=8, with implied bandwidth flat at ~330 GB/s throughout, which is what
-   proves the kernel bandwidth-bound. The lever belongs on the **CPU**, whose
-   65536x64 case is DRAM-bound at 1.11 Gelem/s; on the GPU's host-input path
-   the bus carries the input regardless, so batching cannot reduce what
-   crosses it.
-3. **Carry-save at radix 52 on the CPU.** The largest measured win for the
-   cache-resident sizes, where the CPU is issue-bound and every instruction
-   removed is time removed: deleting the carry chain outright is worth 25-36%
-   at 1-4 limbs and 45-52% at eight with divergent exponents. Expect less --
-   at radix 52 a block's offsets span ~23% further, and that range drives the
-   AVX-512 loop's trip count. De-risk as prescribed above: instantiate both
-   radices and assert bit-identical `to_exact_decimal` over the corpus.
-4. **Take the survey out of the library**, per "the survey belongs to whoever
-   produced the matrix" above. It removes a full read from both paths, removes
-   the device path's 19.9 us round-trip entirely -- 79% of a 1024-row batch --
-   and lets an accumulator be sized exactly before any processing begins,
-   so it never rescales or widens. The interface change is small; the trust
-   boundary it introduces is the part to design carefully. Where a producer
-   cannot supply it, launching survey and accumulate back to back with the
-   accumulate self-guarding on the verdict gets most of the same benefit
-   without asking the host anything.
+1. **Carry-save at radix 52 on the CPU.** The largest measured win still
+   uncollected, for the cache-resident sizes where the CPU is issue-bound and
+   every instruction removed is time removed: deleting the carry chain outright
+   is worth 25-36% at 1-4 limbs and 45-52% at eight with divergent exponents.
+   Expect less -- at radix 52 a block's offsets span ~23% further, and that
+   range drives the AVX-512 loop's trip count. De-risk as prescribed above:
+   instantiate both radices and assert bit-identical `to_exact_decimal` over
+   the corpus.
+
+   Note this is a **CPU** item. `cuda_accumulator.cu` carries a `static_assert`
+   calling carry-save "the next milestone" for the device, which contradicts
+   the table above -- the GPU is bandwidth-bound and gains nothing. That
+   comment is stale and points the next reader at the wrong target.
+
+2. **Why the triangle gains less on the GPU than the CPU** -- 1.4-1.5x against
+   2.0-2.2x. The candidate is grid load imbalance, one column per y index, and
+   it is unmeasured. Cheap to settle and it either recovers the missing 2x or
+   removes a wrong explanation from this document.
+
+3. **Multi-batch folding on the device.** Previously ruled out on the grounds
+   that every input matrix has to be vetted separately; pre-sizing removed that
+   vetting, so the premise is gone. Folding cuts *device* traffic, so it would
+   show with input already resident and not on the host-input path, where PCIe
+   carries the input regardless.
 
 Smaller, known: `reserve_column` issues a `cudaMemsetAsync` per limb position,
 `cols * nlimbs` of them, one-time at reserve rather than per batch. And
@@ -921,6 +1048,23 @@ being caught. Both are worth remembering when re-measuring.
   non-reproducible swings in both directions — the allocator has to be taken
   out of the experiment before the effect is visible at all.
 
+- The multi-batch fold was first written scalar, on the strength of the
+  traffic argument alone, and lost everywhere -- a flat 3x deficit at every
+  shape, 0.19 against 0.57 Gelem/s single-threaded. The argument was sound and
+  the implementation gave up eight lanes to collect on it. Two measurements
+  said what to do rather than guessing: thread scaling showed the mechanism
+  working (the fold scaled 7.0x across eight cores where sequential managed
+  2.4x), and running K=8 over eight distinct buffers against the same buffer
+  eight times -- identical arithmetic, identical accumulator traffic -- gave
+  1.000 against 2.748 Gelem/s, so most of the remaining loss was the input
+  *stream count*, not the fold. A traffic model that counts bytes and not
+  streams will mispredict this.
+- The fold's uplift was initially attributed to avoiding reallocation. It is
+  not: both paths in the headline measurement were already pre-sized, so
+  neither reallocated, and separating the levers gives 1.81x for folding alone
+  against 1.01x for pre-sizing alone. When two changes ship together, measure
+  the 2x2 before crediting either.
+
 The synthetic carry walk used throughout has none of the real work: no
 decompose, no per-lane variable shifts, no masked selects. Treat anything still
 resting on it as unsettled.
@@ -935,8 +1079,19 @@ Gelem/s, exact accumulations per second, mixed signs.
 | --- | --- | --- | --- |
 | CPU, 1 thread | 0.80 | 0.77 | 0.67 |
 | CPU, 8 threads | 4.31 | 4.65 | 1.11 |
+| CPU, 8 threads, folded K=8 | — | — | **3.01** |
 | GPU, host input | 3.11 | 3.26 | 3.23 |
 | GPU, input resident | 4.40 | 6.07 | 6.65 |
+
+The 65536x64 row is the one that moved. It was the DRAM-bound case and the
+worst number in the table; folding eight matrices per pass takes it from 1.11
+to 3.01, past the GPU's host-input rate. Nothing else in the table changed,
+because nothing else was bound by accumulator traffic.
+
+Pre-sizing does not appear here because it is worth ~1% on the single-matrix
+path. Where it shows is the device's small-batch fixed cost, which it removes
+outright: 56.5 to 8.9 us for a 1024-row batch read from device memory, since
+there is no longer a survey kernel or a round trip to wait for.
 
 The CPU reaches 1.22 Gelem/s single-threaded on one-limb columns, which is the
 narrowest case and the one the pre-threading figure of 1.122 was measured on.

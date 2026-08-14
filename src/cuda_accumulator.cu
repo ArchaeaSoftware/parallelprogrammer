@@ -254,13 +254,16 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols,
                   unsigned *__restrict__ ticket, unsigned ncols)
 {
     // The addend split, the offset arithmetic and the limb mask below are all
-    // written in terms of kRadix. What is not yet written is the carry-save
-    // apply: at a reduced radix the inner loop becomes a bare add with no
-    // carry-out test and no dependency between limb positions, plus a
-    // normalization pass before readback. That is the next milestone.
+    // written in terms of kRadix, so a reduced radix would drop in here. It is
+    // not worth doing on this target: deleting the carry chain outright --
+    // the most carry-save could ever save -- measured -2.4% to +2.8% on the
+    // device, because this kernel is bandwidth-bound and the arithmetic hides
+    // behind the memory. The same experiment on AVX-512 is worth 25-52%. An
+    // earlier version of this comment called carry-save the device's next
+    // milestone, which pointed at the one target where it was measured not to
+    // pay. See docs/simd-design.md.
     static_assert(kRadix == 64,
-                  "only the canonical radix is implemented; carry-save at "
-                  "radix 52 is the next milestone");
+                  "only the canonical radix is implemented");
     constexpr unsigned long long kLimbMask =
         kRadix == 64 ? ~0ull : ((1ull << kRadix) - 1);
 
