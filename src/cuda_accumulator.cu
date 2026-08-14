@@ -568,6 +568,9 @@ CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t rows, std::size_t cols)
         cuda(Malloc(&ticket_, sizeof(unsigned)));
         cuda(Memset(ticket_, 0, sizeof(unsigned)));
         cuda(Malloc(&descriptors_, cols_ * sizeof(ColumnDesc)));
+        cuda(HostAlloc(&desc_host_, cols_ * sizeof(ColumnDesc),
+                       cudaHostAllocDefault));
+        cuda(EventCreateWithFlags(&ev_desc_, cudaEventDisableTiming));
         cuda(Malloc(&survey_out_, cols_ * sizeof(DeviceSurvey)));
     }
     init_columns();
@@ -718,6 +721,8 @@ CudaColumnBlockMatrix::~CudaColumnBlockMatrix()
         cudaFree(c.dev_bases);
     }
     cudaFree(descriptors_);
+    cudaFreeHost(desc_host_);
+    if (nullptr != ev_desc_) cudaEventDestroy(ev_desc_);
     cudaFree(survey_out_);
     cudaFree(shapes_);
     cudaFree(occupancy_device_);
@@ -1013,14 +1018,27 @@ void
 CudaColumnBlockMatrix::sync_descriptors()
 {
     if (!descriptors_stale_) return;
-    std::vector<ColumnDesc> host(cols_);
+
+    // The staging buffer may still be under a previous upload. In practice it
+    // never is -- descriptors only go stale from grow_column and
+    // rescale_column, both of which have already drained the stream -- but the
+    // guard costs nothing when the event has long since fired.
+    if (desc_in_flight_) {
+        cuda(EventSynchronize(ev_desc_));
+        desc_in_flight_ = false;
+    }
+    ColumnDesc *host = static_cast<ColumnDesc *>(desc_host_);
     for (std::size_t j = 0; j < cols_; ++j) {
         host[j].bases = cols_state_[j].dev_bases;
         host[j].exponent = cols_state_[j].exponent;
         host[j].nlimbs = static_cast<unsigned>(cols_state_[j].nlimbs);
     }
-    cuda(Memcpy(descriptors_, host.data(), cols_ * sizeof(ColumnDesc),
-                cudaMemcpyHostToDevice));
+    // On st_compute_, so it is ordered before the launch that reads it without
+    // the host waiting for anything already queued there.
+    cuda(MemcpyAsync(descriptors_, host, cols_ * sizeof(ColumnDesc),
+                     cudaMemcpyHostToDevice, st_compute_));
+    cuda(EventRecord(ev_desc_, st_compute_));
+    desc_in_flight_ = true;
     descriptors_stale_ = false;
 }
 

@@ -404,6 +404,13 @@ private:
 
     void *descriptors_ = nullptr;  // device ColumnDesc[]
     bool descriptors_stale_ = true;
+    // Page-locked staging for the descriptor upload, and an event marking when
+    // the device has finished reading it. cudaMemcpyAsync from *pageable*
+    // memory synchronizes the stream before it starts, so copying out of an
+    // ordinary vector would drain the pipeline however asynchronous it looks.
+    void *desc_host_ = nullptr;  // pinned ColumnDesc[]
+    CUevent_st *ev_desc_ = nullptr;
+    bool desc_in_flight_ = false;
     void *survey_out_ =
         nullptr;  // device survey results, for device-side input
 
