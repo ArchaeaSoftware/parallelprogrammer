@@ -118,6 +118,14 @@ struct ColumnShape {
     unsigned first_row;
 };
 
+// The matrices one launch folds together. Passed by value, so it rides in the
+// kernel parameter block (constant memory) and needs no allocation or copy.
+constexpr unsigned kMaxFoldInputs = 16;
+struct InputSet {
+    const double *p[kMaxFoldInputs];
+    unsigned n;
+};
+
 struct ColumnDesc {
     // One base per limb position, so widening appends rather than moves.
     // A warp's threads all work different rows of the same limb column, so
@@ -244,8 +252,7 @@ survey_kernel(const double *__restrict__ values,
 // arrays in the same instruction), not instruction count.
 template <int kRadix>
 __global__ void
-accumulate_kernel(const ColumnDesc *__restrict__ cols,
-                  const double *__restrict__ values,
+accumulate_kernel(const ColumnDesc *__restrict__ cols, InputSet in,
                   const ColumnShape *__restrict__ shapes,
                   std::size_t col_stride, int *__restrict__ occupancy_device,
                   int *__restrict__ occupancy_host,
@@ -270,8 +277,8 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols,
     const unsigned j = blockIdx.y;
     const ColumnDesc c = cols[j];
     const ColumnShape sh = shapes[j];
-    const double *col = values + static_cast<std::size_t>(j) * col_stride +
-                        sh.first_row;
+    const std::size_t col_off =
+        static_cast<std::size_t>(j) * col_stride + sh.first_row;
     const std::size_t rows = sh.rows;
 
     __shared__ int s_lim[kBlock];
@@ -292,6 +299,15 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols,
     for (std::size_t i =
              static_cast<std::size_t>(blockIdx.x) * blockDim.x + tid;
          i < rows; i += step) {
+      // Blocking over the input set, not over the accumulator. Every matrix's
+      // addend lands in the same limbs of the same row, back to back, so those
+      // read-modify-writes hit L1 and only the first read and the last write
+      // reach DRAM. Traffic an element goes from 8 + 16*nlimbs to
+      // 8*n + 16*nlimbs, and it needs no register array -- so the limb count
+      // does not have to be a compile-time constant, which it could not be:
+      // columns of one matrix carry their own widths.
+      for (unsigned bi = 0; bi < in.n; ++bi) {
+        const double *col = in.p[bi] + col_off;
         unsigned long long m;
         int e, top;
         bool neg, bad;
@@ -360,6 +376,7 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols,
             }
             if (0 == carry && p >= off + 1) break;
         }
+      }
     }
 
     // Fold the per-thread maxima, reduce across blocks in device memory with
@@ -1028,8 +1045,7 @@ CudaColumnBlockMatrix::ensure_slots(std::size_t words)
 // CPU accumulator uses -- which is the AVX-512 one where available, at ~0.12
 // ns/elem. Cheap enough to hide entirely behind the transfer it runs against.
 void
-CudaColumnBlockMatrix::validate_host_survey(const double *b,
-                                            std::size_t col_stride)
+CudaColumnBlockMatrix::require_all_reserved() const
 {
     for (std::size_t j = 0; j < cols_; ++j) {
         if (!cols_state_[j].reserved) {
@@ -1038,6 +1054,13 @@ CudaColumnBlockMatrix::validate_host_survey(const double *b,
                 "accumulation");
         }
     }
+}
+
+void
+CudaColumnBlockMatrix::validate_host_survey(const double *b,
+                                            std::size_t col_stride)
+{
+    require_all_reserved();
 
     // Not threaded, and measured rather than assumed: with two slots in
     // rotation the survey of the next batch already overlaps the kernel
@@ -1114,7 +1137,8 @@ CudaColumnBlockMatrix::add_matrix_col_major(const double *b,
         // for a registered range.
         validate_host_survey(b, stride);
     }
-    launch_accumulate(static_cast<const double *>(attr.devicePointer), stride);
+    { const double *one = static_cast<const double *>(attr.devicePointer);
+      launch_accumulate(&one, 1, stride); }
 
     // A buffer from acquire_input is one of ours, and its slot's event is what
     // that call blocks on. Keep the rotation's bookkeeping current so both
@@ -1130,6 +1154,70 @@ CudaColumnBlockMatrix::add_matrix_col_major(const double *b,
     cuda(EventCreateWithFlags(&ev, cudaEventDisableTiming));
     cuda(EventRecord(ev, st_compute_));
     return InputRead(ev);
+}
+
+// One survey staging, one launch per matrix. The kernel reduces with atomicMin
+// and atomicMax, so successive launches accumulate the union of their extents
+// -- which is exactly the aggregate a fold has to be sized for.
+void
+CudaColumnBlockMatrix::survey_device_inputs(const double *const *b,
+                                            std::size_t count,
+                                            std::size_t col_stride)
+{
+    const dim3 grid = launch_grid(rows_, cols_);
+    std::vector<DeviceSurvey> surveys(cols_);
+    for (auto &d : surveys) d = DeviceSurvey{INT_MAX, INT_MIN, 0, 0};
+    cuda(MemcpyAsync(survey_out_, surveys.data(), cols_ * sizeof(DeviceSurvey),
+                     cudaMemcpyHostToDevice, st_compute_));
+    for (std::size_t k = 0; k < count; ++k) {
+        survey_kernel<<<grid, kBlock, 0, st_compute_>>>(
+            b[k], static_cast<const ColumnShape *>(shapes_), col_stride,
+            static_cast<DeviceSurvey *>(survey_out_));
+    }
+    cuda(MemcpyAsync(surveys.data(), survey_out_, cols_ * sizeof(DeviceSurvey),
+                     cudaMemcpyDeviceToHost, st_compute_));
+    synchronize();
+
+    for (std::size_t j = 0; j < cols_; ++j) {
+        if (surveys[j].nonfinite) {
+            throw std::domain_error(
+                "cbfp: cannot accumulate a non-finite value");
+        }
+        if (!surveys[j].any) continue;
+        require_fit(j, surveys[j].min_exponent, surveys[j].max_top);
+    }
+}
+
+void
+CudaColumnBlockMatrix::add_matrices_col_major_device(const double *const *b,
+                                                     std::size_t count,
+                                                     std::size_t col_stride)
+{
+    if (0 == count || 0 == rows_ || 0 == cols_) return;
+    if (count > kMaxFoldInputs) {
+        std::ostringstream os;
+        os << "cbfp: at most " << kMaxFoldInputs
+           << " matrices may be folded into one pass; " << count << " given";
+        throw std::invalid_argument(os.str());
+    }
+    require_all_reserved();
+    const std::size_t stride = col_stride ? col_stride : rows_;
+
+    if (presized_) {
+        submitted_matrices_ += count;
+        if (submitted_matrices_ > declared_matrices_) {
+            throw std::runtime_error(
+                "cbfp: more matrices accumulated than were described to the "
+                "constructor; the width bound holds for that many and no more");
+        }
+    } else {
+        // Every matrix must be surveyed and the column fitted before any of
+        // them is added: a widen partway through the fold would leave earlier
+        // matrices already written into a column of the wrong shape.
+        survey_device_inputs(b, count, stride);
+    }
+    sync_descriptors();
+    launch_accumulate(b, count, stride);
 }
 
 void
@@ -1202,7 +1290,7 @@ CudaColumnBlockMatrix::accumulate_device(const double *b,
                 "the constructor; the width bound holds for that many and "
                 "no more");
         }
-        launch_accumulate(b, col_stride);
+        launch_accumulate(&b, 1, col_stride);
         return;
     }
     sync_descriptors();
@@ -1236,13 +1324,14 @@ CudaColumnBlockMatrix::accumulate_device(const double *b,
         require_fit(j, surveys[j].min_exponent, surveys[j].max_top);
     }
 
-    launch_accumulate(b, col_stride);
+    launch_accumulate(&b, 1, col_stride);
 }
 
 // Queues the accumulate. Asynchronous: the caller is not blocked, so batches
 // pipeline against each other without the caller doing anything.
 void
-CudaColumnBlockMatrix::launch_accumulate(const double *b,
+CudaColumnBlockMatrix::launch_accumulate(const double *const *b,
+                                         std::size_t count,
                                          std::size_t col_stride)
 {
     for (std::size_t j = 0; j < cols_; ++j) {
@@ -1256,8 +1345,11 @@ CudaColumnBlockMatrix::launch_accumulate(const double *b,
 
     const dim3 grid = launch_grid(rows_, cols_);
 
+    InputSet in;
+    in.n = static_cast<unsigned>(count);
+    for (std::size_t k = 0; k < count; ++k) in.p[k] = b[k];
     accumulate_kernel<64><<<grid, kBlock, 0, st_compute_>>>(
-        static_cast<const ColumnDesc *>(descriptors_), b,
+        static_cast<const ColumnDesc *>(descriptors_), in,
         static_cast<const ColumnShape *>(shapes_), col_stride,
         occupancy_device_, occupancy_host_, flags_device_, flags_host_,
         ticket_, static_cast<unsigned>(cols_));

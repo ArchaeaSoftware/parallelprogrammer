@@ -1118,6 +1118,127 @@ test_in_place_input()
     cudaFreeHost(pinned);
 }
 
+// Folding several device-resident matrices into one pass changes only the
+// traffic. Exact accumulation does not care about grouping, so the stored
+// limbs must be identical to submitting them one at a time.
+void
+test_device_fold()
+{
+    for (int variant = 0; variant < 3; ++variant) {
+        const std::size_t rows = variant == 2 ? 257 : 4096;
+        const std::size_t cols = variant == 2 ? 9 : 32;
+        const std::size_t count = variant == 1 ? 8 : 3;
+        const int spread = variant == 1 ? 300 : 8;
+
+        std::vector<std::vector<double>> batches(
+            count, std::vector<double>(rows * cols));
+        for (auto &v : batches)
+            for (auto &x : v) x = random_value(spread);
+
+        // Sequential reference, one matrix per launch.
+        cbfp::ColumnBlockMatrix cpu(rows, cols);
+        for (auto &v : batches) submit(cpu, v);
+        cbfp::CudaColumnBlockMatrix seq(rows, cols);
+        seq.reserve_like(cpu);
+
+        std::vector<double *> dev(count);
+        std::vector<const double *> devc(count);
+        for (std::size_t k = 0; k < count; ++k) {
+            cudaMalloc(&dev[k], rows * cols * sizeof(double));
+            cudaMemcpy(dev[k], batches[k].data(), rows * cols * sizeof(double),
+                       cudaMemcpyHostToDevice);
+            devc[k] = dev[k];
+            seq.add_matrix_col_major_device(dev[k]);
+        }
+        seq.synchronize();
+
+        cbfp::CudaColumnBlockMatrix fold(rows, cols);
+        fold.reserve_like(cpu);
+        fold.add_matrices_col_major_device(devc.data(), count);
+        fold.synchronize();
+
+        std::size_t bad = 0;
+        for (std::size_t j = 0; j < cols; ++j) {
+            if (fold.column_exponent(j) != seq.column_exponent(j) ||
+                fold.column_limbs(j) != seq.column_limbs(j)) {
+                ++bad;
+                continue;
+            }
+            if (fold.download_column(j) != seq.download_column(j)) ++bad;
+        }
+        check(bad == 0, "device fold matches sequential, variant " +
+                            std::to_string(variant) + ": " +
+                            std::to_string(bad) + " mismatches");
+        for (auto *p : dev) cudaFree(p);
+    }
+
+    // An adaptively sized accumulator has to survey every matrix and fit once
+    // before adding any of them, or a widen partway through would leave the
+    // earlier ones written into a column of the wrong shape.
+    {
+        const std::size_t rows = 512, cols = 4, count = 3;
+        std::vector<std::vector<double>> batches(
+            count, std::vector<double>(rows * cols));
+        for (std::size_t k = 0; k < count; ++k)
+            for (auto &x : batches[k])
+                x = std::ldexp(1.0 + (double)(rng() % 100), -40 * (int)k);
+
+        cbfp::ColumnBlockMatrix cpu(rows, cols);
+        for (auto &v : batches) submit(cpu, v);
+
+        std::vector<double *> dev(count);
+        std::vector<const double *> devc(count);
+        for (std::size_t k = 0; k < count; ++k) {
+            cudaMalloc(&dev[k], rows * cols * sizeof(double));
+            cudaMemcpy(dev[k], batches[k].data(), rows * cols * sizeof(double),
+                       cudaMemcpyHostToDevice);
+            devc[k] = dev[k];
+        }
+        // Reserved wide enough only for the first matrix, so the fold must
+        // widen and lower the exponent from the aggregate of all three.
+        cbfp::CudaColumnBlockMatrix g(rows, cols);
+        for (std::size_t j = 0; j < cols; ++j) g.reserve_column(j, 0, 64);
+        g.add_matrices_col_major_device(devc.data(), count);
+        g.synchronize();
+        check(g.column_exponent(0) < -60,
+              "an adaptive fold lowers the exponent to the aggregate");
+        std::size_t bad = 0;
+        for (std::size_t j = 0; j < cols; ++j) {
+            const std::vector<std::uint64_t> d = g.download_column(j);
+            for (std::size_t i = 0; i < rows; ++i) {
+                const std::vector<std::uint64_t> h = cpu.entry_limbs(i, j);
+                if (g.column_exponent(j) != cpu.column_exponent(j) ||
+                    g.column_limbs(j) != h.size()) { ++bad; break; }
+                for (std::size_t k = 0; k < h.size(); ++k)
+                    if (h[k] != d[k * rows + i]) ++bad;
+            }
+        }
+        check(bad == 0, "and gets the same answer: " + std::to_string(bad) +
+                            " mismatches");
+        for (auto *p : dev) cudaFree(p);
+    }
+
+    // More than the parameter block holds is an error, not a silent truncation.
+    {
+        cbfp::ColumnBlockMatrix cpu(64, 2);
+        std::vector<double> v(64 * 2, 1.0);
+        submit(cpu, v);
+        cbfp::CudaColumnBlockMatrix g(64, 2);
+        g.reserve_like(cpu);
+        double *d = nullptr;
+        cudaMalloc(&d, 64 * 2 * sizeof(double));
+        std::vector<const double *> many(17, d);
+        bool threw = false;
+        try {
+            g.add_matrices_col_major_device(many.data(), many.size());
+        } catch (const std::invalid_argument &) {
+            threw = true;
+        }
+        check(threw, "folding more matrices than fit is rejected");
+        cudaFree(d);
+    }
+}
+
 }  // namespace
 
 int
@@ -1140,6 +1261,7 @@ main()
     test_presized();
     test_device_detector();
     test_in_place_input();
+    test_device_fold();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

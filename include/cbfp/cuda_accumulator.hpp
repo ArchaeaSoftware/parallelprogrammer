@@ -207,6 +207,26 @@ public:
     // that B will not be written again.
     InputRead add_matrix_col_major(const double *b, std::size_t col_stride = 0);
 
+    // A += B[0] + ... + B[count-1], all already resident in device memory, in
+    // a single pass over the accumulator.
+    //
+    // Identical results to submitting them one at a time. What changes is
+    // traffic, and on this target that is the whole game: the accumulate is
+    // bandwidth-bound at 97-99% of the card's streaming rate, moving ~8 bytes
+    // of input and ~16*nlimbs of accumulator per element. Folding turns that
+    // into 8*count + 16*nlimbs, because every matrix's addend lands in the
+    // same limbs of the same row and L1 absorbs the repeats.
+    //
+    // Blocked over the input set rather than held in registers on purpose. A
+    // register array would have to be indexed at compile time, so the kernel
+    // would be templated on the limb count -- which columns of one matrix do
+    // not share, so one launch could not serve them.
+    //
+    // At most 16 matrices a call; they ride in the kernel's parameter block.
+    void add_matrices_col_major_device(const double *const *b,
+                                       std::size_t count,
+                                       std::size_t col_stride = 0);
+
     // The same, for input already resident in device memory.
     void add_matrix_col_major_device(const double *b,
                                      std::size_t col_stride = 0);
@@ -309,8 +329,12 @@ private:
                 std::size_t &slot) const;
     void init_columns();
     void accumulate_device(const double *b, std::size_t col_stride);
-    void launch_accumulate(const double *b, std::size_t col_stride);
+    void launch_accumulate(const double *const *b, std::size_t count,
+                           std::size_t col_stride);
+    void survey_device_inputs(const double *const *b, std::size_t count,
+                              std::size_t col_stride);
     void validate_host_survey(const double *b, std::size_t col_stride);
+    void require_all_reserved() const;
     void sync_descriptors();
     void harvest_occupancy();
     void reserve_from_extents(const int *low, const int *high,

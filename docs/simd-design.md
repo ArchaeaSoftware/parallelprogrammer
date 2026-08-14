@@ -1171,11 +1171,37 @@ at radix 52 came off it by being measured rather than by being done.
    reduction tree is ~6.3, the `__threadfence` and ticket ~2.8, the elected
    block's copy ~2.0, and the per-column atomics ~0.9.
 
-2. **Multi-batch folding on the device.** Previously ruled out on the grounds
-   that every input matrix has to be vetted separately; pre-sizing removed that
-   vetting, so the premise is gone. Folding cuts *device* traffic, so it would
-   show with input already resident and not on the host-input path, where PCIe
-   carries the input regardless.
+2. ~~Multi-batch folding on the device.~~ **Landed.**
+   `add_matrices_col_major_device` takes up to 16 device-resident matrices and
+   applies all of them in one pass. Every matrix's addend lands in the same
+   limbs of the same row, back to back, so L1 absorbs the repeats and DRAM sees
+   one read and one writeback however many are folded:
+
+   | K | us a batch | ns/elem | bytes/elem | implied GB/s | vs K=1 |
+   | --- | --- | --- | --- | --- | --- |
+   | 1 | 516 | 0.1230 | 40.0 | 325.2 | 1.00x |
+   | 2 | 627 | 0.0747 | 24.0 | 321.3 | 1.65x |
+   | 4 | 838 | 0.0499 | 16.0 | 320.3 | 2.46x |
+   | 8 | 1326 | 0.0395 | 12.0 | 303.6 | **3.11x** |
+
+   Implied bandwidth never leaves 303-325 GB/s against the card's 326.5, so the
+   kernel stays bandwidth-bound throughout and the whole gain is moving fewer
+   bytes. Predicted 1.67 / 2.50 / 3.33 from `8 + 32/K`, measured 1.65 / 2.46 /
+   3.11. 25.3 Gelem/s at K=8, against 8.13 at K=1 and 6.65 for the previous
+   best on this card.
+
+   **Blocked over the input set, not held in registers**, and that was the
+   decision worth getting right. A register array has to be indexed at compile
+   time or it spills to local memory, so registers would mean templating the
+   kernel on the limb count -- which columns of one matrix do not share, since
+   each carries its own width, so a single launch could not serve them. Letting
+   L1 do the reuse sidesteps the question: the working set is 256 threads x
+   nlimbs x 8 bytes, 4 KB at two limbs against 128 KB of L1. Measure the cheap
+   version before paying for the templated one.
+
+   The shortfall at K=8 -- 303.6 GB/s against 325 -- is the eight input streams
+   beginning to cost. The same effect was worth 2.75x on the CPU and is worth
+   about 7% here, which is what a machine built to hide memory latency buys.
 
 Smaller, known: `reserve_column` issues a `cudaMemsetAsync` per limb position,
 `cols * nlimbs` of them, one-time at reserve rather than per batch. And
