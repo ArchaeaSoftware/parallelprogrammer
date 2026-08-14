@@ -81,6 +81,25 @@ private:
     CUevent_st *ev_ = nullptr;
 };
 
+// Surveys a column-major matrix that is already resident in device memory,
+// writing `cols` entries. Column j begins at b + j*col_stride and its rows are
+// contiguous; 0 means tightly packed.
+//
+// The device counterpart of survey_matrix_col_major, and the piece a producer
+// needs when its data never passes through host memory -- delivered by
+// GPUDirect, or computed on the device. The result is 12 bytes a column
+// against 8 a matrix element, so it can be sent ahead to whoever will do the
+// accumulating while the matrix itself is still in flight: 768 bytes against
+// 33.6 MB at 65536x64.
+//
+// Blocking, and allocates its own temporaries, so it is a setup call rather
+// than something to put in a loop. A producer surveying every matrix it emits
+// should expect one launch and one round trip per call.
+void
+survey_matrix_col_major_device(const double *b, std::size_t rows,
+                               std::size_t cols, Survey *out,
+                               std::size_t col_stride = 0);
+
 class CudaColumnBlockMatrix {
 public:
     CudaColumnBlockMatrix(std::size_t rows, std::size_t cols);

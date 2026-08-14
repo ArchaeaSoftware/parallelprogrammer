@@ -1373,6 +1373,77 @@ test_deferred_zeroing()
     }
 }
 
+// The device survey has to agree with the host one field for field, or a
+// producer computing it on whichever side its data happens to be on would
+// size an accumulator differently depending on where the survey ran.
+void
+test_device_survey()
+{
+    const std::size_t rows = 3000, cols = 17, n = rows * cols;
+    std::vector<double> src(n);
+    for (std::size_t j = 0; j < cols; ++j) {
+        for (std::size_t i = 0; i < rows; ++i) {
+            double v = random_value(120);
+            if (1 == j) v = 0.0;                       // an all-zero column
+            if (2 == j && 0 == (i % 7)) v = 0.0;       // zeros mixed in
+            if (3 == j) v = std::ldexp(1.0, -1074);    // all subnormal
+            src[j * rows + i] = v;
+        }
+    }
+    double *dev = nullptr;
+    cudaMalloc(&dev, n * sizeof(double));
+    cudaMemcpy(dev, src.data(), n * sizeof(double), cudaMemcpyHostToDevice);
+
+    std::vector<cbfp::Survey> host(cols), device(cols);
+    cbfp::survey_matrix_col_major(src.data(), rows, cols, host.data());
+    cbfp::survey_matrix_col_major_device(dev, rows, cols, device.data());
+
+    std::size_t bad = 0;
+    for (std::size_t j = 0; j < cols; ++j) {
+        if (host[j].min_exponent != device[j].min_exponent ||
+            host[j].max_top != device[j].max_top ||
+            host[j].any != device[j].any ||
+            host[j].nonfinite != device[j].nonfinite) {
+            ++bad;
+        }
+    }
+    check(bad == 0, "device survey matches the host one: " +
+                        std::to_string(bad) + " of " + std::to_string(cols) +
+                        " columns differ");
+    check(!host[1].any && !device[1].any, "and both report the empty column");
+
+    // A survey taken on the device must size an accumulator the same way one
+    // taken on the host does -- which is the whole point of sending it ahead.
+    {
+        std::vector<std::vector<cbfp::Survey>> from_dev{device};
+        std::vector<std::vector<cbfp::Survey>> from_host{host};
+        cbfp::ColumnBlockMatrix a(rows, cols, from_dev);
+        cbfp::ColumnBlockMatrix b(rows, cols, from_host);
+        bool same = true;
+        for (std::size_t j = 0; j < cols; ++j) {
+            same = same && a.column_exponent(j) == b.column_exponent(j) &&
+                   a.column_limbs(j) == b.column_limbs(j);
+        }
+        check(same, "and reserves identically to it");
+    }
+
+    // Non-finite input is reported, not silently surveyed.
+    {
+        std::vector<double> bad_in(rows * 2, 1.0);
+        bad_in[rows + 5] = std::numeric_limits<double>::infinity();
+        double *d2 = nullptr;
+        cudaMalloc(&d2, rows * 2 * sizeof(double));
+        cudaMemcpy(d2, bad_in.data(), rows * 2 * sizeof(double),
+                   cudaMemcpyHostToDevice);
+        std::vector<cbfp::Survey> s(2);
+        cbfp::survey_matrix_col_major_device(d2, rows, 2, s.data());
+        check(!s[0].nonfinite && s[1].nonfinite,
+              "the device survey flags a non-finite column and only that one");
+        cudaFree(d2);
+    }
+    cudaFree(dev);
+}
+
 }  // namespace
 
 int
@@ -1398,6 +1469,7 @@ main()
     test_device_fold();
     test_device_ping_pong();
     test_deferred_zeroing();
+    test_device_survey();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

@@ -541,6 +541,52 @@ InputRead::ready() const
     cuda_fail(st, "cudaEventQuery", __FILE__, __LINE__);
 }
 
+void
+survey_matrix_col_major_device(const double *b, std::size_t rows,
+                               std::size_t cols, Survey *out,
+                               std::size_t col_stride)
+{
+    if (0 == rows || 0 == cols) return;
+    const std::size_t stride = col_stride ? col_stride : rows;
+
+    // Every column is the full height here: this surveys a matrix, not an
+    // accumulator's stored triangle, so there is no per-column shape to carry.
+    std::vector<ColumnShape> host_shapes(cols);
+    for (auto &sh : host_shapes) {
+        sh.rows = static_cast<unsigned>(rows);
+        sh.first_row = 0;
+    }
+    std::vector<DeviceSurvey> host_out(cols,
+                                       DeviceSurvey{INT_MAX, INT_MIN, 0, 0});
+
+    ColumnShape *shapes = nullptr;
+    DeviceSurvey *res = nullptr;
+    cuda(Malloc(&shapes, cols * sizeof(ColumnShape)));
+    cuda(Malloc(&res, cols * sizeof(DeviceSurvey)));
+    cuda(Memcpy(shapes, host_shapes.data(), cols * sizeof(ColumnShape),
+                cudaMemcpyHostToDevice));
+    cuda(Memcpy(res, host_out.data(), cols * sizeof(DeviceSurvey),
+                cudaMemcpyHostToDevice));
+
+    survey_kernel<<<launch_grid(rows, cols), kBlock>>>(b, shapes, stride, res);
+    cuda(Memcpy(host_out.data(), res, cols * sizeof(DeviceSurvey),
+                cudaMemcpyDeviceToHost));
+    cudaFree(shapes);
+    cudaFree(res);
+
+    for (std::size_t j = 0; j < cols; ++j) {
+        const DeviceSurvey &d = host_out[j];
+        out[j].any = 0 != d.any;
+        out[j].nonfinite = 0 != d.nonfinite;
+        // An empty or non-finite column reports zeros for the extents, which
+        // is what the host survey does; the sentinels the reduction started
+        // from are not a value any caller should see.
+        const bool have = out[j].any && !out[j].nonfinite;
+        out[j].min_exponent = have ? d.min_exponent : 0;
+        out[j].max_top = have ? d.max_top : 0;
+    }
+}
+
 bool
 cuda_available()
 {

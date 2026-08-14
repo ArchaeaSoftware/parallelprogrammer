@@ -1172,6 +1172,20 @@ at radix 52 came off it by being measured rather than by being done.
    That is the argument for a NIC writing into device memory over GPUDirect, or
    anything else that skips host memory: it is worth more than any host-side
    tuning left, because there is no host side left.
+
+   `survey_matrix_col_major_device` exists for the same reason. A producer
+   whose data never touches host memory could not previously describe it: the
+   survey entry points were host-only, and the device survey kernel was private
+   to `reserve_for_device`, which consumed its result and discarded it. Now the
+   survey can be taken where the data is and sent ahead -- 768 bytes against
+   33.6 MB, so it arrives long before the matrix does and the accumulator is
+   sized before the first byte of bulk data lands.
+
+   Still missing, and known: neither side has a survey entry point that covers
+   only a symmetric accumulator's *stored triangle*. A caller pre-sizing a
+   triangular accumulator has to walk `column_rows(j)` values from
+   `column_first_row(j)` itself. The test suite hand-rolls exactly that helper,
+   which is usually the sign it belongs in the library.
    `add_matrix_col_major_device` already accepts such input; what is missing is
    a way for the producer to deliver into a buffer the accumulator will read --
    the device-side counterpart of `acquire_input`.
