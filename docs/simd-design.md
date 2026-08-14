@@ -665,10 +665,22 @@ The staging copy was therefore never going to be made cheaper, and has since
 been removed instead: the host path requires pinned input and reads it where it
 lies.
 
-Unresolved: 1257 us for the bare kernel against ~1760 through the container for
-the same work. The container adds per-column descriptor handling the prototype
-had none of, which is the obvious candidate and has not been confirmed. Do not
-quote either figure as the cost of the other.
+Resolved, and it was nothing. 1257 us for the bare prototype against ~1760
+"through the container" looked like real overhead and was an arithmetic
+artifact: the 1760 was never measured, it was 2467 minus 705, subtracting a
+host-side timing taken while a previous kernel was in flight from a serialized
+total on a different path. Measured directly at the same shape:
+
+| | us |
+| --- | --- |
+| standalone prototype | 1256.4 |
+| library kernel, pre-sized | 1261.4 |
+| library adaptive, total 1917.7 less host survey 658.4 | 1259.2 |
+
+Within 0.4%. The per-column descriptor handling named as the candidate costs
+nothing measurable. The lesson is the same one the per-block cost taught: a
+figure obtained by subtracting two measurements is only as good as their having
+been taken under the same conditions, and it is not a measurement.
 
 The pinning measurement that justified the earlier design still stands and
 still matters, because the staged path uses it: `cudaMemcpyAsync` from pageable
