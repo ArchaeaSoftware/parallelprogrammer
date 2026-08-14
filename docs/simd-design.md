@@ -575,6 +575,43 @@ is why the staged row falls off as batches grow: that host copy becomes the
 limit. `acquire_input` lends out a buffer the device can read directly, which
 `add_matrix_col_major` recognises and reads in place.
 
+#### What the survey is actually hidden behind, measured through the container
+
+The 1257 us above is a bare prototype kernel. Timed through the container at
+the same shape, so the per-column descriptor handling and the host survey are
+in it too:
+
+| | us a batch |
+| --- | --- |
+| host survey standalone, two-pass | 1376 |
+| the survey as the library runs it, plus the launch | 705 |
+| staging copy of 33.6 MB | 1331 |
+| the kernel streaming the mapped buffer over PCIe | ~1760 |
+| ordinary-buffer path, end to end | 3179 |
+
+Three things follow, and the first corrects the framing above.
+
+**There is no transfer for the survey to hide behind.** Read-in-place removed
+it; the only `cudaMemcpyAsync` left on this path carries the 1 KB of
+`DeviceSurvey`. What hides the survey is the *previous batch's kernel*, via the
+two slots -- ~705 us of survey against ~1760 us of kernel, so it is free with
+room to spare. The conclusion in this section survives; the mechanism it gives
+does not.
+
+**Only on the borrowed path.** From an ordinary buffer the staging copy alone
+(1331 us) plus the survey already exceed the kernel, and end to end the batch
+costs 3179 us -- host-bound, with the device waiting. The staged/borrowed table
+above shows the same thing as throughput; this is where it comes from.
+
+**The library's survey is cheaper than a standalone one** -- 705 against 1376 --
+because `validate_host_survey` passes the column's current exponent as the
+floor, so the significand pass is skipped once a column is settled.
+
+Unresolved: 1257 us for the bare kernel against ~1760 through the container for
+the same work. The container adds per-column descriptor handling the prototype
+had none of, which is the obvious candidate and has not been confirmed. Do not
+quote either figure as the cost of the other.
+
 The pinning measurement that justified the earlier design still stands and
 still matters, because the staged path uses it: `cudaMemcpyAsync` from pageable
 memory returns only after 3.92 ms of a 3.96 ms transfer, leaving no window to
