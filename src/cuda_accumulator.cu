@@ -157,6 +157,13 @@ struct ColumnDesc {
     unsigned nlimbs;
 };
 
+// Every kernel below walks its rows with a grid-stride loop, spelled out at
+// each one so the thread and block indices stay visible -- they are what the
+// loop is about. The widening cast is not decoration: blockIdx.x, blockDim.x
+// and gridDim.x are all unsigned int, and both products overflow 32 bits above
+// 4.2M threads. launch_grid caps well below that today, which is exactly why
+// the cast is easy to drop and worth keeping.
+
 // The device twin of the scalar kernel's `split`, field for field. Kept in
 // lockstep with it deliberately: the two implementations have to agree about
 // what a double means before they can be compared bit for bit.
@@ -221,10 +228,9 @@ survey_kernel(const double *__restrict__ values,
     int tmax = INT_MIN;
     int tbad = 0;
 
-    const std::size_t step = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    for (std::size_t i =
-             static_cast<std::size_t>(blockIdx.x) * blockDim.x + tid;
-         i < rows; i += step) {
+    for (std::size_t i = (std::size_t)blockIdx.x * blockDim.x + threadIdx.x;
+         i < rows;
+         i += (std::size_t)blockDim.x * gridDim.x) {
         unsigned long long m;
         int e, top;
         bool neg, bad;
@@ -319,10 +325,9 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols, InputSet in,
     // was so the checks cost three comparisons and no divergence.
     unsigned t_flags = 0;
 
-    const std::size_t step = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    for (std::size_t i =
-             static_cast<std::size_t>(blockIdx.x) * blockDim.x + tid;
-         i < rows; i += step) {
+    for (std::size_t i = (std::size_t)blockIdx.x * blockDim.x + threadIdx.x;
+         i < rows;
+         i += (std::size_t)blockDim.x * gridDim.x) {
       // Blocking over the input set, not over the accumulator. Every matrix's
       // addend lands in the same limbs of the same row, back to back, so those
       // read-modify-writes hit L1 and only the first read and the last write
@@ -452,10 +457,9 @@ __global__ void
 zero_kernel(const ZeroTarget *__restrict__ targets)
 {
     const ZeroTarget z = targets[blockIdx.y];
-    const std::size_t step = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    for (std::size_t i =
-             static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         i < z.rows; i += step) {
+    for (std::size_t i = (std::size_t)blockIdx.x * blockDim.x + threadIdx.x;
+         i < z.rows;
+         i += (std::size_t)blockDim.x * gridDim.x) {
         z.p[i] = 0;
     }
 }
@@ -467,10 +471,9 @@ __global__ void
 sign_fill_kernel(limb_t *__restrict__ dst, const limb_t *__restrict__ src,
                  std::size_t rows)
 {
-    const std::size_t step = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    for (std::size_t i =
-             static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         i < rows; i += step) {
+    for (std::size_t i = (std::size_t)blockIdx.x * blockDim.x + threadIdx.x;
+         i < rows;
+         i += (std::size_t)blockDim.x * gridDim.x) {
         dst[i] = static_cast<limb_t>(static_cast<long long>(src[i]) >> 63);
     }
 }
@@ -491,10 +494,9 @@ shift_left_kernel(limb_t *const *__restrict__ bases, unsigned nlimbs,
 {
     const unsigned word = shift / 64;
     const unsigned bit = shift % 64;
-    const std::size_t step = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    for (std::size_t i =
-             static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         i < rows; i += step) {
+    for (std::size_t i = (std::size_t)blockIdx.x * blockDim.x + threadIdx.x;
+         i < rows;
+         i += (std::size_t)blockDim.x * gridDim.x) {
         for (int k = static_cast<int>(nlimbs) - 1; k >= 0; --k) {
             const int hi = k - static_cast<int>(word);
             limb_t v = 0;
