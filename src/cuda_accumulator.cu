@@ -229,8 +229,8 @@ survey_kernel(const double *__restrict__ values,
     int tbad = 0;
 
     for (std::size_t i = (std::size_t)blockIdx.x * blockDim.x + threadIdx.x;
-         i < rows;
-         i += (std::size_t)blockDim.x * gridDim.x) {
+                     i < rows;
+                     i += (std::size_t)blockDim.x * gridDim.x) {
         unsigned long long m;
         int e, top;
         bool neg, bad;
@@ -326,8 +326,8 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols, InputSet in,
     unsigned t_flags = 0;
 
     for (std::size_t i = (std::size_t)blockIdx.x * blockDim.x + threadIdx.x;
-         i < rows;
-         i += (std::size_t)blockDim.x * gridDim.x) {
+                     i < rows;
+                     i += (std::size_t)blockDim.x * gridDim.x) {
       // Blocking over the input set, not over the accumulator. Every matrix's
       // addend lands in the same limbs of the same row, back to back, so those
       // read-modify-writes hit L1 and only the first read and the last write
@@ -458,8 +458,8 @@ zero_kernel(const ZeroTarget *__restrict__ targets)
 {
     const ZeroTarget z = targets[blockIdx.y];
     for (std::size_t i = (std::size_t)blockIdx.x * blockDim.x + threadIdx.x;
-         i < z.rows;
-         i += (std::size_t)blockDim.x * gridDim.x) {
+                     i < z.rows;
+                     i += (std::size_t)blockDim.x * gridDim.x) {
         z.p[i] = 0;
     }
 }
@@ -472,8 +472,8 @@ sign_fill_kernel(limb_t *__restrict__ dst, const limb_t *__restrict__ src,
                  std::size_t rows)
 {
     for (std::size_t i = (std::size_t)blockIdx.x * blockDim.x + threadIdx.x;
-         i < rows;
-         i += (std::size_t)blockDim.x * gridDim.x) {
+                     i < rows;
+                     i += (std::size_t)blockDim.x * gridDim.x) {
         dst[i] = static_cast<limb_t>(static_cast<long long>(src[i]) >> 63);
     }
 }
@@ -495,8 +495,8 @@ shift_left_kernel(limb_t *const *__restrict__ bases, unsigned nlimbs,
     const unsigned word = shift / 64;
     const unsigned bit = shift % 64;
     for (std::size_t i = (std::size_t)blockIdx.x * blockDim.x + threadIdx.x;
-         i < rows;
-         i += (std::size_t)blockDim.x * gridDim.x) {
+                     i < rows;
+                     i += (std::size_t)blockDim.x * gridDim.x) {
         for (int k = static_cast<int>(nlimbs) - 1; k >= 0; --k) {
             const int hi = k - static_cast<int>(word);
             limb_t v = 0;
