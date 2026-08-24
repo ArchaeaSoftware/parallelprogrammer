@@ -65,7 +65,7 @@ int bentley_binary_search(const std::array<T, N>& arr, const T& target) {
 
 // Example usage:
 // constexpr std::array<int, 16> v = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
-// int idx = bentley_binary_search<int, 16, 8, 4, 2, 1>(v, 7); // idx == 6
+// int idx = bentley_binary_search(v, 7);   // idx == 6
 
 
 // Unrolled binary search for 1024 elements, for codegen comparison
