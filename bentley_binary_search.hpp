@@ -1,5 +1,3 @@
-
-
 // Unrolled search for power-of-two segment
 template <typename T, std::size_t... Steps>
 int bentley_binary_search_unrolled(const T* arr, std::size_t len, const T& target, std::integer_sequence<std::size_t, Steps...>) {
@@ -63,3 +61,12 @@ int bentley_binary_search(const std::array<T, N>& arr, const T& target) {
 // Example usage:
 // constexpr std::array<int, 16> v = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
 // int idx = bentley_binary_search<int, 16, 8, 4, 2, 1>(v, 7); // idx == 6
+
+
+// Unrolled binary search for 1024 elements, for codegen comparison
+template <typename T>
+int bentley_binary_search_1024(const std::array<T, 1024>& arr, const T& target) {
+    constexpr std::size_t N = 1024;
+    constexpr auto steps = make_probe_steps<N>();
+    return bentley_binary_search_unrolled(&arr[0], N, target, steps);
+}
