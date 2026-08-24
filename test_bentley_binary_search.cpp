@@ -1,24 +1,33 @@
 #include <array>
 #include <iostream>
 #include <cstdlib>
+#include <algorithm>
+#include <random>
+#include <limits>
 #include "bentley_binary_search.hpp"
 #include <cassert>
 
 template<size_t N>
-void init_random(std::array<int32_t, N>& arr)
+void init_random(std::array<int32_t, N>& arr, uint32_t seed = 12345)
 {
-    // Knuth's algorithm: select N unique numbers from 1..N in sorted order
-    // For this use case, M = N
-    int im = 0;
-    for (int in = 0; in < static_cast<int>(N) && im < static_cast<int>(N); ++in) {
-        int rn = static_cast<int>(N) - in;
-        int rm = static_cast<int>(N) - im;
-        if (rand() % rn < rm) {
-            arr[im++] = in;
-        }
+    // Distinct values in ascending order, drawn from the whole int32_t range.
+    // The range matters: the values must be sparse in it, so that the array
+    // has gaps. Without gaps there is no way to search for a value that is
+    // absent but lies between two elements, which is the case most likely to
+    // expose an off-by-one in the probe sequence.
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int32_t> dist(
+        std::numeric_limits<int32_t>::min(),
+        std::numeric_limits<int32_t>::max());
+
+    for (auto& v : arr) v = dist(rng);
+    std::sort(arr.begin(), arr.end());
+    for (;;) {
+        auto last = std::unique(arr.begin(), arr.end());
+        if (last == arr.end()) break;
+        for (auto it = last; it != arr.end(); ++it) *it = dist(rng);
+        std::sort(arr.begin(), arr.end());
     }
-    // Ensure all slots filled
-    assert(im == static_cast<int>(N));
 }
 
 template<size_t N>
@@ -129,6 +138,43 @@ void test_binary_search_1000() {
     }
 }
 
+// Force a standalone instantiation so this can be disassembled and compared
+// against the hand-written binary_search_1024 above. Without it the template
+// is never instantiated and emits no code at all.
+template int bentley_binary_search_1024<int32_t>(const std::array<int32_t, 1024>&,
+                                                 const int32_t&);
+
+void test_bentley_1024() {
+    std::array<int32_t, 1024> arrN;
+    init_random<1024>(arrN);
+    for (int i = 0; i < 1024; ++i) {
+        int idx = bentley_binary_search_1024(arrN, arrN[i]);
+        if (idx != i) {
+            std::cout << "[bentley-1024] failed at index " << i
+                      << ": got " << idx << '\n';
+        }
+    }
+}
+
+// Search for values that are absent but in range. Impossible to construct
+// while init_random emitted consecutive integers.
+template<size_t N>
+void test_absent_values() {
+    std::array<int32_t, N> arrN;
+    init_random<N>(arrN);
+    long long checked = 0;
+    for (size_t i = 0; i + 1 < N; ++i) {
+        if (arrN[i+1] - arrN[i] < 2) continue;
+        int32_t between = arrN[i] + 1;
+        int idx = bentley_binary_search(arrN, between);
+        ++checked;
+        if (idx != -1) {
+            std::cout << "[absent] " << between << " reported at " << idx << '\n';
+        }
+    }
+    std::cout << "  interior misses checked for N=" << N << ": " << checked << '\n';
+}
+
 int main() {
     constexpr size_t N = 1048576;
     constexpr auto steps = make_probe_steps<N>( );
@@ -137,6 +183,9 @@ int main() {
     test_binary_search_1000();
     test_binary_search_1024();
     test_string_array();
+    test_bentley_1024();
+    test_absent_values<1024>();
+    test_absent_values<1000>();
     std::cout << "All tests completed.\n";
     return 0;
 }
