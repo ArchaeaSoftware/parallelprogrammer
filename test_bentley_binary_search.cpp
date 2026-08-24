@@ -4,30 +4,39 @@
 #include <algorithm>
 #include <random>
 #include <limits>
+#include <unordered_set>
 #include "bentley_binary_search.hpp"
 #include <cassert>
 
 template<size_t N>
 void init_random(std::array<int32_t, N>& arr, uint32_t seed = 12345)
 {
-    // Distinct values in ascending order, drawn from the whole int32_t range.
-    // The range matters: the values must be sparse in it, so that the array
-    // has gaps. Without gaps there is no way to search for a value that is
-    // absent but lies between two elements, which is the case most likely to
-    // expose an off-by-one in the probe sequence.
-    std::mt19937 rng(seed);
-    std::uniform_int_distribution<int32_t> dist(
-        std::numeric_limits<int32_t>::min(),
-        std::numeric_limits<int32_t>::max());
+    // Floyd's algorithm, from Bentley's More Programming Pearls, Column 13
+    // ("A Sample of Brilliance", with Bob Floyd as guest author). Chooses N
+    // distinct values from a universe of U in O(N) time, independent of U --
+    // which is what Knuth's Algorithm S cannot do, since it must visit every
+    // one of the U candidates.
+    //
+    // Here U is the whole 2^32 space of int32_t values, so the sample is
+    // sparse and the array has gaps. Gaps are the point: without them there
+    // is no way to search for a value that is absent but in range.
+    constexpr uint64_t U = 1ull << 32;
+    static_assert(N < U, "sample larger than universe");
 
-    for (auto& v : arr) v = dist(rng);
-    std::sort(arr.begin(), arr.end());
-    for (;;) {
-        auto last = std::unique(arr.begin(), arr.end());
-        if (last == arr.end()) break;
-        for (auto it = last; it != arr.end(); ++it) *it = dist(rng);
-        std::sort(arr.begin(), arr.end());
+    std::mt19937_64 rng(seed);
+    std::unordered_set<uint32_t> chosen;
+    chosen.reserve(N * 2);
+
+    for (uint64_t j = U - N; j < U; ++j) {
+        std::uniform_int_distribution<uint64_t> pick(0, j);
+        uint32_t t = static_cast<uint32_t>(pick(rng));
+        if (!chosen.insert(t).second)
+            chosen.insert(static_cast<uint32_t>(j));
     }
+
+    size_t i = 0;
+    for (uint32_t v : chosen) arr[i++] = static_cast<int32_t>(v);
+    std::sort(arr.begin(), arr.end());
 }
 
 template<size_t N>
