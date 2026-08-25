@@ -1,0 +1,7 @@
+bench
+bench_O2
+bench_O3
+asan_test
+*.o
+*.s
+a.out
