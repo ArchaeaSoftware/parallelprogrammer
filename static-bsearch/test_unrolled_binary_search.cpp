@@ -194,7 +194,7 @@ void test_unrolled_1024() {
     for (int i = 0; i < 1024; ++i) {
         int idx = unrolled_binary_search_1024(arrN, arrN[i]);
         if (idx != i) {
-            std::cout << "[bentley-1024] failed at index " << i
+            std::cout << "[unrolled-1024] failed at index " << i
                       << ": got " << idx << '\n';
         }
     }
