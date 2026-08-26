@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <random>
 #include <limits>
+#include <cstddef>
 #include <unordered_set>
 #include "unrolled_binary_search.hpp"
 #include <cassert>
@@ -79,21 +80,21 @@ void test_int_array( )
 {
     constexpr std::array<int, 16> arr = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
     for (int i = 1; i <= 16; ++i) {
-        int idx = unrolled_binary_search(arr, i);
-        if (idx != i - 1) {
+        std::ptrdiff_t idx = unrolled_binary_search(arr, i);
+        if (idx != static_cast<std::ptrdiff_t>(i) - 1) {
             std::cout << "Test failed for " << i << ": got " << idx << ", expected " << (i-1) << '\n';
         }
     }
     // Test not found
-    int idx = unrolled_binary_search(arr, 100);
+    std::ptrdiff_t idx = unrolled_binary_search(arr, 100);
     if (idx != -1) {
         std::cout << "Test failed for not found: got " << idx << ", expected -1\n";
     }
     std::array<int32_t, N> arrN;
     init_random<N>( arrN );
     for (int i = 0; i < N; ++i) {
-        int idx = unrolled_binary_search( arrN, arrN[i] );
-        if (idx != i) {
+        std::ptrdiff_t idx = unrolled_binary_search( arrN, arrN[i] );
+        if (idx != static_cast<std::ptrdiff_t>(i)) {
             std::cout << "Test failed for index " << i << "(" << arr[i] << "): got " << idx << ", expected " << (i-1) << '\n';
         }
     }
@@ -101,7 +102,7 @@ void test_int_array( )
 
 void test_string_array() {
     std::array<std::string, 4> arr = {"apple", "banana", "cherry", "date"};
-    int idx = unrolled_binary_search(arr, std::string("cherry"));
+    std::ptrdiff_t idx = unrolled_binary_search(arr, std::string("cherry"));
     if (idx != 2) {
         std::cout << "Test failed for string: got " << idx << ", expected 2\n";
     }
@@ -138,7 +139,7 @@ void test_binary_search_1024() {
     init_random<1024>(arrN);
     for (int i = 0; i < 1024; ++i) {
         int idx = binary_search_1024(arrN, arrN[i]);
-        if (idx != i) {
+        if (idx != static_cast<std::ptrdiff_t>(i)) {
             std::cout << "[1024-specialized] Test failed for index " << i << "(" << arrN[i] << "): got " << idx << ", expected " << i << '\n';
         }
     }
@@ -176,7 +177,7 @@ void test_binary_search_1000() {
     init_random<1000>(arrN);
     for (int i = 0; i < 1000; ++i) {
         int idx = binary_search_1000(arrN, arrN[i]);
-        if (idx != i) {
+        if (idx != static_cast<std::ptrdiff_t>(i)) {
             std::cout << "[1000-specialized] Test failed for index " << i << "(" << arrN[i] << "): got " << idx << ", expected " << i << '\n';
         }
     }
@@ -185,15 +186,15 @@ void test_binary_search_1000() {
 // Force a standalone instantiation so this can be disassembled and compared
 // against the hand-written binary_search_1024 above. Without it the template
 // is never instantiated and emits no code at all.
-template int unrolled_binary_search_1024<int32_t>(const std::array<int32_t, 1024>&,
+template std::ptrdiff_t unrolled_binary_search_1024<int32_t>(const std::array<int32_t, 1024>&,
                                                  const int32_t&);
 
 void test_unrolled_1024() {
     std::array<int32_t, 1024> arrN;
     init_random<1024>(arrN);
     for (int i = 0; i < 1024; ++i) {
-        int idx = unrolled_binary_search_1024(arrN, arrN[i]);
-        if (idx != i) {
+        std::ptrdiff_t idx = unrolled_binary_search_1024(arrN, arrN[i]);
+        if (idx != static_cast<std::ptrdiff_t>(i)) {
             std::cout << "[unrolled-1024] failed at index " << i
                       << ": got " << idx << '\n';
         }
@@ -210,7 +211,7 @@ void test_absent_values() {
     for (size_t i = 0; i + 1 < N; ++i) {
         if (arrN[i+1] - arrN[i] < 2) continue;
         int32_t between = arrN[i] + 1;
-        int idx = unrolled_binary_search(arrN, between);
+        std::ptrdiff_t idx = unrolled_binary_search(arrN, between);
         ++checked;
         if (idx != -1) {
             std::cout << "[absent] " << between << " reported at " << idx << '\n';

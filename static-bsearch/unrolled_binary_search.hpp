@@ -44,10 +44,10 @@ using search_arg_t = std::conditional_t<std::is_scalar_v<T>, T, const T&>;
 
 // Unrolled search for power-of-two segment
 template <std::size_t Len, typename T, std::size_t... Steps>
-int unrolled_search_segment(const T* arr, search_arg_t<T> target, std::integer_sequence<std::size_t, Steps...>) {
+std::ptrdiff_t unrolled_search_segment(const T* arr, search_arg_t<T> target, std::integer_sequence<std::size_t, Steps...>) {
     std::size_t idx = 0;
     ((idx += (idx + Steps < Len && arr[idx + Steps] <= target ? Steps : 0)), ...);
-    if (arr[idx] == target) return static_cast<int>(idx);
+    if (arr[idx] == target) return static_cast<std::ptrdiff_t>(idx);
     return -1;
 }
 
@@ -76,7 +76,7 @@ constexpr auto make_probe_steps() {
 
 
 template <typename T, std::size_t N>
-int unrolled_binary_search(const std::array<T, N>& arr, const T& target) {
+std::ptrdiff_t unrolled_binary_search(const std::array<T, N>& arr, const T& target) {
     constexpr std::size_t k = floor_power_of_two(N);
     if constexpr (N == k) {
         // Power of 2: unrolled search
@@ -90,7 +90,7 @@ int unrolled_binary_search(const std::array<T, N>& arr, const T& target) {
         } else {
             // Unrolled search in [N-k, N-1]
             int res = unrolled_search_segment<k>(&arr[N - k], target, make_probe_steps<k>());
-            return (res == -1) ? -1 : static_cast<int>(N - k + res);
+            return (res == -1) ? -1 : static_cast<std::ptrdiff_t>(N - k) + res;
         }
     }
 }
@@ -98,12 +98,12 @@ int unrolled_binary_search(const std::array<T, N>& arr, const T& target) {
 
 // Example usage:
 // constexpr std::array<int, 16> v = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
-// int idx = unrolled_binary_search(v, 7);   // idx == 6
+// std::ptrdiff_t idx = unrolled_binary_search(v, 7);   // idx == 6
 
 
 // Unrolled binary search for 1024 elements, for codegen comparison
 template <typename T>
-int unrolled_binary_search_1024(const std::array<T, 1024>& arr, const T& target) {
+std::ptrdiff_t unrolled_binary_search_1024(const std::array<T, 1024>& arr, const T& target) {
     constexpr std::size_t N = 1024;
     constexpr auto steps = make_probe_steps<N>();
     return unrolled_search_segment<N>(&arr[0], target, steps);
