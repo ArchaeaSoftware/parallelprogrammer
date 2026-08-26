@@ -42,11 +42,24 @@
 template <typename T>
 using search_arg_t = std::conditional_t<std::is_scalar_v<T>, T, const T&>;
 
-// Unrolled search for power-of-two segment
+// Unrolled search over a segment whose length is a power of two. Steps are the
+// descending powers of two below Len, so the accumulated index never runs past
+// the end: before the probe at 2^j it is at most Len - 2^(j+1), and adding 2^j
+// leaves it below Len. No bounds test is needed inside the descent.
 template <std::size_t Len, typename T, std::size_t... Steps>
 std::ptrdiff_t unrolled_search_segment(const T* arr, search_arg_t<T> target, std::integer_sequence<std::size_t, Steps...>) {
+    static_assert((std::size_t(0) | ... | Steps) == Len - 1,
+                  "probe steps must be the distinct powers of two below Len");
     std::size_t idx = 0;
-    ((idx += (idx + Steps < Len && arr[idx + Steps] <= target ? Steps : 0)), ...);
+    // Written as a conditional assignment rather than idx += (cond ? Step : 0):
+    // clang lowers the accumulating form to shift-and-or bit insertion, which is
+    // slower than the conditional move it emits here.
+    auto probe = [&](auto step) {
+        if (arr[idx + step.value] <= target)
+            idx += step.value;
+    };
+    (probe(std::integral_constant<std::size_t, Steps>{}), ...);
+    (void)probe;   // Len == 1 leaves the pack empty, so probe goes uncalled
     if (arr[idx] == target) return static_cast<std::ptrdiff_t>(idx);
     return -1;
 }
@@ -78,18 +91,19 @@ constexpr auto make_probe_steps() {
 template <typename T, std::size_t N>
 std::ptrdiff_t unrolled_binary_search(const std::array<T, N>& arr, const T& target) {
     constexpr std::size_t k = floor_power_of_two(N);
-    if constexpr (N == k) {
+    if constexpr (N == 0) {
+        return -1;   // nothing to find; an empty range has no match
+    } else if constexpr (N == k) {
         // Power of 2: unrolled search
         return unrolled_search_segment<N>(&arr[0], target, make_probe_steps<N>());
     } else {
         constexpr std::size_t probe = N - k;
         if (target <= arr[probe]) {
             // Unrolled search in [0, k-1]
-            int res = unrolled_search_segment<k>(&arr[0], target, make_probe_steps<k>());
-            return (res == -1) ? -1 : res;
+            return unrolled_search_segment<k>(&arr[0], target, make_probe_steps<k>());
         } else {
             // Unrolled search in [N-k, N-1]
-            int res = unrolled_search_segment<k>(&arr[N - k], target, make_probe_steps<k>());
+            std::ptrdiff_t res = unrolled_search_segment<k>(&arr[N - k], target, make_probe_steps<k>());
             return (res == -1) ? -1 : static_cast<std::ptrdiff_t>(N - k) + res;
         }
     }
