@@ -1,10 +1,10 @@
 /*
  *
- * test_bentley_binary_search.cpp
+ * test_unrolled_binary_search.cpp
  *
- * Tests for bentley_binary_search.hpp.
+ * Tests for unrolled_binary_search.hpp.
  *
- * Build with: g++ -std=c++17 -O2 test_bentley_binary_search.cpp
+ * Build with: g++ -std=c++17 -O2 test_unrolled_binary_search.cpp
  *
  * Copyright (C) 2026 by Nicholas Wilt.
  *
@@ -40,7 +40,7 @@
 #include <random>
 #include <limits>
 #include <unordered_set>
-#include "bentley_binary_search.hpp"
+#include "unrolled_binary_search.hpp"
 #include <cassert>
 
 template<size_t N>
@@ -79,20 +79,20 @@ void test_int_array( )
 {
     constexpr std::array<int, 16> arr = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
     for (int i = 1; i <= 16; ++i) {
-        int idx = bentley_binary_search(arr, i);
+        int idx = unrolled_binary_search(arr, i);
         if (idx != i - 1) {
             std::cout << "Test failed for " << i << ": got " << idx << ", expected " << (i-1) << '\n';
         }
     }
     // Test not found
-    int idx = bentley_binary_search(arr, 100);
+    int idx = unrolled_binary_search(arr, 100);
     if (idx != -1) {
         std::cout << "Test failed for not found: got " << idx << ", expected -1\n";
     }
     std::array<int32_t, N> arrN;
     init_random<N>( arrN );
     for (int i = 0; i < N; ++i) {
-        int idx = bentley_binary_search( arrN, arrN[i] );
+        int idx = unrolled_binary_search( arrN, arrN[i] );
         if (idx != i) {
             std::cout << "Test failed for index " << i << "(" << arr[i] << "): got " << idx << ", expected " << (i-1) << '\n';
         }
@@ -101,11 +101,11 @@ void test_int_array( )
 
 void test_string_array() {
     std::array<std::string, 4> arr = {"apple", "banana", "cherry", "date"};
-    int idx = bentley_binary_search(arr, std::string("cherry"));
+    int idx = unrolled_binary_search(arr, std::string("cherry"));
     if (idx != 2) {
         std::cout << "Test failed for string: got " << idx << ", expected 2\n";
     }
-    idx = bentley_binary_search(arr, std::string("fig"));
+    idx = unrolled_binary_search(arr, std::string("fig"));
     if (idx != -1) {
         std::cout << "Test failed for string not found: got " << idx << ", expected -1\n";
     }
@@ -185,14 +185,14 @@ void test_binary_search_1000() {
 // Force a standalone instantiation so this can be disassembled and compared
 // against the hand-written binary_search_1024 above. Without it the template
 // is never instantiated and emits no code at all.
-template int bentley_binary_search_1024<int32_t>(const std::array<int32_t, 1024>&,
+template int unrolled_binary_search_1024<int32_t>(const std::array<int32_t, 1024>&,
                                                  const int32_t&);
 
-void test_bentley_1024() {
+void test_unrolled_1024() {
     std::array<int32_t, 1024> arrN;
     init_random<1024>(arrN);
     for (int i = 0; i < 1024; ++i) {
-        int idx = bentley_binary_search_1024(arrN, arrN[i]);
+        int idx = unrolled_binary_search_1024(arrN, arrN[i]);
         if (idx != i) {
             std::cout << "[bentley-1024] failed at index " << i
                       << ": got " << idx << '\n';
@@ -210,7 +210,7 @@ void test_absent_values() {
     for (size_t i = 0; i + 1 < N; ++i) {
         if (arrN[i+1] - arrN[i] < 2) continue;
         int32_t between = arrN[i] + 1;
-        int idx = bentley_binary_search(arrN, between);
+        int idx = unrolled_binary_search(arrN, between);
         ++checked;
         if (idx != -1) {
             std::cout << "[absent] " << between << " reported at " << idx << '\n';
@@ -227,7 +227,7 @@ int main() {
     test_binary_search_1000();
     test_binary_search_1024();
     test_string_array();
-    test_bentley_1024();
+    test_unrolled_1024();
     test_absent_values<1024>();
     test_absent_values<1000>();
     std::cout << "All tests completed.\n";

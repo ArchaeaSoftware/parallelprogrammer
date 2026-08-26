@@ -1,8 +1,8 @@
 /*
  *
- * bentley_binary_search.hpp
+ * unrolled_binary_search.hpp
  *
- * Unrolled binary search for fixed-size sorted arrays, after Jon Bentley.
+ * Unrolled binary search for fixed-size sorted arrays.
  *
  * Copyright (C) 2026 by Nicholas Wilt.
  *
@@ -44,7 +44,7 @@ using search_arg_t = std::conditional_t<std::is_scalar_v<T>, T, const T&>;
 
 // Unrolled search for power-of-two segment
 template <std::size_t Len, typename T, std::size_t... Steps>
-int bentley_binary_search_unrolled(const T* arr, search_arg_t<T> target, std::integer_sequence<std::size_t, Steps...>) {
+int unrolled_search_segment(const T* arr, search_arg_t<T> target, std::integer_sequence<std::size_t, Steps...>) {
     std::size_t idx = 0;
     ((idx += (idx + Steps < Len && arr[idx + Steps] <= target ? Steps : 0)), ...);
     if (arr[idx] == target) return static_cast<int>(idx);
@@ -76,20 +76,20 @@ constexpr auto make_probe_steps() {
 
 
 template <typename T, std::size_t N>
-int bentley_binary_search(const std::array<T, N>& arr, const T& target) {
+int unrolled_binary_search(const std::array<T, N>& arr, const T& target) {
     constexpr std::size_t k = floor_power_of_two(N);
     if constexpr (N == k) {
         // Power of 2: unrolled search
-        return bentley_binary_search_unrolled<N>(&arr[0], target, make_probe_steps<N>());
+        return unrolled_search_segment<N>(&arr[0], target, make_probe_steps<N>());
     } else {
         constexpr std::size_t probe = N - k;
         if (target <= arr[probe]) {
             // Unrolled search in [0, k-1]
-            int res = bentley_binary_search_unrolled<k>(&arr[0], target, make_probe_steps<k>());
+            int res = unrolled_search_segment<k>(&arr[0], target, make_probe_steps<k>());
             return (res == -1) ? -1 : res;
         } else {
             // Unrolled search in [N-k, N-1]
-            int res = bentley_binary_search_unrolled<k>(&arr[N - k], target, make_probe_steps<k>());
+            int res = unrolled_search_segment<k>(&arr[N - k], target, make_probe_steps<k>());
             return (res == -1) ? -1 : static_cast<int>(N - k + res);
         }
     }
@@ -98,13 +98,13 @@ int bentley_binary_search(const std::array<T, N>& arr, const T& target) {
 
 // Example usage:
 // constexpr std::array<int, 16> v = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
-// int idx = bentley_binary_search(v, 7);   // idx == 6
+// int idx = unrolled_binary_search(v, 7);   // idx == 6
 
 
 // Unrolled binary search for 1024 elements, for codegen comparison
 template <typename T>
-int bentley_binary_search_1024(const std::array<T, 1024>& arr, const T& target) {
+int unrolled_binary_search_1024(const std::array<T, 1024>& arr, const T& target) {
     constexpr std::size_t N = 1024;
     constexpr auto steps = make_probe_steps<N>();
-    return bentley_binary_search_unrolled<N>(&arr[0], target, steps);
+    return unrolled_search_segment<N>(&arr[0], target, steps);
 }
