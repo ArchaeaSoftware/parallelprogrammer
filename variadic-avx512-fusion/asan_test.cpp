@@ -67,15 +67,15 @@ int main() {
             return a;
         };
 
-        separate_passes(in.data(), out.data(), tmp.data(), n, s, f, cl, p, r);
+        avx512_separate_passes(in.data(), out.data(), tmp.data(), n, s, f, cl, p, r);
         double a = sum();
-        fused_vecmajor<4>(in.data(), out.data(), n, s, f, cl, p, r);
+        fused_avx512_vecmajor<4>(in.data(), out.data(), n, s, f, cl, p, r);
         double b = sum();
-        fused_vecmajor_seq<4>(in.data(), out.data(), n, s, f, cl, p, r);
+        fused_avx512_transform<4>(in.data(), out.data(), n, s, f, cl, p, r);
         double c = sum();
-        fused_opmajor_byval<4>(in.data(), out.data(), n, s, f, cl, p, r);
+        fused_avx512_opmajor_byval<4>(in.data(), out.data(), n, s, f, cl, p, r);
         double d = sum();
-        fused_opmajor<4>(in.data(), out.data(), n, s, f, cl, p, r);
+        fused_avx512_opmajor<4>(in.data(), out.data(), n, s, f, cl, p, r);
         double e = sum();
 
         bool ok = (a == b) && (b == c) && (c == d) && (d == e);

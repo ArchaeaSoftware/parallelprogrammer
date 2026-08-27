@@ -112,22 +112,22 @@ static void measure(std::size_t n, const float* in, float* out, float* tmp,
     };
 
     double t_sep = time_it([&] {
-        separate_passes(in, out, tmp, n, ch.s, ch.f, ch.c, ch.p, ch.r);
+        avx512_separate_passes(in, out, tmp, n, ch.s, ch.f, ch.c, ch.p, ch.r);
     });
     double sum_sep = checksum(out, n);
 
     double t_vec = time_it([&] {
-        fused_vecmajor<U>(in, out, n, ch.s, ch.f, ch.c, ch.p, ch.r);
+        fused_avx512_vecmajor<U>(in, out, n, ch.s, ch.f, ch.c, ch.p, ch.r);
     });
     double sum_vec = checksum(out, n);
 
     double t_op = time_it([&] {
-        fused_vecmajor_seq<U>(in, out, n, ch.s, ch.f, ch.c, ch.p, ch.r);
+        fused_avx512_transform<U>(in, out, n, ch.s, ch.f, ch.c, ch.p, ch.r);
     });
     double sum_op = checksum(out, n);
 
     double t_op2 = time_it([&] {
-        fused_opmajor_byval<U>(in, out, n, ch.s, ch.f, ch.c, ch.p, ch.r);
+        fused_avx512_opmajor_byval<U>(in, out, n, ch.s, ch.f, ch.c, ch.p, ch.r);
     });
     double sum_op2 = checksum(out, n);
 
