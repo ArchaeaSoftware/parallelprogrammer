@@ -229,6 +229,43 @@ public:
     void to_matrix_with_residual(double *out, double *residual,
                                  std::size_t row_stride = 0) const;
 
+    // --- means -------------------------------------------------------------
+
+    // The stored sum divided by `count`, correctly rounded: the double nearest
+    // the exact rational (stored value / count), round-to-nearest ties-to-
+    // even, over the full range and through the denormals, exactly as
+    // to_double is for the sum itself. A power-of-two count is exact scaling;
+    // any other count is where a naive `to_double(i, j) / count` rounds twice,
+    // and this does not.
+    //
+    // The count is the caller's, not the accumulation matrix's. The
+    // accumulation matrix does not know how many values a cell's sum stands
+    // for: add_matrix, add_column and add all feed the same cell, a scaled add
+    // is a weighted one, and the internal add counter is a width bound that
+    // resets on rescale. Passing the count also makes this a general exact
+    // division by an integer, which is what a weighted mean needs.
+    //
+    // A count of zero throws std::domain_error.
+    double to_double_mean(std::size_t i, std::size_t j,
+                          std::uint64_t count) const;
+
+    // The same, with the residual: exactly (stored value / count - returned
+    // double), correctly rounded. The quotient is not a fixed-point value, so
+    // the difference is formed as an integer numerator over the same count
+    // and divided once more; nothing is rounded before the final step. The
+    // properties listed for to_double's residual all hold here, with
+    // is_exactly_representable read as "the residual is +0.0".
+    double to_double_mean(double *residual, std::size_t i, std::size_t j,
+                          std::uint64_t count) const;
+
+    // to_matrix and to_matrix_with_residual, over the mean.
+    void to_matrix_mean(double *out, std::uint64_t count,
+                        std::size_t row_stride = 0) const;
+
+    void to_matrix_mean_with_residual(double *out, double *residual,
+                                      std::uint64_t count,
+                                      std::size_t row_stride = 0) const;
+
     // The exact value as a decimal string, e.g. "0.1" accumulated once yields
     // 0.1000000000000000055511151231257827021181583404541015625. Never rounds.
     std::string to_exact_decimal(std::size_t i, std::size_t j) const;

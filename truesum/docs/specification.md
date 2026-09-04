@@ -204,6 +204,11 @@ double to_double(double *residual, i, j) const;
 void to_matrix(double *out, row_stride = 0) const;
 void to_matrix_with_residual(double *out, double *residual,
                              row_stride = 0) const;
+double to_double_mean(i, j, std::uint64_t count) const;
+double to_double_mean(double *residual, i, j, std::uint64_t count) const;
+void to_matrix_mean(double *out, std::uint64_t count, row_stride = 0) const;
+void to_matrix_mean_with_residual(double *out, double *residual,
+                                  std::uint64_t count, row_stride = 0) const;
 std::string to_exact_decimal(i, j) const;
 bool is_exactly_representable(i, j) const;
 bool is_zero(i, j) const;
@@ -226,6 +231,20 @@ fixed point, never in floating point. Guaranteed properties:
 The pair must be kept **unevaluated**. `hi + lo` in `double` arithmetic returns
 `hi` unchanged in almost every case, because `|lo| <= ulp(hi)/2` by
 construction.
+
+`to_double_mean` is the correctly rounded value of `(stored value / count)`,
+the exact rational, with the same range behaviour as `to_double`. The count is
+supplied, never inferred: the accumulation matrix does not know how many values a sum
+stands for. `count == 0` raises `std::domain_error`. A power-of-two count is
+bit-identical, residual included, to having accumulated the input scaled by
+that power. The mean's residual is exactly `(stored value / count − returned
+double)`, correctly rounded, formed as an integer numerator over the same
+count and divided once; every property listed above holds for it, with "the
+residual is `+0.0` exactly when the quotient is a double" in place of the
+`is_exactly_representable` clause. One boundary is worth knowing: a quotient
+that falls exactly halfway between two denormals leaves a residual of half
+the smallest denormal, which no double carries, and that residual reads as
+`+0.0`. There is no exact decimal of a mean, because there is none in general.
 
 ### Shape, sizing and tuning
 
@@ -436,7 +455,7 @@ bandwidth-bound and was not measured.
 | --- | --- |
 | `std::invalid_argument` | malformed surveys; pageable memory where pinned is required; more than 16 folded matrices |
 | `std::out_of_range` | row or column index out of range |
-| `std::domain_error` | inf or NaN accumulated; `log2_scale` out of range |
+| `std::domain_error` | inf or NaN accumulated; `log2_scale` out of range; a mean over a count of zero |
 | `std::runtime_error` | a detected contradiction; unreserved device column; more matrices than declared; any failed CUDA call |
 | `std::bad_alloc` | allocation failure |
 

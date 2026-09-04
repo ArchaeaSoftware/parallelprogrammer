@@ -63,6 +63,16 @@ extract_u64(const limb_t *p, std::size_t n, std::size_t shift);
 void
 mul_small(std::vector<limb_t> &v, limb_t m);
 
+// v = v / d (unsigned), returning the remainder. d must be nonzero. v keeps
+// its size; the quotient simply has leading zero limbs.
+limb_t
+div_small(std::vector<limb_t> &v, limb_t d);
+
+// p -= q, both two's complement values of n limbs, wrapping on overflow. As
+// with add_shifted, the caller sizes n so the true difference fits.
+void
+sub(limb_t *p, std::size_t n, const limb_t *q);
+
 // Exact decimal digits of a non-negative magnitude. Returns "0" for zero.
 std::string
 magnitude_to_decimal(std::vector<limb_t> mag);

@@ -2,8 +2,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -1956,6 +1958,318 @@ test_presized_matches_adaptive()
     }
 }
 
+// ---------------------------------------------------------------------------
+// Means: the stored sum over a count the caller supplies.
+
+// Where both the sum and the count are exact doubles, IEEE division is itself
+// the correctly rounded quotient, so it serves as an independent reference.
+void
+test_mean_matches_double_division()
+{
+    std::mt19937_64 rng(4242);
+    truesum::AccumulationMatrix a(1, 1);
+    for (int trial = 0; trial < 4000; ++trial) {
+        // A nonzero integer below 2^53 at a moderate scale, and a count below
+        // 2^53 whose width varies so small and wide divisors both occur.
+        const std::uint64_t m = 1 + (rng() & ((std::uint64_t{1} << 53) - 2));
+        const std::uint64_t n =
+            1 + (rng() % (std::uint64_t{1} << (rng() % 53)));
+        const int e = static_cast<int>(rng() % 200) - 100;
+        double x = std::ldexp(static_cast<double>(m), e);
+        if (trial & 1) x = -x;
+
+        a.set_zero();
+        a.add(0, 0, x);
+        const double want = x / static_cast<double>(n);
+        CHECK_DOUBLE(a.to_double_mean(0, 0, n), want);
+
+        // The residual is the nearest double to the exact discrepancy, which
+        // an fma can produce here because x - want * n is exact in it.
+        double lo = 1.0;
+        CHECK_DOUBLE(a.to_double_mean(&lo, 0, 0, n), want);
+        const double diff = std::fma(-want, static_cast<double>(n), x);
+        CHECK_DOUBLE(lo, diff / static_cast<double>(n));
+    }
+}
+
+// Sums too wide for a double, so no double division can be the reference.
+// The check is the definition of correct rounding, carried out exactly in a
+// second accumulation matrix: with X the stored sum, h the returned mean, n the
+// count and u the ulp of h,
+//
+//     |X - h * n| * 2 <= n * u,   with equality only when h is even.
+//
+// Every term is a double times a power of two, so an accumulation matrix holds
+// the whole expression exactly, and its sign is read off without rounding.
+void
+test_mean_is_nearest()
+{
+    const std::size_t rows = 24, cols = 3;
+    const int reps = 8;
+    std::mt19937_64 rng(777);
+
+    std::vector<std::vector<double>> batches(reps,
+                                             std::vector<double>(rows * cols));
+    for (auto &batch : batches) {
+        for (auto &x : batch) {
+            const std::uint64_t m = (rng() | (std::uint64_t{1} << 52)) &
+                                    ((std::uint64_t{1} << 53) - 1);
+            x = std::ldexp(static_cast<double>(m),
+                           static_cast<int>(rng() % 80) - 40);
+            if (rng() & 1) x = -x;
+        }
+    }
+
+    truesum::AccumulationMatrix a(rows, cols);
+    for (int r = 0; r < reps; ++r) a.add_matrix(batches[r].data());
+
+    // Adds v * 2^k to a 1x1 accumulation matrix.
+    auto add_scaled = [](truesum::AccumulationMatrix &acc, double v, int k) {
+        acc.add_column_scaled_pow2(0, &v, k);
+    };
+
+    const std::uint64_t counts[] = {1,
+                                    2,
+                                    3,
+                                    7,
+                                    8,
+                                    10,
+                                    1000,
+                                    999983,
+                                    (std::uint64_t{1} << 40) + 1,
+                                    12345678901234567ull,
+                                    (std::uint64_t{1} << 52) - 1,
+                                    (std::uint64_t{1} << 53) + 1,
+                                    ~std::uint64_t{0}};
+    int inexact = 0, negative_residuals = 0;
+    for (const std::uint64_t n : counts) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            for (std::size_t i = 0; i < rows; ++i) {
+                double lo = 1.0;
+                const double h = a.to_double_mean(&lo, i, j, n);
+                CHECK_DOUBLE(a.to_double_mean(i, j, n), h);
+                CHECK(std::isfinite(h) && 0.0 != h);
+                const double u =
+                    std::nextafter(std::fabs(h),
+                                   std::numeric_limits<double>::infinity()) -
+                    std::fabs(h);
+
+                // b = X - h * n, exactly. h * n is h shifted once per set
+                // bit of n.
+                truesum::AccumulationMatrix b(1, 1);
+                for (int r = 0; r < reps; ++r) {
+                    add_scaled(b, batches[r][i * cols + j], 0);
+                }
+                for (int k = 0; k < 64; ++k) {
+                    if (n & (std::uint64_t{1} << k)) add_scaled(b, -h, k);
+                }
+                const double sgn = b.to_double(0, 0) < 0.0 ? -1.0 : 1.0;
+
+                // c = 2 * |b| - n * u, exactly; nearest means c <= 0.
+                truesum::AccumulationMatrix c(1, 1);
+                for (int r = 0; r < reps; ++r) {
+                    add_scaled(c, sgn * batches[r][i * cols + j], 1);
+                }
+                for (int k = 0; k < 64; ++k) {
+                    if (n & (std::uint64_t{1} << k)) {
+                        add_scaled(c, -sgn * h, k + 1);
+                        add_scaled(c, -u, k);
+                    }
+                }
+                CHECK(c.to_double(0, 0) <= 0.0);
+                if (c.is_zero(0, 0)) {
+                    std::uint64_t bits = 0;
+                    std::memcpy(&bits, &h, sizeof bits);
+                    CHECK(0 == (bits & 1));  // a tie went to even
+                }
+
+                // The residual is b / n rounded, so it must round to lo, be
+                // zero exactly when b is, and be bounded by half an ulp.
+                CHECK_DOUBLE(b.to_double_mean(0, 0, n), lo);
+                CHECK((0.0 == lo) == b.is_zero(0, 0));
+                CHECK(std::fabs(lo) <= u / 2);
+                CHECK((lo < 0.0) == (sgn < 0.0 && !b.is_zero(0, 0)));
+
+                if (0.0 != lo) ++inexact;
+                if (lo < 0.0) ++negative_residuals;
+            }
+        }
+    }
+    // Only meaningful if rounding happened, in both directions.
+    const int total = static_cast<int>(rows * cols * std::size(counts));
+    CHECK(inexact > total / 2);
+    CHECK(negative_residuals > total / 8);
+    CHECK(inexact - negative_residuals > total / 8);
+}
+
+// A power-of-two count is a pure change of exponent, so the mean must agree
+// bit for bit, residual included, with accumulating the same input scaled.
+void
+test_mean_by_power_of_two_is_scaling()
+{
+    const std::size_t rows = 16, cols = 5;
+    const int reps = 6;
+    std::mt19937_64 rng(1010);
+    std::vector<std::vector<double>> batches(reps,
+                                             std::vector<double>(rows * cols));
+    for (auto &batch : batches) {
+        for (auto &x : batch) {
+            x = std::ldexp(static_cast<double>(rng() >> 11),
+                           static_cast<int>(rng() % 60) - 30);
+            if (rng() & 1) x = -x;
+        }
+    }
+
+    truesum::AccumulationMatrix a(rows, cols);
+    for (int r = 0; r < reps; ++r) a.add_matrix(batches[r].data());
+
+    for (int k : {0, 1, 3, 10, 40, 63}) {
+        truesum::AccumulationMatrix scaled(rows, cols);
+        for (int r = 0; r < reps; ++r) {
+            scaled.add_matrix_scaled_pow2(batches[r].data(), -k);
+        }
+        for (std::size_t j = 0; j < cols; ++j) {
+            for (std::size_t i = 0; i < rows; ++i) {
+                double lo_mean = 1.0, lo_scaled = 2.0;
+                const double h_mean =
+                    a.to_double_mean(&lo_mean, i, j, std::uint64_t{1} << k);
+                const double h_scaled = scaled.to_double(&lo_scaled, i, j);
+                CHECK_DOUBLE(h_mean, h_scaled);
+                CHECK_DOUBLE(lo_mean, lo_scaled);
+            }
+        }
+    }
+}
+
+void
+test_mean_edge_cases()
+{
+    const double inf = std::numeric_limits<double>::infinity();
+    truesum::AccumulationMatrix a(1, 1);
+
+    // A count of zero is not a mean.
+    bool threw = false;
+    try {
+        a.to_double_mean(0, 0, 0);
+    } catch (const std::domain_error &) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    // An empty sum has a mean of +0.0 over any count.
+    double lo = 1.0;
+    CHECK_DOUBLE(a.to_double_mean(&lo, 0, 0, 3), 0.0);
+    CHECK_DOUBLE(lo, 0.0);
+
+    // 1/3 rounds down, and what it drops is exactly 2^-54 / 3.
+    a.add(0, 0, 1.0);
+    CHECK_DOUBLE(a.to_double_mean(&lo, 0, 0, 3), 1.0 / 3.0);
+    CHECK_DOUBLE(lo, std::ldexp(1.0 / 3.0, -54));
+    a.set_zero();
+    a.add(0, 0, -1.0);
+    CHECK_DOUBLE(a.to_double_mean(&lo, 0, 0, 3), -1.0 / 3.0);
+    CHECK_DOUBLE(lo, -std::ldexp(1.0 / 3.0, -54));
+
+    // The widest count. 1 / (2^64 - 1) is 2^-64 plus a sliver, and the
+    // sliver, 1 / ((2^64 - 1) * 2^64), rounds to 2^-128.
+    a.set_zero();
+    a.add(0, 0, 1.0);
+    CHECK_DOUBLE(a.to_double_mean(&lo, 0, 0, ~std::uint64_t{0}),
+                 std::ldexp(1.0, -64));
+    CHECK_DOUBLE(lo, std::ldexp(1.0, -128));
+
+    // Ties at the bottom of the range, in units of the smallest denormal:
+    // 1/2 ties between 0 and 1 and goes to 0; 3/2 goes to 2; 5/2 to 2; 7/2
+    // to 4. 1/3 is below the halfway point and rounds to 0.
+    const double tiny = std::numeric_limits<double>::denorm_min();
+    a.set_zero();
+    a.add(0, 0, tiny);
+    CHECK_DOUBLE(a.to_double_mean(0, 0, 2), 0.0);
+    CHECK_DOUBLE(a.to_double_mean(0, 0, 3), 0.0);
+    a.add(0, 0, tiny);
+    a.add(0, 0, tiny);
+    CHECK_DOUBLE(a.to_double_mean(0, 0, 2), 2 * tiny);
+    CHECK_DOUBLE(a.to_double_mean(0, 0, 3), tiny);
+    a.add(0, 0, tiny);
+    a.add(0, 0, tiny);
+    CHECK_DOUBLE(a.to_double_mean(0, 0, 2), 2 * tiny);
+    a.add(0, 0, tiny);
+    a.add(0, 0, tiny);
+    CHECK_DOUBLE(a.to_double_mean(&lo, 0, 0, 2), 4 * tiny);
+    // What that rounding dropped is half the smallest denormal, which no
+    // double can carry: the residual is itself a tie, and goes to +0.0.
+    CHECK_DOUBLE(lo, 0.0);
+
+    // Top of the range: four DBL_MAX over four is DBL_MAX exactly, over
+    // three it overflows, and the residual of an overflow is 0.0.
+    const double big = std::numeric_limits<double>::max();
+    a.set_zero();
+    for (int r = 0; r < 4; ++r) a.add(0, 0, big);
+    CHECK_DOUBLE(a.to_double_mean(&lo, 0, 0, 4), big);
+    CHECK_DOUBLE(lo, 0.0);
+    CHECK_DOUBLE(a.to_double_mean(&lo, 0, 0, 3), inf);
+    CHECK_DOUBLE(lo, 0.0);
+    a.set_zero();
+    for (int r = 0; r < 4; ++r) a.add(0, 0, -big);
+    CHECK_DOUBLE(a.to_double_mean(0, 0, 3), -inf);
+
+    // A mean over the count that produced it recovers a common value exactly.
+    a.set_zero();
+    for (int r = 0; r < 1000; ++r) a.add(0, 0, 0.1);
+    CHECK_DOUBLE(a.to_double_mean(&lo, 0, 0, 1000), 0.1);
+    CHECK_DOUBLE(lo, 0.0);
+    // ... and the sum of 1..n over n is (n+1)/2.
+    a.set_zero();
+    for (int r = 1; r <= 999; ++r) a.add(0, 0, static_cast<double>(r));
+    CHECK_DOUBLE(a.to_double_mean(0, 0, 999), 500.0);
+    CHECK_DOUBLE(a.to_double_mean(0, 0, 1000), 499.5);
+}
+
+void
+test_mean_matrix_entry_points()
+{
+    const std::size_t rows = 5, cols = 4, stride = 7;
+    std::mt19937_64 rng(31337);
+    truesum::AccumulationMatrix a(rows, cols);
+    for (int r = 0; r < 5; ++r) {
+        for (std::size_t j = 0; j < cols; ++j) {
+            for (std::size_t i = 0; i < rows; ++i) {
+                a.add(i, j,
+                      std::ldexp(static_cast<double>(rng() >> 11),
+                                 static_cast<int>(rng() % 40) - 20));
+            }
+        }
+    }
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    std::vector<double> out(rows * stride, nan), res(rows * stride, nan);
+    a.to_matrix_mean_with_residual(out.data(), res.data(), 7, stride);
+    std::vector<double> out2(rows * stride, nan);
+    a.to_matrix_mean(out2.data(), 7, stride);
+    for (std::size_t i = 0; i < rows; ++i) {
+        for (std::size_t k = 0; k < stride; ++k) {
+            if (k < cols) {
+                double lo = 1.0;
+                const double h = a.to_double_mean(&lo, i, k, 7);
+                CHECK_DOUBLE(out[i * stride + k], h);
+                CHECK_DOUBLE(out2[i * stride + k], h);
+                CHECK_DOUBLE(res[i * stride + k], lo);
+            } else {
+                CHECK(std::isnan(out[i * stride + k]));
+                CHECK(std::isnan(out2[i * stride + k]));
+                CHECK(std::isnan(res[i * stride + k]));
+            }
+        }
+    }
+
+    // Symmetric storage reaches the mean through the same fold as to_double.
+    truesum::AccumulationMatrix s(4, truesum::Uplo::Lower);
+    s.add(2, 1, 1.0);
+    s.add(2, 1, 1.0);
+    CHECK_DOUBLE(s.to_double_mean(1, 2, 3), 2.0 / 3.0);
+    CHECK_DOUBLE(s.to_double_mean(2, 1, 3), 2.0 / 3.0);
+}
+
 int
 main()
 {
@@ -1993,6 +2307,11 @@ main()
     test_symmetric_entry_points_agree();
     test_symmetric_keeps_exactness();
     test_fold_matches_sequential();
+    test_mean_matches_double_division();
+    test_mean_is_nearest();
+    test_mean_by_power_of_two_is_scaling();
+    test_mean_edge_cases();
+    test_mean_matrix_entry_points();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

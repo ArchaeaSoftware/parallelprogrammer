@@ -876,6 +876,93 @@ residual_of(const std::vector<limb_t> &mag, long long exp, const Rounded &r)
     return neg ? -v : v;
 }
 
+// The correctly rounded double nearest (magnitude * 2^exp) / divisor, for a
+// non-negative magnitude and a divisor of at least 1.
+//
+// A quotient is not a fixed-point value, so it cannot be handed to
+// round_magnitude where it lies. Instead the magnitude is shifted left by s
+// and divided, which yields floor(magnitude * 2^s / divisor) exactly, and the
+// remainder collapses into one sticky bit appended below the quotient. The
+// result carries every bit the rounding can look at: the quotient's own bits
+// verbatim, and "something nonzero lies below" as the sticky bit. s is chosen
+// so the quotient has at least 55 bits, which puts the sticky bit below the
+// round bit on both the normal path (53 kept, so at least 3 dropped) and the
+// denormal path, where a 56-bit value whose top is under 2^-1022 has its
+// lowest bit under 2^-1077.
+Rounded
+round_quotient(const limb_t *mag, std::size_t n, long long exp,
+               std::uint64_t divisor)
+{
+    const std::size_t bm = limbs::bit_length(mag, n);
+    if (0 == bm) return Rounded{0.0, 0, exp};
+
+    // floor(mag * 2^s / divisor) has at least bm + s - bd significant bits.
+    const std::size_t bd = bit_width_u64(divisor);
+    const std::size_t s = bd + 55 > bm ? bd + 55 - bm : 0;
+
+    std::vector<limb_t> q(limbs_for_bits(bm + s) + 1, 0);
+    limbs::shift_left(mag, n, static_cast<unsigned>(s), q.data(), q.size());
+    const limb_t rem = limbs::div_small(q, divisor);
+
+    // (q << 1) | sticky, at weight 2^(exp - s - 1).
+    std::vector<limb_t> q2(q.size() + 1, 0);
+    limbs::shift_left(q.data(), q.size(), 1, q2.data(), q2.size());
+    if (0 != rem) q2[0] |= 1;
+    return round_magnitude(q2.data(), q2.size(),
+                           exp - static_cast<long long>(s) - 1);
+}
+
+// (magnitude * 2^exp) / divisor - r, rounded to a double. Signed like
+// residual_of, and for the same reason.
+//
+// The difference is formed as an integer over the same divisor. With t the
+// lower of the two weights involved,
+//
+//     D = magnitude * 2^(exp - t) - r.m * divisor * 2^(r.scale - t)
+//
+// is an integer, the residual is D * 2^t / divisor, and round_quotient turns
+// that into a double with a single rounding.
+double
+residual_of_quotient(const std::vector<limb_t> &mag, long long exp,
+                     std::uint64_t divisor, const Rounded &r)
+{
+    if (0 == r.m) return 0.0;
+    if (!std::isfinite(r.value)) return 0.0;
+
+    const long long t = std::min(exp, r.scale);
+    const std::size_t sa = static_cast<std::size_t>(exp - t);
+    const std::size_t sb = static_cast<std::size_t>(r.scale - t);
+
+    // r.m * divisor is under 118 bits; the extra limb is room for the sign.
+    const std::size_t bm = limbs::bit_length(mag.data(), mag.size());
+    const std::size_t n = limbs_for_bits(std::max(bm + sa, sb + 118)) + 1;
+
+    std::vector<limb_t> a(n, 0);
+    limbs::shift_left(mag.data(), mag.size(), static_cast<unsigned>(sa),
+                      a.data(), n);
+
+    std::vector<limb_t> b(1, r.m);
+    limbs::mul_small(b, divisor);
+    b.push_back(0);  // keeps it non-negative for the sign-aware shift
+    std::vector<limb_t> bs(n, 0);
+    limbs::shift_left(b.data(), b.size(), static_cast<unsigned>(sb), bs.data(),
+                      n);
+
+    limbs::sub(a.data(), n, bs.data());
+    const bool neg = limbs::is_negative(a.data(), n);
+    std::vector<limb_t> d(n);
+    if (neg) {
+        limbs::negate_into(a.data(), n, d.data());
+    } else {
+        d = a;
+    }
+    // A negative difference that rounds to zero must not surface as -0.0:
+    // the caller applies the entry's sign only to a nonzero residual, and
+    // this is the same rule one level down.
+    const double v = round_quotient(d.data(), n, t, divisor).value;
+    return (neg && 0.0 != v) ? -v : v;
+}
+
 }  // namespace
 
 double
@@ -925,6 +1012,58 @@ AccumulationMatrix::to_matrix_with_residual(double *out, double *residual,
         for (std::size_t i = 0; i < rows_; ++i) {
             out[i * stride + j] =
                 to_double(&residual[i * stride + j], i, j);
+        }
+    }
+}
+
+double
+AccumulationMatrix::to_double_mean(std::size_t i, std::size_t j,
+                                  std::uint64_t count) const
+{
+    return to_double_mean(nullptr, i, j, count);
+}
+
+double
+AccumulationMatrix::to_double_mean(double *residual, std::size_t i,
+                                  std::size_t j, std::uint64_t count) const
+{
+    if (0 == count) throw std::domain_error("truesum: mean over zero values");
+    bool neg = false;
+    const std::vector<limb_t> mag = magnitude(&neg, i, j);
+    std::size_t ecol = 0, eslot = 0;
+    locate(ecol, eslot, i, j);
+    const long long exp = cols_state_[ecol].exponent;
+    const Rounded r = round_quotient(mag.data(), mag.size(), exp, count);
+
+    if (nullptr != residual) {
+        const double lo = residual_of_quotient(mag, exp, count, r);
+        *residual = (neg && 0.0 != lo) ? -lo : lo;
+    }
+    return neg ? -r.value : r.value;
+}
+
+void
+AccumulationMatrix::to_matrix_mean(double *out, std::uint64_t count,
+                                  std::size_t row_stride) const
+{
+    const std::size_t stride = row_stride ? row_stride : cols_;
+    for (std::size_t j = 0; j < cols_; ++j) {
+        for (std::size_t i = 0; i < rows_; ++i) {
+            out[i * stride + j] = to_double_mean(i, j, count);
+        }
+    }
+}
+
+void
+AccumulationMatrix::to_matrix_mean_with_residual(double *out, double *residual,
+                                                std::uint64_t count,
+                                                std::size_t row_stride) const
+{
+    const std::size_t stride = row_stride ? row_stride : cols_;
+    for (std::size_t j = 0; j < cols_; ++j) {
+        for (std::size_t i = 0; i < rows_; ++i) {
+            out[i * stride + j] =
+                to_double_mean(&residual[i * stride + j], i, j, count);
         }
     }
 }

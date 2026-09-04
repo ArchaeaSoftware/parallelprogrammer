@@ -171,6 +171,32 @@ mul_small(std::vector<limb_t> &v, limb_t m)
     if (0 != carry) v.push_back(carry);
 }
 
+limb_t
+div_small(std::vector<limb_t> &v, limb_t d)
+{
+    assert(0 != d);
+    limb_t rem = 0;
+    for (std::size_t i = v.size(); i-- > 0;) {
+        const __uint128_t cur = (static_cast<__uint128_t>(rem) << 64) | v[i];
+        v[i] = static_cast<limb_t>(cur / d);
+        rem = static_cast<limb_t>(cur % d);
+    }
+    return rem;
+}
+
+void
+sub(limb_t *p, std::size_t n, const limb_t *q)
+{
+    limb_t borrow = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        // Unsigned 128-bit subtraction wraps, so the high half is all ones
+        // exactly when a borrow was taken.
+        const __uint128_t diff = static_cast<__uint128_t>(p[i]) - q[i] - borrow;
+        p[i] = static_cast<limb_t>(diff);
+        borrow = static_cast<limb_t>(diff >> 64) & 1;
+    }
+}
+
 std::string
 magnitude_to_decimal(std::vector<limb_t> mag)
 {

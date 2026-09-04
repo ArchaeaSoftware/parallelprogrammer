@@ -89,6 +89,42 @@ multiple of 2⁻¹⁰⁷⁴ rather than rounding twice via 53 bits).
 `to_exact_decimal` is exact and finite — a binary fixed-point value always has a
 terminating decimal expansion, since `V · 2⁻ᵏ = (V · 5ᵏ) / 10ᵏ`.
 
+### Means
+
+`to_double_mean(i, j, count)` is the stored sum divided by `count`, correctly
+rounded: the double nearest the exact rational, ties-to-even, through the
+denormals and out to `±inf`, exactly as `to_double` is for the sum. Dividing
+the rounded sum in floating point rounds twice; this rounds once.
+
+```cpp
+double m  = acc.to_double_mean(i, j, n_batches);
+double lo;                                          // what the rounding dropped
+double hi = acc.to_double_mean(&lo, i, j, n_batches);
+acc.to_matrix_mean(out.data(), n_batches);          // bulk, with a residual
+acc.to_matrix_mean_with_residual(out.data(), res.data(), n_batches);
+```
+
+The count is the caller's, because the accumulation matrix does not know what a sum
+stands for: `add_matrix`, `add_column` and `add` all feed the same cell, a
+scaled add is a weighted one, and the internal add counter is a width bound
+that resets on rescale. Passing it also makes this a general exact division
+by an integer, which is what a weighted mean needs. A count of zero throws
+`std::domain_error`.
+
+A quotient is not a fixed-point value, so it is not rounded where it lies.
+The magnitude is shifted left and divided by the count to at least 55
+quotient bits, the remainder collapses into one sticky bit below them, and
+that is rounded like any other magnitude — every bit the rounding can look at
+is either explicit or summarized by the sticky bit. The residual is formed the
+same way, as an integer numerator over the same count, so it too is rounded
+once and has every property of `to_double`'s residual. A power-of-two count
+is bit-identical, residual included, to accumulating the input scaled by
+`add_matrix_scaled_pow2`, and the test suite asserts it.
+
+There is no exact decimal for a mean, and there cannot be one in general:
+`1/3` does not terminate. Where the exact value matters, the pair `(hi, lo)`
+carries about 106 bits of it.
+
 ### Errors and edge cases
 
 - `inf` / `NaN` throw `std::domain_error`; out-of-range indices throw
@@ -251,6 +287,13 @@ row/column layout survives formatting.
   never part of what is stored, so the value is unaffected;
 - absorption of a million values whose ulp is far below the running total,
   where naive summation stalls completely.
+- **means**: against double division wherever both operands are exact
+  doubles, since IEEE requires that quotient to be correctly rounded; and for
+  sums too wide for a double, by the definition of nearest, evaluated exactly
+  in a second accumulation matrix — `|X − h·n|·2 ≤ n·ulp(h)`, with equality only when
+  `h` is even — over thirteen counts up to `2⁶⁴ − 1`. Ties at the denormal
+  floor, overflow at the top, and the residual of `1/3` being exactly
+  `2⁻⁵⁴/3` are pinned individually.
 
 At size, where indexing and scale bookkeeping are what can break:
 
