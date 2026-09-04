@@ -79,3 +79,7 @@ make bench   # ns/op for each conversion path
 So on x86-64 the int8-to-float trick is a wash; it pays off on targets without a
 fast int-to-float instruction. The float-to-int8 trick is the easy win when
 you cannot or do not want to pass `-fno-math-errno`.
+
+## License
+
+BSD 3-Clause. Copyright (C) 2026 by Archaea Software, LLC. See [LICENSE](LICENSE).
