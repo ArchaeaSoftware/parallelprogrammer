@@ -82,8 +82,8 @@ are bit-identical with or without it; the test suite asserts this.
 ### Readback semantics
 
 `to_double` is correctly rounded, round-to-nearest ties-to-even, over the full
-range: it overflows to `±inf` and passes through the subnormal range without
-double rounding (the subnormal path rounds the exact value directly to a
+range: it overflows to `±inf` and passes through the denormal range without
+double rounding (the denormal path rounds the exact value directly to a
 multiple of 2⁻¹⁰⁷⁴ rather than rounding twice via 53 bits).
 
 `to_exact_decimal` is exact and finite — a binary fixed-point value always has a
@@ -229,12 +229,12 @@ row/column layout survives formatting.
 
 `tests/test_truesum.cpp` is a dependency-free assertion runner covering:
 
-- exact decomposition and round-trip of random bit patterns, subnormals,
+- exact decomposition and round-trip of random bit patterns, denormals,
   `DBL_MAX`, `DBL_MIN`, and both zeros;
 - catastrophic cancellation (`1e300 + 1 - 1e300` → exactly `1`);
 - exact decimal expansions checked digit-for-digit against known values;
 - correct rounding at ties, including ties-to-even at `1 + 2⁻⁵³`, the
-  subnormal boundary, and the `2⁻¹⁰⁷⁵` round-to-zero tie;
+  denormal boundary, and the `2⁻¹⁰⁷⁵` round-to-zero tie;
 - exponent-lowering and width-growth across the full 2⁻¹⁰⁷⁴…2¹⁰²³ span;
 - add-then-subtract-in-shuffled-order returning to exact zero;
 - **order independence**: double addition is commutative but not associative,

@@ -191,7 +191,7 @@ public:
 
     // Correctly rounded (round-to-nearest, ties-to-even) double nearest to the
     // exact stored value. Overflows to +/-inf; underflows through the
-    // subnormal range without double rounding.
+    // denormal range without double rounding.
     double to_double(std::size_t i, std::size_t j) const;
 
     // The same, and the residual through the passback, which leads because the

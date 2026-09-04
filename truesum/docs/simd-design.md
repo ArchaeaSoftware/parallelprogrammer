@@ -1083,7 +1083,7 @@ move *more* memory.
 ## Implemented
 
 **Bit-manipulation `decompose`** (`8565474`). Reads the IEEE-754 fields
-directly; normal and subnormal collapse to `e = max(biased, 1) - 1075`. Took
+directly; normal and denormal collapse to `e = max(biased, 1) - 1075`. Took
 ~28% off per-element cost end to end (12.3 → 8.8 ns narrow, 14.4 → 10.6 wide).
 
 In isolation it is ~9x faster than the `frexp`/`ldexp` version, but that

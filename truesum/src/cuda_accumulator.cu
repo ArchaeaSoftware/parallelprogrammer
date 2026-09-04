@@ -170,7 +170,7 @@ struct ColumnDesc {
 // what a double means before they can be compared bit for bit.
 //
 //   normal    (biased != 0): m = 2^52 | frac, e = biased - 1075
-//   subnormal (biased == 0): m = frac,        e = -1074
+//   denormal (biased == 0): m = frac,        e = -1074
 //
 // Both collapse to e = max(biased, 1) - 1075.
 __device__ inline void

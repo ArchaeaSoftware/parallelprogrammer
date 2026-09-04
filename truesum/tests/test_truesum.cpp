@@ -78,7 +78,7 @@ test_decompose()
     p = truesum::decompose(0.5);
     CHECK(p.mantissa == 1 && p.exponent == -1);
 
-    // Smallest subnormal is exactly 2^-1074.
+    // Smallest denormal is exactly 2^-1074.
     p = truesum::decompose(std::numeric_limits<double>::denorm_min());
     CHECK(p.mantissa == 1 && p.exponent == -1074);
 
@@ -116,11 +116,11 @@ test_single_value_roundtrip()
         std::numeric_limits<double>::max(),
         -std::numeric_limits<double>::max(),
         std::numeric_limits<double>::min(),         // smallest normal
-        std::numeric_limits<double>::denorm_min(),  // smallest subnormal
+        std::numeric_limits<double>::denorm_min(),  // smallest denormal
         -std::numeric_limits<double>::denorm_min(),
         std::ldexp(1.0, 1000),
         std::ldexp(1.0, -1000),
-        std::ldexp(4503599627370495.0, -1074),  // largest subnormal
+        std::ldexp(4503599627370495.0, -1074),  // largest denormal
     };
 
     for (double v : values) {
@@ -258,9 +258,9 @@ test_rounding_ties_to_even()
         m.add(0, 0, std::ldexp(1.0, -53));
         CHECK_DOUBLE(m.to_double(0, 0), std::nextafter(odd, 2.0));
     }
-    {  // 2^-1075 is halfway between 0 and the smallest subnormal: ties to
+    {  // 2^-1075 is halfway between 0 and the smallest denormal: ties to
        // zero. It is below anything a double can hold, so it is reached by
-       // accumulating the smallest subnormal with an exact power-of-two scale.
+       // accumulating the smallest denormal with an exact power-of-two scale.
         truesum::ColumnBlockMatrix m(1, 1);
         double sub = std::numeric_limits<double>::denorm_min();  // 2^-1074
         m.add_matrix_scaled_pow2(&sub, -1);                      // += 2^-1075
@@ -268,12 +268,12 @@ test_rounding_ties_to_even()
         CHECK(!m.is_zero(0, 0));  // exact value kept, only readback rounds
         CHECK(m.column_exponent(0) == -1075);
 
-        // Just past that tie rounds up to the smallest subnormal.
+        // Just past that tie rounds up to the smallest denormal.
         m.add_matrix_scaled_pow2(&sub, -2);  // += 2^-1076
         CHECK_DOUBLE(m.to_double(0, 0),
                      std::numeric_limits<double>::denorm_min());
     }
-    {  // Two subnormals that sum into the smallest normal.
+    {  // Two denormals that sum into the smallest normal.
         truesum::ColumnBlockMatrix m(1, 1);
         const double largest_sub = std::ldexp(4503599627370495.0, -1074);
         m.add(0, 0, largest_sub);

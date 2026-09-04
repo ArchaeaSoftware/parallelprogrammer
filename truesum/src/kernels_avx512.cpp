@@ -100,9 +100,9 @@ survey_column_avx512(const double *values, std::size_t rows,
     //
     // The maximum needs nothing more: for a normal, top = e + 53 =
     // biased - 1022, monotonic in that field, and every normal outranks every
-    // subnormal (worst normal -1021, best subnormal -1022). With the sign
+    // denormal (worst normal -1021, best denormal -1022). With the sign
     // cleared the whole bit pattern orders by magnitude, so one max over it
-    // yields both the exponent and, for the all-subnormal case, the
+    // yields both the exponent and, for the all-denormal case, the
     // significand that decides the width.
     //
     // The minimum is a lower bound only -- the raw exponent, not the true ulp,

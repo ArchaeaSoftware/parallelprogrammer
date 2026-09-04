@@ -184,15 +184,15 @@ test_shapes()
 void
 test_edge_values()
 {
-    // Zeros, negative zero, subnormals and the extremes of the range, mixed
+    // Zeros, negative zero, denormals and the extremes of the range, mixed
     // with ordinary values so columns still have a sensible scale.
     const double specials[] = {0.0,
                                -0.0,
                                1.0,
                                -1.0,
-                               0x1p-1074,  // smallest subnormal
+                               0x1p-1074,  // smallest denormal
                                -0x1p-1074,
-                               0x1.fffffffffffffp-1023,  // largest subnormal
+                               0x1.fffffffffffffp-1023,  // largest denormal
                                0x1p-1022,                // smallest normal
                                0x1.fffffffffffffp+52};
     const std::size_t n = sizeof(specials) / sizeof(specials[0]);
@@ -1414,7 +1414,7 @@ test_device_survey()
             double v = random_value(120);
             if (1 == j) v = 0.0;                       // an all-zero column
             if (2 == j && 0 == (i % 7)) v = 0.0;       // zeros mixed in
-            if (3 == j) v = std::ldexp(1.0, -1074);    // all subnormal
+            if (3 == j) v = std::ldexp(1.0, -1074);    // all denormal
             src[j * rows + i] = v;
         }
     }

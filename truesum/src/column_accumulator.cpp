@@ -82,7 +82,7 @@ decompose(double v)
     // shift and measures about 9x faster.
     //
     //   normal    (biased != 0): m = 2^52 | frac, e = biased - 1075
-    //   subnormal (biased == 0): m = frac,        e = -1074
+    //   denormal (biased == 0): m = frac,        e = -1074
     //
     // Both collapse to e = max(biased, 1) - 1075.
     std::uint64_t bits;
@@ -809,7 +809,7 @@ round_magnitude(const limb_t *mag, std::size_t n, long long exp)
 
     const long long top = static_cast<long long>(b) - 1 + exp;  // 2^top <= |x|
 
-    // Normal range: keep 53 significant bits. Subnormal range: round directly
+    // Normal range: keep 53 significant bits. Denormal range: round directly
     // to a multiple of 2^-1074, which avoids the double rounding a two-step
     // (round to 53 bits, then let ldexp round again) would introduce.
     const long long drop =

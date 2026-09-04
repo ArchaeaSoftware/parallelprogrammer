@@ -210,7 +210,7 @@ bool is_zero(i, j) const;
 std::vector<limb_t> entry_limbs(i, j) const;
 ```
 
-`to_double` overflows to ±inf and underflows through the subnormal range
+`to_double` overflows to ±inf and underflows through the denormal range
 without double rounding.
 
 The **residual** is exactly `(stored value − returned double)`, itself
