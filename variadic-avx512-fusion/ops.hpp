@@ -4,7 +4,7 @@
  *
  * Elementwise AVX-512 operators for the operator-fusion benchmark.
  *
- * Copyright (C) 2026 by Nicholas Wilt.
+ * Copyright (C) 2026 by Archaea Software, LLC.
  *
  * Redistribution and use in source and binary forms, with or without modification, 
  * are permitted provided that the following conditions are met:

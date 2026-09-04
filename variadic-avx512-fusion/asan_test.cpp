@@ -6,7 +6,7 @@
  *
  * Build with: g++ -std=c++17 -O1 -g -fsanitize=address -mavx512f -mavx512dq -mavx512bw -mavx512vl -mfma asan_test.cpp
  *
- * Copyright (C) 2026 by Nicholas Wilt.
+ * Copyright (C) 2026 by Archaea Software, LLC.
  *
  * Redistribution and use in source and binary forms, with or without modification, 
  * are permitted provided that the following conditions are met:
