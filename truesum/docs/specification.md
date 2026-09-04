@@ -65,8 +65,10 @@ bits = max_addend_bits + ceil_log2(count + 1) + 1
 
 where `max_addend_bits` spans the lowest bit any addend reaches to the highest
 bit the largest one occupies, `count` is the number of addends, and the final
-`+1` is the sign. This is what lets the kernels omit overflow checks entirely,
-which is what lets them vectorize.
+`+1` is the sign. This is what lets the carry chain run without an overflow
+test at every limb, which is what lets it vectorize. The top limb alone
+carries a sign test (§7), so a width the bound did not in fact cover is
+reported rather than wrapped.
 
 For a caller sizing an accumulator in advance, the same rule reads:
 
@@ -390,7 +392,8 @@ in registers, at 0.8–4.8% of the kernel:
 | --- | --- |
 | 1 | a non-finite value |
 | 2 | an exponent below the column's |
-| 4 | an addend reaching past the column's width |
+| 4 | an addend whose top reaches the column's sign bit, or lies past its width |
+| 8 | a sum carried past the sign bit |
 
 On the host, any of these conditions cause the `std::runtime_error` exception to be thrown. On the
 device, they are reported at the next `synchronize()`, or read without throwing via `column_contradictions(j)`.
@@ -400,6 +403,24 @@ is left inconsistent by design; the library reports rather than recovers. The
 failure being guarded against is silent: an exponent below the column's makes
 the shift negative, the conversion to unsigned puts the limb offset past the
 width, and the value is dropped.
+
+Bits 1, 2 and 4 are found in the addend before it is applied. Bit 8 is signed
+overflow at the top limb — the operands agree in sign and the result does not
+— found as it happens. It is tested only at that limb, and the carry chain
+reaches that limb only when an addend lands in it or a carry climbs to it, so
+the test runs exactly where overflow is possible. Bit 4 is what makes the test
+exact: an addend whose top reaches the sign bit is rejected before it is
+applied, so every addend that does reach the top limb has its sign bit clear.
+The sum it catches is the one a survey understated by a few bits produces —
+every addend fits, and the total does not — which was the one contradiction
+the other three could not see.
+
+Cost, on the CPU in §9, 4096×64, one thread: not measurable on AVX-512 (the
+check is one ternary-logic op on the top limb and the run-to-run spread
+swallows it). The scalar fallback pays 3% at two limbs and 27% at three under
+GCC 9, whose carry loop is at the edge of what it keeps in registers; the
+one-limb difference is code alignment, not the check. The device path is
+bandwidth-bound and was not measured.
 
 ### Undefined and unchecked
 

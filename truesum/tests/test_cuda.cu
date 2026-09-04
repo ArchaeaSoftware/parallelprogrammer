@@ -979,6 +979,34 @@ test_device_detector()
               "a non-finite value is detected");
     }
 
+    // A sum past the sign bit, every addend having fit: three matrices
+    // declared with a top of 60 makes a 63-bit column, and 2^62 fits it once.
+    {
+        std::vector<double> v(rows, std::ldexp(1.0, 62));
+        truesum::Survey lie{0, 60, true, false};
+        std::vector<std::vector<truesum::Survey>> surveys{{lie}, {lie}, {lie}};
+        truesum::CudaColumnBlockMatrix gpu(rows, 1, surveys);
+        submit(gpu, v);
+        check(0 == gpu.column_contradictions(0), "2^62 fits a 63-bit column");
+        submit(gpu, v);
+        check(0 != (gpu.column_contradictions(0) & 8u),
+              "a sum past the sign bit is detected");
+    }
+
+    // An addend whose first limb is inside the width but whose upper half
+    // is not; the offset test alone let this through and dropped the half.
+    {
+        std::vector<double> v(
+            rows,
+            std::ldexp(static_cast<double>((std::uint64_t{1} << 53) - 1), 20));
+        truesum::Survey lie{0, 8, true, false};
+        std::vector<std::vector<truesum::Survey>> surveys{{lie}};
+        truesum::CudaColumnBlockMatrix gpu(rows, 1, surveys);
+        submit(gpu, v);
+        check(0 != (gpu.column_contradictions(0) & 4u),
+              "an addend reaching the sign bit is detected");
+    }
+
     // And an honest batch reports nothing, so the detector is not simply
     // always firing.
     {

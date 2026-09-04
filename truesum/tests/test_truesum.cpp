@@ -1865,6 +1865,77 @@ test_presized_matches_adaptive()
         CHECK(threw);
     }
 
+    // A survey understated by a few bits is the case the width flag cannot
+    // see: every addend fits the column, and it is the sum that walks past
+    // the sign bit. Three matrices declared with a top of 60 sizes the column
+    // at 63 bits, one limb; 2^62 fits it once and overflows it twice. Before
+    // the top-limb check this wrapped silently.
+    {
+        const truesum::Survey lie{0, 60, true, false};
+        const std::vector<std::vector<truesum::Survey>> three(
+            3, std::vector<truesum::Survey>(1, lie));
+        const std::vector<double> big(rows, std::ldexp(1.0, 62));
+
+        truesum::ColumnBlockMatrix w(rows, 1, three);
+        CHECK(1 == w.column_limbs(0));
+        w.add_matrix_col_major(big.data());  // fits
+        CHECK_DOUBLE(w.to_double(0, 0), std::ldexp(1.0, 62));
+        bool threw = false;
+        try {
+            w.add_matrix_col_major(big.data());
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        CHECK(threw);
+
+        // Downward, one more fits: -2^63 is the most negative 64-bit value,
+        // so the third add is the one that wraps.
+        const std::vector<double> nbig(rows, -std::ldexp(1.0, 62));
+        truesum::ColumnBlockMatrix wn(rows, 1, three);
+        wn.add_matrix_col_major(nbig.data());
+        wn.add_matrix_col_major(nbig.data());
+        CHECK_DOUBLE(wn.to_double(0, 0), -std::ldexp(1.0, 63));
+        threw = false;
+        try {
+            wn.add_matrix_col_major(nbig.data());
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        CHECK(threw);
+
+        // The fold applies its addends in registers and must notice too.
+        const double *pair[2] = {big.data(), big.data()};
+        truesum::ColumnBlockMatrix wf(rows, 1, three);
+        threw = false;
+        try {
+            wf.add_matrices_col_major(pair, 2);
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+
+    // An addend whose first limb is inside the width but whose upper half
+    // is not. The old offset test passed it and the upper half was dropped
+    // without a word; the top of the addend is what has to be checked.
+    {
+        const truesum::Survey lie{0, 8, true, false};
+        const std::vector<std::vector<truesum::Survey>> one(
+            1, std::vector<truesum::Survey>(1, lie));
+        const std::vector<double> wide(
+            rows,
+            std::ldexp(static_cast<double>((std::uint64_t{1} << 53) - 1), 20));
+        truesum::ColumnBlockMatrix w(rows, 1, one);
+        CHECK(1 == w.column_limbs(0));
+        bool threw = false;
+        try {
+            w.add_matrix_col_major(wide.data());
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+
     // The count is the one part of the contract that is enforced, because it
     // costs nothing: the width bound holds for that many matrices, not more.
     {

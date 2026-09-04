@@ -245,8 +245,10 @@ accumulate_fold_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
                        unsigned *flags)
 {
     __mmask8 m_bad_nonfinite = 0, m_bad_low = 0, m_bad_high = 0;
+    __mmask8 m_bad_overflow = 0;
     const __m512i v_zero = _mm512_setzero_si512();
-    const __m512i v_nlimbs = _mm512_set1_epi64(static_cast<long long>(nlimbs));
+    const __m512i v_width_bits =
+        _mm512_set1_epi64(static_cast<long long>(64 * nlimbs));
     const __m512i kOne = _mm512_set1_epi64(1);
     const __m512i kOnes = _mm512_set1_epi64(-1);
     const __m512i k63 = _mm512_set1_epi64(63);
@@ -264,7 +266,11 @@ accumulate_fold_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
         m_bad_nonfinite |= s.m_nonfinite & m_k;
         m_bad_low |= _mm512_cmplt_epi64_mask(v_shift, v_zero) & q.m_live;
         q.v_off = _mm512_srli_epi64(v_shift, 6);
-        m_bad_high |= _mm512_cmpge_epu64_mask(q.v_off, v_nlimbs) & q.m_live;
+        // The addend's top, relative to the column, must stay below the
+        // sign bit: that is what makes the sign test at the top limb exact.
+        m_bad_high |= _mm512_cmpge_epi64_mask(
+                          _mm512_sub_epi64(s.v_top, kColExp), v_width_bits) &
+                      q.m_live;
         const __m512i v_bit = _mm512_and_si512(v_shift, k63);
         q.v_lo = _mm512_maskz_sllv_epi64(q.m_live, s.v_mantissa, v_bit);
         q.v_hi = _mm512_maskz_srlv_epi64(q.m_live, s.v_mantissa,
@@ -303,6 +309,16 @@ accumulate_fold_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
             const __m512i v_sum2 = _mm512_add_epi64(v_sum, v_carry);
             const __mmask8 m_c2 = _mm512_cmplt_epu64_mask(v_sum2, v_sum);
             v[p] = v_sum2;
+            // Signed overflow at the top limb: operands agreeing in sign and
+            // a result that does not, as one ternary-logic op on the sign
+            // bits -- ~(x ^ addend) & (x ^ sum). The chain reaches this limb
+            // only when something lands in or carries into it, so the cost
+            // lands exactly where overflow is possible.
+            if (p + 1 == nlimbs) {
+                const __m512i v_ovf =
+                    _mm512_ternarylogic_epi64(v_x, v_addend, v_sum2, 0x42);
+                m_bad_overflow |= _mm512_movepi64_mask(v_ovf) & m_active;
+            }
 
             v_carry = _mm512_maskz_set1_epi64(m_c1 | m_c2, 1);
 
@@ -336,7 +352,8 @@ accumulate_fold_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
 
     *flags |= (0 != m_bad_nonfinite ? kBadNonFinite : 0u) |
               (0 != m_bad_low ? kBadExponent : 0u) |
-              (0 != m_bad_high ? kBadWidth : 0u);
+              (0 != m_bad_high ? kBadWidth : 0u) |
+              (0 != m_bad_overflow ? kBadOverflow : 0u);
 }
 
 void
@@ -349,8 +366,10 @@ accumulate_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
     // compare on a value prepare already has in a register, and the results
     // stay in mask registers until the end.
     __mmask8 m_bad_nonfinite = 0, m_bad_low = 0, m_bad_high = 0;
+    __mmask8 m_bad_overflow = 0;
     const __m512i v_zero = _mm512_setzero_si512();
-    const __m512i v_nlimbs = _mm512_set1_epi64(static_cast<long long>(nlimbs));
+    const __m512i v_width_bits =
+        _mm512_set1_epi64(static_cast<long long>(64 * nlimbs));
     const __m512i kOne = _mm512_set1_epi64(1);
     const __m512i kOnes = _mm512_set1_epi64(-1);
     const __m512i k63 = _mm512_set1_epi64(63);
@@ -370,7 +389,11 @@ accumulate_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
         m_bad_nonfinite |= s.m_nonfinite & m_k;
         m_bad_low |= _mm512_cmplt_epi64_mask(v_shift, v_zero) & q.m_live;
         q.v_off = _mm512_srli_epi64(v_shift, 6);
-        m_bad_high |= _mm512_cmpge_epu64_mask(q.v_off, v_nlimbs) & q.m_live;
+        // The addend's top, relative to the column, must stay below the
+        // sign bit: that is what makes the sign test at the top limb exact.
+        m_bad_high |= _mm512_cmpge_epi64_mask(
+                          _mm512_sub_epi64(s.v_top, kColExp), v_width_bits) &
+                      q.m_live;
         const __m512i v_bit = _mm512_and_si512(v_shift, k63);
         // The 53-bit mantissa lands in at most two limbs. srlv by 64 yields 0,
         // which is exactly what the v_bit == 0 case wants.
@@ -414,6 +437,16 @@ accumulate_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
             const __m512i v_sum2 = _mm512_add_epi64(v_sum, v_carry);
             const __mmask8 m_c2 = _mm512_cmplt_epu64_mask(v_sum2, v_sum);
             _mm512_storeu_si512(dst, v_sum2);
+            // Signed overflow at the top limb: operands agreeing in sign and
+            // a result that does not, as one ternary-logic op on the sign
+            // bits -- ~(x ^ addend) & (x ^ sum). The chain reaches this limb
+            // only when something lands in or carries into it, so the cost
+            // lands exactly where overflow is possible.
+            if (p + 1 == nlimbs) {
+                const __m512i v_ovf =
+                    _mm512_ternarylogic_epi64(v_x, v_addend, v_sum2, 0x42);
+                m_bad_overflow |= _mm512_movepi64_mask(v_ovf) & m_active;
+            }
 
             v_carry = _mm512_maskz_set1_epi64(m_c1 | m_c2, 1);
 
@@ -447,7 +480,8 @@ accumulate_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
 
     *flags |= (0 != m_bad_nonfinite ? kBadNonFinite : 0u) |
               (0 != m_bad_low ? kBadExponent : 0u) |
-              (0 != m_bad_high ? kBadWidth : 0u);
+              (0 != m_bad_high ? kBadWidth : 0u) |
+              (0 != m_bad_overflow ? kBadOverflow : 0u);
 }
 
 }  // namespace kernels

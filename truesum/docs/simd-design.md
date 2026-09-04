@@ -836,14 +836,18 @@ for. Both directions were demonstrated as bugs earlier in this project:
 
 Neither raises anything, and the reason is the decision the whole structure
 rests on — the width is *derived* so that no entry can overflow, which is what
-lets the kernels skip overflow checks and be vectorized at all. Take the
-derivation from an untrusted source and that guarantee leaves with it.
+lets the carry chain run without a per-limb overflow test and be vectorized at
+all. Take the derivation from an untrusted source and that guarantee leaves
+with it.
 
 Verifying the metadata up front is not an option: that is the survey. But
 detecting the contradiction afterwards costs almost nothing, because the
 accumulate already decomposes every element and the facts are in registers —
 `shift < 0`, `off` beyond `nlimbs`, a non-finite significand, a carry out of
-the top limb. Any of those means reality disagreed with what it was told.
+the top limb. Any of those means reality disagreed with what it was told. (The
+first three shipped with the detector; the fourth, as a sign test on the top
+limb only, came later and is what finally catches the `749707f` case above —
+every addend fit, the sum did not.)
 Reported through the mapped channel the occupancy figure already uses and
 checked at the next readback, that turns a silent wrong answer into a loud one
 without putting a second read on the critical path.
@@ -1309,9 +1313,9 @@ the property the layout exists for -- widening appends without moving anything
 
 ~~Measured occupancy could relax the derived width bound.~~ **Dropped, not
 done.** It is worth under a limb where cancellation has kept a column small,
-against a width bound that has to stay conservative for the kernels to skip
-overflow checks at all -- which is the property the whole accumulate path rests
-on. Trading that for a fraction of a limb is not a trade.
+against a width bound that has to stay conservative for the carry chain to
+run without a per-limb overflow test at all -- which is the property the whole
+accumulate path rests on. Trading that for a fraction of a limb is not a trade.
 
 That leaves `column_occupancy` with no consumer inside the library; relaxing the
 bound was what it was for. It stays as a diagnostic, because a caller can use it

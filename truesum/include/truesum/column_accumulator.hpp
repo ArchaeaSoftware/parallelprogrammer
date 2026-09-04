@@ -280,7 +280,8 @@ private:
 
         // Width is derived rather than measured: no entry can exceed
         // `count * 2^max_addend_bits`, so that bound plus a sign bit says how
-        // many limbs are needed, and the kernels can then skip overflow checks.
+        // many limbs are needed, and the carry chain then needs no overflow
+        // test below its top limb.
         std::size_t max_addend_bits = 0;
         std::size_t add_count = 0;
 

@@ -34,8 +34,12 @@ Both column parameters adapt automatically, and only ever in the safe direction:
 - **The width only increases.** Rather than detect overflow, the required width
   is *derived*: no entry can exceed `count · 2^max_addend_bits`, so that bound
   plus a sign bit says how many limbs are needed before a batch is applied. The
-  kernels can then skip overflow checks entirely, which is what makes them
-  vectorizable.
+  carry chain therefore runs without an overflow test at any limb, which is
+  what makes it vectorizable. The one test it does carry is a sign comparison
+  at the top limb, which the chain reaches only when an addend lands there or
+  a carry climbs to it; on a correctly sized column it never fires, and on a
+  column sized from a producer's survey that understated the data it turns a
+  silently wrapped sum into a reported one.
 
 Incoming mantissas are normalized to odd before use, so the column exponent
 tracks each value's *true* ulp rather than its `frexp` exponent. This matters a

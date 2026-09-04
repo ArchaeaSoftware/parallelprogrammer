@@ -268,6 +268,7 @@ ColumnBlockMatrix::report_contradiction(std::size_t j, unsigned flags) const
         os << " an exponent below the column's;";
     }
     if (0 != (flags & kernels::kBadWidth)) os << " an addend past its width;";
+    if (0 != (flags & kernels::kBadOverflow)) os << " a sum past its width;";
     os << " the accumulator is no longer consistent";
     throw std::runtime_error(os.str());
 }

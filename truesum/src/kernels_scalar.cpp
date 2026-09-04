@@ -107,6 +107,31 @@ survey_column_scalar(const double *values, std::size_t rows,
     return out;
 }
 
+// One limb of the carry chain, both directions. `carry` is a borrow when
+// subtracting. Written once here so the loop below and its peeled top limb
+// cannot drift apart.
+inline std::uint64_t
+add_limb(std::uint64_t x, std::uint64_t a, std::uint64_t &carry)
+{
+    const std::uint64_t s = x + a;
+    const std::uint64_t c1 = (s < x) ? 1 : 0;
+    const std::uint64_t s2 = s + carry;
+    const std::uint64_t c2 = (s2 < s) ? 1 : 0;
+    carry = c1 | c2;
+    return s2;
+}
+
+inline std::uint64_t
+sub_limb(std::uint64_t x, std::uint64_t a, std::uint64_t &borrow)
+{
+    const std::uint64_t d = x - a;
+    const std::uint64_t b1 = (x < a) ? 1 : 0;
+    const std::uint64_t d2 = d - borrow;
+    const std::uint64_t b2 = (d < borrow) ? 1 : 0;
+    borrow = b1 | b2;
+    return d2;
+}
+
 // One row's limbs are loaded once, every batch's addend applied to them in
 // registers, and the result written once. The inner loop is the same carry
 // chain accumulate_one runs, with `v` standing in for the limb arrays.
@@ -117,6 +142,7 @@ accumulate_fold_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
                        unsigned *flags)
 {
     unsigned bad = 0;
+    std::uint64_t overflow = 0;
     std::uint64_t v[kMaxFoldLimbs];
 
     for (std::size_t i = 0; i < rows; ++i) {
@@ -132,85 +158,98 @@ accumulate_fold_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
                 bad |= kBadExponent;
                 continue;
             }
-            const std::size_t off = static_cast<std::size_t>(shift) / 64;
-            if (off >= nlimbs) {
+            // An addend must stop below the sign bit; one that reaches it
+            // has no representation at this width, and would also defeat
+            // the sign test at the top limb below.
+            if (s.top - static_cast<long long>(column_exponent) >=
+                static_cast<long long>(64 * nlimbs)) {
                 bad |= kBadWidth;
                 continue;
             }
+            const std::size_t off = static_cast<std::size_t>(shift) / 64;
             const unsigned bit = static_cast<unsigned>(shift) % 64;
             const std::uint64_t lo =
                 0 == bit ? s.mantissa : s.mantissa << bit;
             const std::uint64_t hi =
                 0 == bit ? 0 : s.mantissa >> (64 - bit);
 
-            std::uint64_t carry = 0;
-            for (std::size_t p = off; p < nlimbs; ++p) {
-                const std::uint64_t a =
-                    (p == off) ? lo : ((p == off + 1) ? hi : 0);
-                const std::uint64_t x = v[p];
-                if (s.negative) {
-                    const std::uint64_t d = x - a;
-                    const std::uint64_t b1 = (x < a) ? 1u : 0u;
-                    const std::uint64_t d2 = d - carry;
-                    const std::uint64_t b2 = (d < carry) ? 1u : 0u;
-                    v[p] = d2;
-                    carry = b1 | b2;
-                } else {
-                    const std::uint64_t t = x + a;
-                    const std::uint64_t c1 = (t < x) ? 1u : 0u;
-                    const std::uint64_t t2 = t + carry;
-                    const std::uint64_t c2 = (t2 < t) ? 1u : 0u;
-                    v[p] = t2;
-                    carry = c1 | c2;
+            // Sign test after the chain, on the last limb it touched, and
+            // only when that was the top one; see accumulate_one for why.
+            std::uint64_t x = 0, r = 0, carry = 0;
+            std::size_t p = off;
+            if (s.negative) {
+                for (; p < nlimbs; ++p) {
+                    const std::uint64_t a =
+                        (p == off) ? lo : ((p == off + 1) ? hi : 0);
+                    x = v[p];
+                    r = sub_limb(x, a, carry);
+                    v[p] = r;
+                    if (0 == carry && p >= off + 1) break;
                 }
-                if (0 == carry && p >= off + 1) break;
+                if (p + 1 >= nlimbs) overflow |= (x & ~r) >> 63;
+            } else {
+                for (; p < nlimbs; ++p) {
+                    const std::uint64_t a =
+                        (p == off) ? lo : ((p == off + 1) ? hi : 0);
+                    x = v[p];
+                    r = add_limb(x, a, carry);
+                    v[p] = r;
+                    if (0 == carry && p >= off + 1) break;
+                }
+                if (p + 1 >= nlimbs) overflow |= (~x & r) >> 63;
             }
         }
 
         for (std::size_t k = 0; k < nlimbs; ++k) limbs[k][i] = v[k];
     }
+    if (0 != overflow) bad |= kBadOverflow;
     *flags |= bad;
 }
 
-void
+// Returns true if the sum overflowed its width, the addend having fit. The
+// caller has already checked that it fits; see accumulate_scalar.
+//
+// The sign test is applied after the chain, to the last limb it touched, and
+// only when that limb was the top one. Testing inside the loop body cost the
+// two-limb case 45% when measured, and peeling the top limb out of the loop
+// still cost the three-limb case 27%; carrying the last iteration's operands
+// out of the loop leaves the loop as it was.
+bool
 accumulate_one(std::uint64_t *const *limbs, std::size_t nlimbs, std::size_t row,
                std::uint64_t mantissa, std::size_t shift, bool negative)
 {
-    if (0 == mantissa) return;
+    if (0 == mantissa) return false;
 
     const std::size_t off = shift / 64;
     const unsigned bit = shift % 64;
     const std::uint64_t lo = mantissa << bit;
     const std::uint64_t hi = 0 != bit ? (mantissa >> (64 - bit)) : 0;
 
+    std::uint64_t x = 0, r = 0;  // the last limb's old and new value
+    std::size_t p = off;
     if (negative) {
         std::uint64_t borrow = 0;
-        for (std::size_t p = off; p < nlimbs; ++p) {
+        for (; p < nlimbs; ++p) {
             const std::uint64_t a = (p == off) ? lo : ((p == off + 1) ? hi : 0);
-            const std::uint64_t x = limbs[p][row];
-            const std::uint64_t d = x - a;
-            const std::uint64_t b1 = (x < a) ? 1 : 0;
-            const std::uint64_t d2 = d - borrow;
-            const std::uint64_t b2 = (d < borrow) ? 1 : 0;
-            limbs[p][row] = d2;
-            borrow = b1 | b2;
+            x = limbs[p][row];
+            r = sub_limb(x, a, borrow);
+            limbs[p][row] = r;
             // Past the addend with no borrow left, nothing further changes.
             if (0 == borrow && p >= off + 1) break;
         }
-    } else {
-        std::uint64_t carry = 0;
-        for (std::size_t p = off; p < nlimbs; ++p) {
-            const std::uint64_t a = (p == off) ? lo : ((p == off + 1) ? hi : 0);
-            const std::uint64_t x = limbs[p][row];
-            const std::uint64_t s = x + a;
-            const std::uint64_t c1 = (s < x) ? 1 : 0;
-            const std::uint64_t s2 = s + carry;
-            const std::uint64_t c2 = (s2 < s) ? 1 : 0;
-            limbs[p][row] = s2;
-            carry = c1 | c2;
-            if (0 == carry && p >= off + 1) break;
-        }
+        // A negative value that lost its sign bit overflowed.
+        return p + 1 >= nlimbs && 0 != ((x & ~r) >> 63);
     }
+    std::uint64_t carry = 0;
+    for (; p < nlimbs; ++p) {
+        const std::uint64_t a = (p == off) ? lo : ((p == off + 1) ? hi : 0);
+        x = limbs[p][row];
+        r = add_limb(x, a, carry);
+        limbs[p][row] = r;
+        if (0 == carry && p >= off + 1) break;
+    }
+    // A non-negative value that gained a sign bit overflowed.
+    return p + 1 >= nlimbs && 0 != ((~x & r) >> 63);
 }
 
 void
@@ -231,13 +270,15 @@ accumulate_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
             bad |= kBadExponent;
             continue;
         }
-        const std::size_t off = static_cast<std::size_t>(shift) / 64;
-        if (off >= nlimbs) {
+        if (s.top - static_cast<long long>(column_exponent) >=
+            static_cast<long long>(64 * nlimbs)) {
             bad |= kBadWidth;
             continue;
         }
-        accumulate_one(limbs, nlimbs, i, s.mantissa,
-                       static_cast<std::size_t>(shift), s.negative);
+        if (accumulate_one(limbs, nlimbs, i, s.mantissa,
+                           static_cast<std::size_t>(shift), s.negative)) {
+            bad |= kBadOverflow;
+        }
     }
     *flags |= bad;
 }

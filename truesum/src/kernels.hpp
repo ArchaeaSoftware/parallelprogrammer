@@ -35,10 +35,19 @@ using SurveyFn = Survey (*)(const double *, std::size_t, long long);
 // reached its own first limb skips the position outright.
 // `flags` reports where the batch contradicted what the column was sized for:
 // 1 a non-finite value, 2 an exponent below the column's, 4 an addend reaching
-// past its width. Bits are OR-ed in, never cleared. A column sized from its own
-// survey cannot raise any of them, so checking it there costs nothing and
-// asserts the survey agreed with the accumulate; a column sized from metadata
-// supplied by a producer is where they earn their keep.
+// the sign bit or past the width, 8 a sum carried past the sign bit. Bits are
+// OR-ed in, never cleared. A column sized from its own survey cannot raise any
+// of them, so checking it there costs nothing and asserts the survey agreed
+// with the accumulate; a column sized from metadata supplied by a producer is
+// where they earn their keep.
+//
+// The first three are found in the addend before it is applied. The fourth is
+// signed overflow at the top limb: the operands agree in sign and the result
+// does not. It is checked only at that limb, and the carry chain only reaches
+// that limb when an addend lands in it or a carry climbs to it, so the check
+// runs exactly where overflow is possible. Bit 4 guarantees that every addend
+// applied at the top limb has its sign bit clear, which is what makes the
+// sign rule exact there.
 using AccumulateFn = void (*)(std::uint64_t *const *, std::size_t,
                               const double *, std::size_t, std::int32_t,
                               std::size_t, unsigned *);
@@ -46,6 +55,7 @@ using AccumulateFn = void (*)(std::uint64_t *const *, std::size_t,
 inline constexpr unsigned kBadNonFinite = 1;
 inline constexpr unsigned kBadExponent = 2;
 inline constexpr unsigned kBadWidth = 4;
+inline constexpr unsigned kBadOverflow = 8;
 
 // Folds `count` contiguous columns, one per matrix, into a single pass over
 // the accumulator. Same arithmetic as AccumulateFn applied `count` times; what
@@ -113,8 +123,9 @@ const char *
 accumulate_name();
 
 // Adds one already-decomposed value to a single row. Not hot; used by the
-// element-at-a-time API.
-void
+// element-at-a-time API. Returns true if the sum overflowed its width; the
+// caller is responsible for the addend itself fitting.
+bool
 accumulate_one(std::uint64_t *const *limbs, std::size_t nlimbs, std::size_t row,
                std::uint64_t mantissa, std::size_t shift, bool negative);
 

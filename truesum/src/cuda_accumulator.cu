@@ -69,6 +69,7 @@ constexpr unsigned kBlock = 256;  // a power of two; the reductions rely on it
 constexpr unsigned kBadNonFinite = 1;
 constexpr unsigned kBadExponent = 2;
 constexpr unsigned kBadWidth = 4;
+constexpr unsigned kBadOverflow = 8;
 
 // Blocks in the whole grid, not just its x extent. Both kernels grid-stride,
 // so any smaller grid stays correct -- it only gives each thread more rows.
@@ -324,6 +325,7 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols, InputSet in,
     // runs. Recorded, not acted on -- the arithmetic is left exactly as it
     // was so the checks cost three comparisons and no divergence.
     unsigned t_flags = 0;
+    unsigned long long t_overflow = 0;
 
     for (std::size_t i = (std::size_t)blockIdx.x * blockDim.x + threadIdx.x;
                      i < rows;
@@ -350,7 +352,11 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols, InputSet in,
         const int shift = e - c.exponent;
         const unsigned off = static_cast<unsigned>(shift) / kRadix;
         if (shift < 0) t_flags |= kBadExponent;
-        if (off >= c.nlimbs) t_flags |= kBadWidth;
+        // The addend's top must stay below the sign bit, which also keeps
+        // the sign test at the top limb exact.
+        if (top - c.exponent >= static_cast<int>(kRadix * c.nlimbs)) {
+            t_flags |= kBadWidth;
+        }
         const unsigned bit = static_cast<unsigned>(shift) % kRadix;
 
         // A 53-bit significand at intra-limb offset `bit` spans two limbs at
@@ -374,6 +380,10 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols, InputSet in,
             limb_t *dst = c.bases[p] + i;
             const unsigned long long x = *dst;
             unsigned long long written;
+            // Signed overflow at the top limb -- a negative value that lost
+            // its sign bit, or a non-negative one that gained it -- kept as
+            // a bit rather than branched on, so lanes do not diverge on the
+            // sign of a running sum.
             if (neg) {
                 const unsigned long long d = x - a;
                 const unsigned long long b1 = (x < a) ? 1ull : 0ull;
@@ -381,6 +391,7 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols, InputSet in,
                 const unsigned long long b2 = (d < carry) ? 1ull : 0ull;
                 written = d2;
                 carry = b1 | b2;
+                if (p + 1 == c.nlimbs) t_overflow |= (x & ~d2) >> 63;
             } else {
                 const unsigned long long s = x + a;
                 const unsigned long long c1 = (s < x) ? 1ull : 0ull;
@@ -388,6 +399,7 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols, InputSet in,
                 const unsigned long long c2 = (s2 < s) ? 1ull : 0ull;
                 written = s2;
                 carry = c1 | c2;
+                if (p + 1 == c.nlimbs) t_overflow |= (~x & s2) >> 63;
             }
             *dst = written;
 
@@ -411,6 +423,7 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols, InputSet in,
     // Fold the per-thread maxima, reduce across blocks in device memory with
     // ordinary atomics, then elect one block to carry the finished array to
     // host memory. Atomics never cross PCIe: measured, that costs 260x.
+    if (0 != t_overflow) t_flags |= kBadOverflow;
     if (0 != t_flags) atomicOr(&flags_device[j], t_flags);
 
     s_lim[tid] = t_lim;
@@ -1419,6 +1432,7 @@ CudaColumnBlockMatrix::report_contradictions() const
             os << " an exponent below the column's;";
         }
         if (0 != (flags & kBadWidth)) os << " an addend past its width;";
+        if (0 != (flags & kBadOverflow)) os << " a sum past its width;";
         os << " the accumulator is no longer consistent";
         throw std::runtime_error(os.str());
     }
