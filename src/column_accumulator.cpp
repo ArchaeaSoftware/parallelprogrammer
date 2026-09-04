@@ -1,4 +1,4 @@
-#include "cbfp/column_accumulator.hpp"
+#include "truesum/column_accumulator.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -15,7 +15,7 @@
 #include "kernels.hpp"
 #include "thread_pool.hpp"
 
-namespace cbfp {
+namespace truesum {
 
 using limbs::kLimbBits;
 using limbs::limb_t;
@@ -142,14 +142,14 @@ ColumnBlockMatrix::ColumnBlockMatrix(std::size_t n, Uplo uplo)
 std::size_t
 ColumnBlockMatrix::column_rows(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
     return cols_state_[j].rows;
 }
 
 std::size_t
 ColumnBlockMatrix::column_first_row(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
     return cols_state_[j].first_row;
 }
 
@@ -216,12 +216,12 @@ ColumnBlockMatrix::reserve_from_surveys(
 {
     if (surveys.empty()) {
         throw std::invalid_argument(
-            "cbfp: pre-sizing needs the surveys of at least one matrix");
+            "truesum: pre-sizing needs the surveys of at least one matrix");
     }
     for (const auto &one : surveys) {
         if (one.size() != cols_) {
             throw std::invalid_argument(
-                "cbfp: each survey must have one entry per column");
+                "truesum: each survey must have one entry per column");
         }
     }
 
@@ -262,7 +262,7 @@ void
 ColumnBlockMatrix::report_contradiction(std::size_t j, unsigned flags) const
 {
     std::ostringstream os;
-    os << "cbfp: column " << j << " received values it was not sized for:";
+    os << "truesum: column " << j << " received values it was not sized for:";
     if (0 != (flags & kernels::kBadNonFinite)) os << " a non-finite value;";
     if (0 != (flags & kernels::kBadExponent)) {
         os << " an exponent below the column's;";
@@ -276,7 +276,7 @@ void
 ColumnBlockMatrix::check_index(std::size_t i, std::size_t j) const
 {
     if (i >= rows_ || j >= cols_) {
-        throw std::out_of_range("cbfp: matrix index out of range");
+        throw std::out_of_range("truesum: matrix index out of range");
     }
 }
 
@@ -368,7 +368,7 @@ ColumnBlockMatrix::accumulate(std::size_t i, std::size_t j, double v,
 {
     check_index(i, j);
     if (!std::isfinite(v)) {
-        throw std::domain_error("cbfp: cannot accumulate a non-finite value");
+        throw std::domain_error("truesum: cannot accumulate a non-finite value");
     }
 
     const DoubleParts p = decompose(v);
@@ -376,7 +376,7 @@ ColumnBlockMatrix::accumulate(std::size_t i, std::size_t j, double v,
 
     const long long e64 = static_cast<long long>(p.exponent) + log2_scale;
     if (e64 < -kExponentLimit || e64 > kExponentLimit) {
-        throw std::domain_error("cbfp: log2_scale puts the value out of range");
+        throw std::domain_error("truesum: log2_scale puts the value out of range");
     }
     const int e = static_cast<int>(e64);
 
@@ -505,7 +505,7 @@ ColumnBlockMatrix::accumulate_columns(const double *b, std::size_t column_step,
     if (0 == rows_ || 0 == cols_) return;
     if (presized_ && ++submitted_matrices_ > declared_matrices_) {
         throw std::runtime_error(
-            "cbfp: more matrices accumulated than were described to the "
+            "truesum: more matrices accumulated than were described to the "
             "constructor; the width bound holds for that many and no more");
     }
 
@@ -536,7 +536,7 @@ ColumnBlockMatrix::add_matrices_col_major(const double *const *b,
         submitted_matrices_ += count;
         if (submitted_matrices_ > declared_matrices_) {
             throw std::runtime_error(
-                "cbfp: more matrices accumulated than were described to the "
+                "truesum: more matrices accumulated than were described to the "
                 "constructor; the width bound holds for that many and no more");
         }
     }
@@ -591,7 +591,7 @@ ColumnBlockMatrix::fold_column(std::size_t j, const double *const *columns,
                 columns[k], c.rows, std::numeric_limits<long long>::max());
             if (sv.nonfinite) {
                 throw std::domain_error(
-                    "cbfp: cannot accumulate a non-finite value");
+                    "truesum: cannot accumulate a non-finite value");
             }
             if (!sv.any) continue;
             if (!any) {
@@ -646,7 +646,7 @@ void
 ColumnBlockMatrix::add_column_scaled_pow2(std::size_t j, const double *v,
                                           int log2_scale)
 {
-    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
     if (0 == cols_state_[j].rows) return;
     accumulate_column(j, v, log2_scale);
 }
@@ -681,7 +681,7 @@ ColumnBlockMatrix::accumulate_column(std::size_t j, const double *column,
     const kernels::Survey sc =
         kernels::survey()(column, c.rows, floor_exponent);
     if (sc.nonfinite) {
-        throw std::domain_error("cbfp: cannot accumulate a non-finite value");
+        throw std::domain_error("truesum: cannot accumulate a non-finite value");
     }
     if (!sc.any) return;
 
@@ -692,7 +692,7 @@ ColumnBlockMatrix::accumulate_column(std::size_t j, const double *column,
         static_cast<long long>(sc.min_exponent) + log2_scale;
     const long long max_top = static_cast<long long>(sc.max_top) + log2_scale;
     if (min_exponent < -kExponentLimit || max_top > kExponentLimit) {
-        throw std::domain_error("cbfp: log2_scale puts the value out of range");
+        throw std::domain_error("truesum: log2_scale puts the value out of range");
     }
 
     if (!c.initialized) {
@@ -986,7 +986,7 @@ ColumnBlockMatrix::to_exact_decimal(std::size_t i, std::size_t j) const
 void
 ColumnBlockMatrix::reserve_column(std::size_t j, int exponent, std::size_t bits)
 {
-    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
     Column &c = cols_state_[j];
     if (!c.initialized) {
         c.exponent = exponent;
@@ -1065,4 +1065,4 @@ ColumnBlockMatrix::describe() const
     return os.str();
 }
 
-}  // namespace cbfp
+}  // namespace truesum

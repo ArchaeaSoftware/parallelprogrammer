@@ -4,7 +4,7 @@
 
 #include "kernels.hpp"
 
-namespace cbfp {
+namespace truesum {
 namespace kernels {
 namespace {
 
@@ -13,10 +13,10 @@ use_avx512()
 {
     // Escape hatch so both variants can be measured and cross-checked from a
     // single binary.
-    if (const char *forced = std::getenv("CBFP_KERNEL")) {
+    if (const char *forced = std::getenv("TRUESUM_KERNEL")) {
         if (0 == std::strcmp(forced, "scalar")) return false;
     }
-#if defined(CBFP_HAVE_AVX512)
+#if defined(TRUESUM_HAVE_AVX512)
     __builtin_cpu_init();
     return __builtin_cpu_supports("avx512f") &&
            __builtin_cpu_supports("avx512dq") &&
@@ -34,7 +34,7 @@ use_avx512()
 AccumulateFn
 accumulate()
 {
-#if defined(CBFP_HAVE_AVX512)
+#if defined(TRUESUM_HAVE_AVX512)
     static const AccumulateFn fn =
         use_avx512() ? accumulate_avx512 : accumulate_scalar;
 #else
@@ -51,7 +51,7 @@ accumulate()
 AccumulateFoldFn
 accumulate_fold()
 {
-#if defined(CBFP_HAVE_AVX512)
+#if defined(TRUESUM_HAVE_AVX512)
     static const AccumulateFoldFn fn =
         use_avx512() ? accumulate_fold_avx512 : accumulate_fold_scalar;
 #else
@@ -63,7 +63,7 @@ accumulate_fold()
 SurveyFn
 survey()
 {
-#if defined(CBFP_HAVE_AVX512)
+#if defined(TRUESUM_HAVE_AVX512)
     static const SurveyFn fn =
         use_avx512() ? survey_column_avx512 : survey_column_scalar;
 #else
@@ -79,4 +79,4 @@ accumulate_name()
 }
 
 }  // namespace kernels
-}  // namespace cbfp
+}  // namespace truesum

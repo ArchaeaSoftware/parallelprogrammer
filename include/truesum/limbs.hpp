@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace cbfp {
+namespace truesum {
 namespace limbs {
 
 using limb_t = std::uint64_t;
@@ -68,4 +68,4 @@ std::string
 magnitude_to_decimal(std::vector<limb_t> mag);
 
 }  // namespace limbs
-}  // namespace cbfp
+}  // namespace truesum

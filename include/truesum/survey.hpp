@@ -14,7 +14,7 @@
 
 #include <cstddef>
 
-namespace cbfp {
+namespace truesum {
 
 // Both exponents are int rather than long long. A double's true-ulp exponent
 // lives in [-1074, 1023] and its top in [-1073, 1024], so 32 bits carries six
@@ -59,4 +59,4 @@ void
 survey_matrix(Survey *out, const double *b, std::size_t rows, std::size_t cols,
               std::size_t row_stride = 0);
 
-}  // namespace cbfp
+}  // namespace truesum

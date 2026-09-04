@@ -1,8 +1,8 @@
-#include "cbfp/limbs.hpp"
+#include "truesum/limbs.hpp"
 
 #include <cassert>
 
-namespace cbfp {
+namespace truesum {
 namespace limbs {
 namespace {
 
@@ -209,4 +209,4 @@ magnitude_to_decimal(std::vector<limb_t> mag)
 }
 
 }  // namespace limbs
-}  // namespace cbfp
+}  // namespace truesum

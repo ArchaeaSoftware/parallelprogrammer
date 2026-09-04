@@ -24,9 +24,9 @@
 #include <memory>
 #include <vector>
 
-#include "cbfp/limbs.hpp"
-#include "cbfp/survey.hpp"
-#include "cbfp/uplo.hpp"
+#include "truesum/limbs.hpp"
+#include "truesum/survey.hpp"
+#include "truesum/uplo.hpp"
 
 // CUDA's opaque handle types, forward-declared rather than pulled in from
 // cuda_runtime.h so this header stays usable from a plain C++ translation unit
@@ -37,7 +37,7 @@
 struct CUstream_st;
 struct CUevent_st;
 
-namespace cbfp {
+namespace truesum {
 
 class ColumnBlockMatrix;
 
@@ -193,7 +193,7 @@ public:
     // --- input memory ------------------------------------------------------
 
     // Borrows the next input buffer, sized rows() * cols() doubles. Fill it
-    // column-major and pass it to add_matrix_col_major, which recognises it
+    // column-major and pass it to add_matrix_col_major, which recognizes it
     // and lets the kernel stream it over PCIe in place -- no staging copy, and
     // no device-side copy of the input at all.
     //
@@ -472,4 +472,4 @@ private:
     std::size_t slot_words_ = 0;
 };
 
-}  // namespace cbfp
+}  // namespace truesum

@@ -9,11 +9,11 @@
 #include <type_traits>
 #include <vector>
 
-#include "cbfp/column_accumulator.hpp"
-#include "cbfp/cuda_accumulator.hpp"
+#include "truesum/column_accumulator.hpp"
+#include "truesum/cuda_accumulator.hpp"
 #include "kernels.hpp"
 
-namespace cbfp {
+namespace truesum {
 namespace {
 
 using limbs::limb_t;
@@ -30,7 +30,7 @@ static_assert(std::is_same<cudaEvent_t, CUevent_st *>::value,
 cuda_fail(cudaError_t status, const char *call, const char *file, int line)
 {
     std::ostringstream os;
-    os << "cbfp: " << call << " failed at " << file << ":" << line << ": "
+    os << "truesum: " << call << " failed at " << file << ":" << line << ": "
        << cudaGetErrorName(status) << " -- " << cudaGetErrorString(status);
     throw std::runtime_error(os.str());
 }
@@ -77,7 +77,7 @@ constexpr unsigned kBadWidth = 4;
 // uncapped, 65536 rows over 64 columns launches 16384 blocks, each folding a
 // single value per thread and then paying a full eight-step shared-memory tree
 // to do it. Capped, each thread folds sixteen rows serially first and the tree
-// is amortised across them: measured 195 -> 113 us at that shape, and
+// is amortized across them: measured 195 -> 113 us at that shape, and
 // 746 -> 423 us at 262144 rows.
 constexpr unsigned kMaxBlocks = 1024;
 
@@ -583,7 +583,7 @@ survey_matrix_col_major_device(Survey *out, const double *b,
     if (cudaSuccess != st || nullptr == attr.devicePointer) {
         cudaGetLastError();  // an unregistered pointer leaves this sticky
         throw std::invalid_argument(
-            "cbfp: survey_matrix_col_major_device writes `out` from the "
+            "truesum: survey_matrix_col_major_device writes `out` from the "
             "device, so it must be device memory or page-locked mapped host "
             "memory -- cudaMalloc, cudaHostAlloc with cudaHostAllocMapped, or "
             "cudaHostRegister with cudaHostRegisterMapped");
@@ -624,7 +624,7 @@ CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t rows, std::size_t cols)
     : rows_(rows), cols_(cols), cols_state_(cols)
 {
     if (!cuda_available()) {
-        throw std::runtime_error("cbfp: no usable CUDA device");
+        throw std::runtime_error("truesum: no usable CUDA device");
     }
     // Mapping has to be enabled before the context exists, so this fails
     // harmlessly if one is already active with the flag set. The cudaHostAlloc
@@ -638,7 +638,7 @@ CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t rows, std::size_t cols)
     cuda(DeviceGetAttribute(&max_grid_y, cudaDevAttrMaxGridDimY, 0));
     if (cols_ > static_cast<std::size_t>(max_grid_y)) {
         std::ostringstream os;
-        os << "cbfp: " << cols_ << " columns exceeds this device's grid y "
+        os << "truesum: " << cols_ << " columns exceeds this device's grid y "
            << "limit of " << max_grid_y;
         throw std::runtime_error(os.str());
     }
@@ -731,12 +731,12 @@ CudaColumnBlockMatrix::reserve_from_surveys(
 {
     if (surveys.empty()) {
         throw std::invalid_argument(
-            "cbfp: pre-sizing needs the surveys of at least one matrix");
+            "truesum: pre-sizing needs the surveys of at least one matrix");
     }
     for (const auto &one : surveys) {
         if (one.size() != cols_) {
             throw std::invalid_argument(
-                "cbfp: each survey must have one entry per column");
+                "truesum: each survey must have one entry per column");
         }
     }
 
@@ -770,14 +770,14 @@ CudaColumnBlockMatrix::reserve_from_surveys(
 std::size_t
 CudaColumnBlockMatrix::column_rows(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
     return cols_state_[j].rows;
 }
 
 std::size_t
 CudaColumnBlockMatrix::column_first_row(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
     return cols_state_[j].first_row;
 }
 
@@ -834,21 +834,21 @@ void
 CudaColumnBlockMatrix::check_index(std::size_t i, std::size_t j) const
 {
     if (i >= rows_ || j >= cols_) {
-        throw std::out_of_range("cbfp: matrix index out of range");
+        throw std::out_of_range("truesum: matrix index out of range");
     }
 }
 
 int
 CudaColumnBlockMatrix::column_exponent(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
     return cols_state_[j].exponent;
 }
 
 std::size_t
 CudaColumnBlockMatrix::column_limbs(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
     return cols_state_[j].nlimbs;
 }
 
@@ -856,11 +856,11 @@ void
 CudaColumnBlockMatrix::reserve_column(std::size_t j, int exponent,
                                       std::size_t bits)
 {
-    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
     Column &c = cols_state_[j];
     if (c.reserved) {
         throw std::runtime_error(
-            "cbfp: a device column may only be reserved once");
+            "truesum: a device column may only be reserved once");
     }
 
     c.exponent = exponent;
@@ -1015,7 +1015,7 @@ CudaColumnBlockMatrix::reserve_for(const double *b, std::size_t count,
                               std::numeric_limits<long long>::max());
         if (sv.nonfinite) {
             throw std::domain_error(
-                "cbfp: cannot reserve from a non-finite value");
+                "truesum: cannot reserve from a non-finite value");
         }
         if (!sv.any) continue;
         low[j] = sv.min_exponent;
@@ -1048,7 +1048,7 @@ CudaColumnBlockMatrix::reserve_for_device(const double *b, std::size_t count,
     for (std::size_t j = 0; j < cols_; ++j) {
         if (surveys[j].nonfinite) {
             throw std::domain_error(
-                "cbfp: cannot reserve from a non-finite value");
+                "truesum: cannot reserve from a non-finite value");
         }
         if (!surveys[j].any) continue;
         low[j] = surveys[j].min_exponent;
@@ -1063,7 +1063,7 @@ CudaColumnBlockMatrix::reserve_like(const ColumnBlockMatrix &cpu)
 {
     if (cpu.rows() != rows_ || cpu.cols() != cols_) {
         throw std::runtime_error(
-            "cbfp: reserve_like requires matching dimensions");
+            "truesum: reserve_like requires matching dimensions");
     }
     // Same shape, not merely the same extent: a triangular column is a
     // different length, so copying a full accumulator's widths into a
@@ -1071,7 +1071,7 @@ CudaColumnBlockMatrix::reserve_like(const ColumnBlockMatrix &cpu)
     if (cpu.symmetric() != symmetric_ ||
         (symmetric_ && cpu.uplo() != uplo_)) {
         throw std::runtime_error(
-            "cbfp: reserve_like requires the same symmetry and uplo");
+            "truesum: reserve_like requires the same symmetry and uplo");
     }
     for (std::size_t j = 0; j < cols_; ++j) {
         reserve_column(j, cpu.column_exponent(j), cpu.column_bit_width(j));
@@ -1081,7 +1081,7 @@ CudaColumnBlockMatrix::reserve_like(const ColumnBlockMatrix &cpu)
 int
 CudaColumnBlockMatrix::column_occupancy(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
     flush_pending_zero();
     synchronize();
     const_cast<CudaColumnBlockMatrix *>(this)->harvest_occupancy();
@@ -1198,7 +1198,7 @@ CudaColumnBlockMatrix::require_all_reserved() const
     for (std::size_t j = 0; j < cols_; ++j) {
         if (!cols_state_[j].reserved) {
             throw std::runtime_error(
-                "cbfp: every device column must be reserved before "
+                "truesum: every device column must be reserved before "
                 "accumulation");
         }
     }
@@ -1222,7 +1222,7 @@ CudaColumnBlockMatrix::validate_host_survey(const double *b,
             b + j * col_stride + cj.first_row, cj.rows, cj.exponent);
         if (sv.nonfinite) {
             throw std::domain_error(
-                "cbfp: cannot accumulate a non-finite value");
+                "truesum: cannot accumulate a non-finite value");
         }
         if (!sv.any) continue;
         require_fit(j, sv.min_exponent, sv.max_top);
@@ -1267,7 +1267,7 @@ CudaColumnBlockMatrix::add_matrix_col_major(const double *b,
     if (cudaSuccess != st || nullptr == attr.devicePointer) {
         cudaGetLastError();  // an unregistered pointer leaves this sticky
         throw std::invalid_argument(
-            "cbfp: add_matrix_col_major needs page-locked, "
+            "truesum: add_matrix_col_major needs page-locked, "
             "device-mapped host memory -- cudaHostAlloc with "
             "cudaHostAllocMapped, or cudaHostRegister with "
             "cudaHostRegisterMapped");
@@ -1276,7 +1276,7 @@ CudaColumnBlockMatrix::add_matrix_col_major(const double *b,
     if (presized_) {
         if (++submitted_matrices_ > declared_matrices_) {
             throw std::runtime_error(
-                "cbfp: more matrices accumulated than were described to the "
+                "truesum: more matrices accumulated than were described to the "
                 "constructor; the width bound holds for that many and no more");
         }
     } else {
@@ -1335,7 +1335,7 @@ CudaColumnBlockMatrix::survey_device_inputs(const double *const *b,
     for (std::size_t j = 0; j < cols_; ++j) {
         if (surveys[j].nonfinite) {
             throw std::domain_error(
-                "cbfp: cannot accumulate a non-finite value");
+                "truesum: cannot accumulate a non-finite value");
         }
         if (!surveys[j].any) continue;
         require_fit(j, surveys[j].min_exponent, surveys[j].max_top);
@@ -1350,7 +1350,7 @@ CudaColumnBlockMatrix::add_matrices_col_major_device(const double *const *b,
     if (0 == count || 0 == rows_ || 0 == cols_) return InputRead();
     if (count > kMaxFoldInputs) {
         std::ostringstream os;
-        os << "cbfp: at most " << kMaxFoldInputs
+        os << "truesum: at most " << kMaxFoldInputs
            << " matrices may be folded into one pass; " << count << " given";
         throw std::invalid_argument(os.str());
     }
@@ -1361,7 +1361,7 @@ CudaColumnBlockMatrix::add_matrices_col_major_device(const double *const *b,
         submitted_matrices_ += count;
         if (submitted_matrices_ > declared_matrices_) {
             throw std::runtime_error(
-                "cbfp: more matrices accumulated than were described to the "
+                "truesum: more matrices accumulated than were described to the "
                 "constructor; the width bound holds for that many and no more");
         }
     } else {
@@ -1394,7 +1394,7 @@ CudaColumnBlockMatrix::synchronize() const
 unsigned
 CudaColumnBlockMatrix::column_contradictions(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
     cuda(StreamSynchronize(st_compute_));  // not synchronize(): do not throw
     return nullptr == flags_host_ ? 0u : flags_host_[j];
 }
@@ -1412,7 +1412,7 @@ CudaColumnBlockMatrix::report_contradictions() const
         const unsigned flags = flags_host_[j];
         if (0 == flags) continue;
         std::ostringstream os;
-        os << "cbfp: column " << j
+        os << "truesum: column " << j
            << " received values it was not sized for:";
         if (0 != (flags & kBadNonFinite)) os << " a non-finite value;";
         if (0 != (flags & kBadExponent)) {
@@ -1431,7 +1431,7 @@ CudaColumnBlockMatrix::accumulate_device(const double *b,
     for (std::size_t j = 0; j < cols_; ++j) {
         if (!cols_state_[j].reserved) {
             throw std::runtime_error(
-                "cbfp: every device column must be reserved before "
+                "truesum: every device column must be reserved before "
                 "accumulation");
         }
     }
@@ -1442,7 +1442,7 @@ CudaColumnBlockMatrix::accumulate_device(const double *b,
         // never blocks.
         if (++submitted_matrices_ > declared_matrices_) {
             throw std::runtime_error(
-                "cbfp: more matrices accumulated than were described to "
+                "truesum: more matrices accumulated than were described to "
                 "the constructor; the width bound holds for that many and "
                 "no more");
         }
@@ -1474,7 +1474,7 @@ CudaColumnBlockMatrix::accumulate_device(const double *b,
     for (std::size_t j = 0; j < cols_; ++j) {
         if (surveys[j].nonfinite) {
             throw std::domain_error(
-                "cbfp: cannot accumulate a non-finite value");
+                "truesum: cannot accumulate a non-finite value");
         }
         if (!surveys[j].any) continue;
         require_fit(j, surveys[j].min_exponent, surveys[j].max_top);
@@ -1494,7 +1494,7 @@ CudaColumnBlockMatrix::launch_accumulate(const double *const *b,
     for (std::size_t j = 0; j < cols_; ++j) {
         if (!cols_state_[j].reserved) {
             throw std::runtime_error(
-                "cbfp: every device column must be reserved before "
+                "truesum: every device column must be reserved before "
                 "accumulation");
         }
     }
@@ -1534,7 +1534,7 @@ CudaColumnBlockMatrix::entry_limbs(std::size_t i, std::size_t j) const
 std::vector<limb_t>
 CudaColumnBlockMatrix::download_column(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("cbfp: column index out of range");
+    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
     flush_pending_zero();
     synchronize();
     const Column &c = cols_state_[j];
@@ -1546,6 +1546,6 @@ CudaColumnBlockMatrix::download_column(std::size_t j) const
     return out;
 }
 
-}  // namespace cbfp
+}  // namespace truesum
 
 #undef cuda

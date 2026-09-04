@@ -1,4 +1,4 @@
-# cbfp — exact accumulation of `double` matrices
+# truesum — exact accumulation of `double` matrices
 
 **Specification.** For the reasoning behind these choices, and the
 measurements that settled them, see `simd-design.md`. This document states what
@@ -392,15 +392,14 @@ in registers, at 0.8–4.8% of the kernel:
 | 2 | an exponent below the column's |
 | 4 | an addend reaching past the column's width |
 
-On the host these throw `std::runtime_error` from the accumulating call. On the
-device they are reported at the next `synchronize()`, or read without throwing
-via `column_contradictions(j)`.
+On the host, any of these conditions cause the `std::runtime_error` exception to be thrown. On the
+device, they are reported at the next `synchronize()`, or read without throwing via `column_contradictions(j)`.
 
-**A detected contradiction means the sums are already wrong.** The accumulator
+**A detected contradiction means the sums are incorrect.** The accumulator
 is left inconsistent by design; the library reports rather than recovers. The
 failure being guarded against is silent: an exponent below the column's makes
-the shift negative, the unsigned conversion puts the limb offset far past the
-width, and the value is dropped without a trace.
+the shift negative, the conversion to unsigned puts the limb offset past the
+width, and the value is dropped.
 
 ### Undefined and unchecked
 

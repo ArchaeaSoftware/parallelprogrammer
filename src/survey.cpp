@@ -1,11 +1,11 @@
-#include "cbfp/survey.hpp"
+#include "truesum/survey.hpp"
 
 #include <climits>
 #include <vector>
 
 #include "kernels.hpp"
 
-namespace cbfp {
+namespace truesum {
 
 Survey
 survey_column(const double *values, std::size_t rows)
@@ -40,4 +40,4 @@ survey_matrix(Survey *out, const double *b, std::size_t rows, std::size_t cols,
     }
 }
 
-}  // namespace cbfp
+}  // namespace truesum

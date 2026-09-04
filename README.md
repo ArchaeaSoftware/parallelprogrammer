@@ -1,4 +1,4 @@
-# column-block-fp
+# truesum
 
 Exact accumulation of double-valued matrices into an arbitrary-precision
 fixed-point matrix. No intermediate precision is ever lost: summing a stream of
@@ -45,9 +45,9 @@ wide, instead of immediately sinking to 2⁻⁵².
 ## Usage
 
 ```cpp
-#include "cbfp/column_accumulator.hpp"
+#include "truesum/column_accumulator.hpp"
 
-cbfp::ColumnBlockMatrix acc(rows, cols);
+truesum::ColumnBlockMatrix acc(rows, cols);
 
 acc.reserve_for(first_batch.data(), n_batches);   // optional: avoids rescaling
 for (const auto& batch : batches) {
@@ -113,7 +113,7 @@ so the arithmetic hides entirely behind the bus. Allocate input with
 host memory still works and is staged through a mapped buffer.
 
 Kernels are flat free functions selected once per column from the running CPU's
-capabilities; `active_kernel()` reports which. Set `CBFP_KERNEL=scalar` to force
+capabilities; `active_kernel()` reports which. Set `TRUESUM_KERNEL=scalar` to force
 the portable path, which is how the two are cross-checked in testing.
 
 Accumulating a column is two passes over its values. The first learns only the
@@ -159,7 +159,7 @@ A single accumulator is still not reentrant from the *caller's* threads. Call
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-./build/test_cbfp     # or: ctest --test-dir build
+./build/test_truesum     # or: ctest --test-dir build
 ./build/demo
 ```
 
@@ -186,7 +186,7 @@ This machine has clang-format at `/usr/lib/llvm-18/bin/clang-format` (it is not
 on `PATH`):
 
 ```sh
-/usr/lib/llvm-18/bin/clang-format -i include/cbfp/*.hpp src/*.cpp src/*.cu \
+/usr/lib/llvm-18/bin/clang-format -i include/truesum/*.hpp src/*.cpp src/*.cu \
     tests/*.cpp tests/*.cu examples/*.cpp
 ```
 
@@ -223,7 +223,7 @@ row/column layout survives formatting.
 
 ## Tests
 
-`tests/test_cbfp.cpp` is a dependency-free assertion runner covering:
+`tests/test_truesum.cpp` is a dependency-free assertion runner covering:
 
 - exact decomposition and round-trip of random bit patterns, subnormals,
   `DBL_MAX`, `DBL_MIN`, and both zeros;
@@ -237,7 +237,7 @@ row/column layout survives formatting.
   which is what makes a naive running total depend on arrival order. Exact
   accumulation restores associativity, so 24 random permutations of ten
   matrices spanning 400 binades must agree digit for digit — and the resulting
-  exponent and width must match too. Separately, six cancelling pairs must
+  exponent and width must match too. Separately, six canceling pairs must
   reach exact zero under 20 permutations, and whole-matrix, column-major,
   per-column and per-element accumulation must all produce the same total.
   The exponent and width match across permutations too, though that is
@@ -256,7 +256,7 @@ At size, where indexing and scale bookkeeping are what can break:
   2313 cells must still agree digit-for-digit on its exact decimal — which pins
   down both the row-stride arithmetic and the claim that a column's shared
   scale never changes what it holds.
-- **257 x 9 cancelled back to zero** with the batches and the cells within them
+- **257 x 9 canceled back to zero** with the batches and the cells within them
   walked in reverse, so nothing is undone in the order it was applied.
 - **512 x 64 with a distinct power-of-two scale per column.** Each cell sums
   integers below 2^53 at a fixed scale, so plain double addition is itself
@@ -278,9 +278,9 @@ large tests.
 
 | path | contents |
 | --- | --- |
-| [include/cbfp/limbs.hpp](include/cbfp/limbs.hpp) | low-level two's complement limb arithmetic |
-| [include/cbfp/column_accumulator.hpp](include/cbfp/column_accumulator.hpp) | the `ColumnBlockMatrix` interface |
+| [include/truesum/limbs.hpp](include/truesum/limbs.hpp) | low-level two's complement limb arithmetic |
+| [include/truesum/column_accumulator.hpp](include/truesum/column_accumulator.hpp) | the `ColumnBlockMatrix` interface |
 | [src/limbs.cpp](src/limbs.cpp) | shifts, widening, carry/borrow chains, decimal conversion |
 | [src/column_accumulator.cpp](src/column_accumulator.cpp) | scale tracking, rescaling, rounding |
-| [tests/test_cbfp.cpp](tests/test_cbfp.cpp) | test suite |
+| [tests/test_truesum.cpp](tests/test_truesum.cpp) | test suite |
 | [examples/demo.cpp](examples/demo.cpp) | exact vs. naive summation comparison |

@@ -8,7 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace cbfp {
+namespace truesum {
 
 class LimbColumn {
 public:
@@ -38,4 +38,4 @@ private:
 std::size_t
 padded_rows(std::size_t rows);
 
-}  // namespace cbfp
+}  // namespace truesum

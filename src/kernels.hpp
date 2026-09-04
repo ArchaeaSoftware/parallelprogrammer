@@ -14,13 +14,13 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "cbfp/survey.hpp"
+#include "truesum/survey.hpp"
 
-namespace cbfp {
+namespace truesum {
 namespace kernels {
 
 // The public Survey is what the kernels produce; nothing here needs its own.
-using Survey = ::cbfp::Survey;
+using Survey = ::truesum::Survey;
 
 // `floor_exponent` is the column's current exponent. The survey needs the exact
 // minimum only when the incoming values could drop below it; otherwise a cheap
@@ -84,7 +84,7 @@ accumulate_fold_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
                        std::size_t rows, std::int32_t column_exponent,
                        unsigned *flags);
 
-#if defined(CBFP_HAVE_AVX512)
+#if defined(TRUESUM_HAVE_AVX512)
 Survey
 survey_column_avx512(const double *values, std::size_t rows,
                      long long floor_exponent);
@@ -129,4 +129,4 @@ void
 sign_fill(std::uint64_t *dst, const std::uint64_t *top, std::size_t rows);
 
 }  // namespace kernels
-}  // namespace cbfp
+}  // namespace truesum

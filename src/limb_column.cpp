@@ -1,11 +1,11 @@
-#include "cbfp/limb_column.hpp"
+#include "truesum/limb_column.hpp"
 
 #include <cstdlib>
 #include <cstring>
 #include <new>
 #include <utility>
 
-namespace cbfp {
+namespace truesum {
 namespace {
 
 // Successive limb arrays are offset by a multiple of the cache line so they do
@@ -64,4 +64,4 @@ LimbColumn::operator=(LimbColumn &&other) noexcept
     return *this;
 }
 
-}  // namespace cbfp
+}  // namespace truesum

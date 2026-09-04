@@ -10,8 +10,8 @@
 // having to include the CPU class it otherwise only forward-declares.
 #pragma once
 
-namespace cbfp {
+namespace truesum {
 
 enum class Uplo { Lower, Upper };
 
-}  // namespace cbfp
+}  // namespace truesum

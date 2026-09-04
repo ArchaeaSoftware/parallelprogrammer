@@ -265,8 +265,8 @@ Two results, both against the direction this document previously took:
   matching the hardware width.
 - **A reduced radix beats a narrow one.** 52-in-64 wins because it carries more
   usable bits per register and per byte moved (81% density against 50%), while
-  2^11 deferred additions is ample for a batch. Normalising every few thousand
-  accumulations is cheap amortised.
+  2^11 deferred additions is ample for a batch. Normalizing every few thousand
+  accumulations is cheap amortized.
 
 **This benchmark held the accumulator in registers, and that is what makes it
 misleading.** With no memory traffic the carry chain is the only cost, so
@@ -463,7 +463,7 @@ equality test, and it makes the representation question testable today —
 including carry-save against canonical, which is where a normalization bug
 would otherwise hide until it corrupted a result silently.
 
-This argues for templates over a `CBFP_LIMB_BITS` macro: a macro forces one
+This argues for templates over a `TRUESUM_LIMB_BITS` macro: a macro forces one
 configuration per build, so two instantiations can never be compared in a
 single test binary.
 
@@ -598,7 +598,7 @@ a faster staging path.
 Ordinary host memory still works and is staged through a mapped buffer, which
 is why the staged row falls off as batches grow: that host copy becomes the
 limit. `acquire_input` lends out a buffer the device can read directly, which
-`add_matrix_col_major` recognises and reads in place.
+`add_matrix_col_major` recognizes and reads in place.
 
 #### What the survey is actually hidden behind, measured through the container
 
@@ -765,7 +765,7 @@ produce:
   reduces into device memory with ordinary atomics, then `__threadfence()` and
   one `atomicAdd` on a ticket; the block drawing `gridDim - 1` copies the
   finished per-column results to mapped memory and re-arms the sentinels for
-  the next launch, so there is no H2D initialisation either. The election costs
+  the next launch, so there is no H2D initialization either. The election costs
   ~3.4 us and the PCIe write itself 0.64. Do **not** mark the device
   accumulator `volatile` — copied from the NVIDIA sample, it cost 5.71 us by
   defeating caching on every atomic, and turned a 1.12x win into a 0.90x loss.
@@ -894,7 +894,7 @@ back, and the accumulate reads the verdict first: if the batch fits — the
 common case, and the only one when `reserve_for` has done its job — it proceeds
 with no host involvement. If it does not, the accumulate does nothing, leaving
 the accumulator untouched, and the host discovers it at the next check and
-performs the rescale or widen it needs before resubmitting. That is optimistic
+performs the rescale or widen it needs before resubmitting. That is optimiztic
 execution rather than deferred validation: a rejected batch is skipped, not
 half-applied, so there is no corrupted state to explain. The survey can also be
 folded into the copy where one is happening anyway, so the data lands in device

@@ -1,9 +1,9 @@
 #include <cstring>
 
-#include "cbfp/limb_column.hpp"
+#include "truesum/limb_column.hpp"
 #include "kernels.hpp"
 
-namespace cbfp {
+namespace truesum {
 namespace kernels {
 namespace {
 
@@ -304,4 +304,4 @@ sign_fill(std::uint64_t *dst, const std::uint64_t *top, std::size_t rows)
 }
 
 }  // namespace kernels
-}  // namespace cbfp
+}  // namespace truesum

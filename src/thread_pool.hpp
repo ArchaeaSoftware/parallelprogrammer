@@ -16,7 +16,7 @@
 #include <thread>
 #include <vector>
 
-namespace cbfp {
+namespace truesum {
 namespace detail {
 
 class ThreadPool {
@@ -100,4 +100,4 @@ private:
 };
 
 }  // namespace detail
-}  // namespace cbfp
+}  // namespace truesum

@@ -4,10 +4,10 @@
 
 #include <limits>
 
-#include "cbfp/limb_column.hpp"
+#include "truesum/limb_column.hpp"
 #include "kernels.hpp"
 
-namespace cbfp {
+namespace truesum {
 namespace kernels {
 namespace {
 
@@ -451,4 +451,4 @@ accumulate_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
 }
 
 }  // namespace kernels
-}  // namespace cbfp
+}  // namespace truesum

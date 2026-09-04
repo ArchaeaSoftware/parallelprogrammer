@@ -19,12 +19,12 @@
 #include <string>
 #include <vector>
 
-#include "cbfp/limb_column.hpp"
-#include "cbfp/limbs.hpp"
-#include "cbfp/survey.hpp"
-#include "cbfp/uplo.hpp"
+#include "truesum/limb_column.hpp"
+#include "truesum/limbs.hpp"
+#include "truesum/survey.hpp"
+#include "truesum/uplo.hpp"
 
-namespace cbfp {
+namespace truesum {
 
 // Name of the kernel variant selected for this CPU ("scalar", "avx512").
 const char *
@@ -385,4 +385,4 @@ struct DoubleParts {
 DoubleParts
 decompose(double v);
 
-}  // namespace cbfp
+}  // namespace truesum
