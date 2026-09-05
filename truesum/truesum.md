@@ -4,7 +4,9 @@ Floating point operations notoriously are not associative. In particular, (a+b)+
 
 To eliminate that uncertainty, our library `truesum` provides an *accumulation matrix* that can perform fast, elementwise exact summation of floating point matrices. Each column is represented as block floating point, with a shared exponent and the mantissas held in an SOA layout of 64-bit *limbs*[^limb], the segments of a multi-precision number that each fit in a single machine word.
 
-A *survey* is a compact (12B per column) characterization of an input matrix that may be used to pre-size an accumulation matrix to receive its contents without overflow, rescaling, or the allocation of new column-limbs during the accumulation. Extending this idea, an accumulation matrix can be pre-sized for multiple input matrices by supplying one survey for each prospective input matrix. Separating surveys from their matrices makes distributed accumulation practical: the nodes that computed the partial results also compute the surveys, the surveys travel ahead to the accumulation node and, once the accumulation matrix has been pre-sized to receive them all, the matrices may be submitted and accumulated in any order.
+A *survey* is a compact (12B per column) characterization of an input matrix that may be used to pre-size an accumulation matrix to receive its contents without overflow, rescaling, or the allocation of new column-limbs during the accumulation. Extending this idea, an accumulation matrix can be pre-sized for multiple input matrices by supplying one survey for each prospective input matrix. Separating surveys from their matrices makes distributed accumulation practical: the nodes that computed the matrices also can compute the surveys, transmit them ahead of time to the accumulation node and, once the accumulation matrix has been pre-sized to receive them all, the accumulation may be performed one matrix (or even one column) at a time, in any order.
+
+A final feature of the accumulation matrix is that it can return the mean, exactly rounded, instead of requiring the client to divide a readback by the number of accumulations.
 
 # Structure Of Arrays
 
