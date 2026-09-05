@@ -58,6 +58,33 @@ check_eq_str(const std::string &got, const std::string &want, const char *what,
 
 #define CHECK_STR(got, want) check_eq_str((got), (want), #got, __LINE__)
 
+// One value into one cell. The library has no element-at-a-time entry point:
+// a caller who wants one builds the column, which is all `add(i, j, v)` ever
+// did anyway. One call per cell, so `add_count` advances exactly as it used to.
+void
+add_at(truesum::AccumulationMatrix &m, std::size_t i, std::size_t j, double v)
+{
+    // Symmetric storage folds one index onto the other, exactly as the
+    // accumulation matrix does internally; a caller of add_column has to do
+    // that fold itself.
+    std::size_t col = j, slot = i;
+    if (m.symmetric()) {
+        if (truesum::Uplo::Lower == m.uplo()) {
+            col = std::min(i, j);
+            slot = i < j ? j - i : i - j;
+        } else {
+            col = std::max(i, j);
+            slot = std::min(i, j);
+        }
+    }
+    if (col >= m.cols() || slot >= m.column_rows(col)) {
+        throw std::out_of_range("add_at: cell out of range");
+    }
+    std::vector<double> v_col(m.column_rows(col), 0.0);
+    v_col[slot] = v;
+    m.add_column(col, v_col.data());
+}
+
 // ---------------------------------------------------------------------------
 
 void
@@ -127,7 +154,7 @@ test_single_value_roundtrip()
 
     for (double v : values) {
         truesum::AccumulationMatrix m(1, 1);
-        m.add(0, 0, v);
+        add_at(m, 0, 0, v);
         // -0.0 accumulates as an exact zero; the sign of zero is not tracked.
         const double want = (v == 0.0) ? 0.0 : v;
         CHECK_DOUBLE(m.to_double(0, 0), want);
@@ -146,7 +173,7 @@ test_catastrophic_cancellation()
     CHECK_DOUBLE(naive, 0.0);
 
     truesum::AccumulationMatrix m(1, 1);
-    for (double t : terms) m.add(0, 0, t);
+    for (double t : terms) add_at(m, 0, 0, t);
     CHECK_DOUBLE(m.to_double(0, 0), 1.0);
     CHECK_STR(m.to_exact_decimal(0, 0), "1");
 }
@@ -160,7 +187,7 @@ test_repeated_tenth()
     truesum::AccumulationMatrix m(1, 1);
     double naive = 0.0;
     for (int i = 0; i < 10; ++i) {
-        m.add(0, 0, 0.1);
+        add_at(m, 0, 0, 0.1);
         naive += 0.1;
     }
     CHECK_DOUBLE(naive, 0.99999999999999989);
@@ -173,18 +200,18 @@ void
 test_exact_decimal()
 {
     truesum::AccumulationMatrix m(1, 4);
-    m.add(0, 0, 0.1);
+    add_at(m, 0, 0, 0.1);
     CHECK_STR(m.to_exact_decimal(0, 0),
               "0.1000000000000000055511151231257827021181583404541015625");
 
-    m.add(0, 1, -0.3);
+    add_at(m, 0, 1, -0.3);
     CHECK_STR(m.to_exact_decimal(0, 1),
               "-0.299999999999999988897769753748434595763683319091796875");
 
-    m.add(0, 2, 1024.0);
+    add_at(m, 0, 2, 1024.0);
     CHECK_STR(m.to_exact_decimal(0, 2), "1024");
 
-    m.add(0, 3, std::numeric_limits<double>::denorm_min());
+    add_at(m, 0, 3, std::numeric_limits<double>::denorm_min());
     const std::string tiny = m.to_exact_decimal(0, 3);
     CHECK(tiny.size() == 1076);  // "0." + 1074 digits
     CHECK(tiny.compare(0, 2, "0.") == 0);
@@ -195,24 +222,24 @@ void
 test_exponent_and_width_tracking()
 {
     truesum::AccumulationMatrix m(1, 1);
-    m.add(0, 0, 1.0);
+    add_at(m, 0, 0, 1.0);
     CHECK(m.column_exponent(0) == 0);
 
     // A much smaller value forces the column scale down; nothing is lost.
-    m.add(0, 0, std::ldexp(1.0, -200));
+    add_at(m, 0, 0, std::ldexp(1.0, -200));
     CHECK(m.column_exponent(0) == -200);
     CHECK(m.column_bit_width(0) >= 201);
 
     // A much larger value forces the block wider.
-    m.add(0, 0, std::ldexp(1.0, 200));
+    add_at(m, 0, 0, std::ldexp(1.0, 200));
     CHECK(m.column_exponent(0) == -200);
     CHECK(m.column_bit_width(0) >= 401);
 
-    m.sub(0, 0, std::ldexp(1.0, 200));
-    m.sub(0, 0, std::ldexp(1.0, -200));
+    add_at(m, 0, 0, -(std::ldexp(1.0, 200)));
+    add_at(m, 0, 0, -(std::ldexp(1.0, -200)));
     CHECK_DOUBLE(m.to_double(0, 0), 1.0);
 
-    m.sub(0, 0, 1.0);
+    add_at(m, 0, 0, -(1.0));
     CHECK(m.is_zero(0, 0));
     CHECK_DOUBLE(m.to_double(0, 0), 0.0);
 }
@@ -222,8 +249,8 @@ test_full_double_range()
 {
     // Span the entire binade range in a single column: 2^-1074 up to 2^1023.
     truesum::AccumulationMatrix m(1, 1);
-    m.add(0, 0, std::ldexp(1.0, 1023));
-    m.add(0, 0, std::numeric_limits<double>::denorm_min());
+    add_at(m, 0, 0, std::ldexp(1.0, 1023));
+    add_at(m, 0, 0, std::numeric_limits<double>::denorm_min());
     CHECK(m.column_bit_width(0) >= 1024 + 1074);
 
     // The tiny term is far below the ulp of the large one, so the rounded
@@ -231,7 +258,7 @@ test_full_double_range()
     CHECK_DOUBLE(m.to_double(0, 0), std::ldexp(1.0, 1023));
     CHECK(!m.is_exactly_representable(0, 0));
 
-    m.sub(0, 0, std::ldexp(1.0, 1023));
+    add_at(m, 0, 0, -(std::ldexp(1.0, 1023)));
     CHECK_DOUBLE(m.to_double(0, 0), std::numeric_limits<double>::denorm_min());
     CHECK(m.is_exactly_representable(0, 0));
 }
@@ -242,22 +269,22 @@ test_rounding_ties_to_even()
     {  // 1 + 2^-53 is exactly halfway between 1 and nextafter(1); ties to
        // even.
         truesum::AccumulationMatrix m(1, 1);
-        m.add(0, 0, 1.0);
-        m.add(0, 0, std::ldexp(1.0, -53));
+        add_at(m, 0, 0, 1.0);
+        add_at(m, 0, 0, std::ldexp(1.0, -53));
         CHECK_DOUBLE(m.to_double(0, 0), 1.0);
     }
     {  // One bit above the tie rounds up.
         truesum::AccumulationMatrix m(1, 1);
-        m.add(0, 0, 1.0);
-        m.add(0, 0, std::ldexp(1.0, -53));
-        m.add(0, 0, std::ldexp(1.0, -105));
+        add_at(m, 0, 0, 1.0);
+        add_at(m, 0, 0, std::ldexp(1.0, -53));
+        add_at(m, 0, 0, std::ldexp(1.0, -105));
         CHECK_DOUBLE(m.to_double(0, 0), std::nextafter(1.0, 2.0));
     }
     {  // Tie with an odd mantissa rounds up (to even).
         truesum::AccumulationMatrix m(1, 1);
         const double odd = std::nextafter(1.0, 2.0);  // 1 + 2^-52
-        m.add(0, 0, odd);
-        m.add(0, 0, std::ldexp(1.0, -53));
+        add_at(m, 0, 0, odd);
+        add_at(m, 0, 0, std::ldexp(1.0, -53));
         CHECK_DOUBLE(m.to_double(0, 0), std::nextafter(odd, 2.0));
     }
     {  // 2^-1075 is halfway between 0 and the smallest denormal: ties to
@@ -278,19 +305,19 @@ test_rounding_ties_to_even()
     {  // Two denormals that sum into the smallest normal.
         truesum::AccumulationMatrix m(1, 1);
         const double largest_sub = std::ldexp(4503599627370495.0, -1074);
-        m.add(0, 0, largest_sub);
-        m.add(0, 0, std::numeric_limits<double>::denorm_min());
+        add_at(m, 0, 0, largest_sub);
+        add_at(m, 0, 0, std::numeric_limits<double>::denorm_min());
         CHECK_DOUBLE(m.to_double(0, 0), std::numeric_limits<double>::min());
         CHECK(m.is_exactly_representable(0, 0));
     }
     {  // Overflow of the double range on readback only.
         truesum::AccumulationMatrix m(1, 1);
         const double big = std::numeric_limits<double>::max();
-        m.add(0, 0, big);
-        m.add(0, 0, big);
+        add_at(m, 0, 0, big);
+        add_at(m, 0, 0, big);
         CHECK_DOUBLE(m.to_double(0, 0),
                      std::numeric_limits<double>::infinity());
-        m.sub(0, 0, big);
+        add_at(m, 0, 0, -(big));
         CHECK_DOUBLE(m.to_double(0, 0), big);  // and it comes back exactly
     }
 }
@@ -314,7 +341,7 @@ test_add_then_subtract_is_zero()
             for (int n = 0; n < 40; ++n) {
                 const double v = std::ldexp(man_dist(rng), exp_dist(rng));
                 per_cell[i * cols + j].push_back(v);
-                m.add(i, j, v);
+                add_at(m, i, j, v);
             }
         }
     }
@@ -322,7 +349,7 @@ test_add_then_subtract_is_zero()
         for (std::size_t j = 0; j < cols; ++j) {
             auto &cell = per_cell[i * cols + j];
             std::shuffle(cell.begin(), cell.end(), rng);
-            for (double v : cell) m.sub(i, j, v);
+            for (double v : cell) add_at(m, i, j, -(v));
             CHECK(m.is_zero(i, j));
         }
     }
@@ -408,10 +435,10 @@ test_column_independence()
     // Column 0 gets a huge dynamic range, column 1 stays cheap. The whole
     // point of per-column scaling is that column 1 does not pay for column 0.
     truesum::AccumulationMatrix m(2, 2);
-    m.add(0, 0, std::ldexp(1.0, 900));
-    m.add(0, 0, std::ldexp(1.0, -900));
-    m.add(0, 1, 1.0);
-    m.add(1, 1, 2.0);
+    add_at(m, 0, 0, std::ldexp(1.0, 900));
+    add_at(m, 0, 0, std::ldexp(1.0, -900));
+    add_at(m, 0, 1, 1.0);
+    add_at(m, 1, 1, 2.0);
 
     CHECK(m.column_bit_width(0) >= 1800);
     CHECK(m.column_bit_width(1) <= 128);
@@ -424,15 +451,25 @@ test_errors()
     truesum::AccumulationMatrix m(2, 2);
     bool threw = false;
     try {
-        m.add(0, 0, std::numeric_limits<double>::infinity());
+        add_at(m, 0, 0, std::numeric_limits<double>::infinity());
     } catch (const std::domain_error &) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    // With no element-at-a-time accumulate, readback is where an out-of-range
+    // (i, j) still reaches the library.
+    threw = false;
+    try {
+        m.to_double(5, 0);
+    } catch (const std::out_of_range &) {
         threw = true;
     }
     CHECK(threw);
 
     threw = false;
     try {
-        m.add(5, 0, 1.0);
+        m.to_exact_decimal(0, 5);
     } catch (const std::out_of_range &) {
         threw = true;
     }
@@ -447,15 +484,15 @@ test_many_small_into_large()
     truesum::AccumulationMatrix m(1, 1);
     const double big = std::ldexp(1.0, 60);
     const double small = 1.0;
-    m.add(0, 0, big);
+    add_at(m, 0, 0, big);
     double naive = big;
     for (int n = 0; n < 1000000; ++n) {
-        m.add(0, 0, small);
+        add_at(m, 0, 0, small);
         naive += small;
     }
     CHECK_DOUBLE(naive, big);  // every increment is swallowed by rounding
     CHECK_DOUBLE(m.to_double(0, 0), big + 1000000.0);
-    m.sub(0, 0, big);
+    add_at(m, 0, 0, -(big));
     CHECK_DOUBLE(m.to_double(0, 0), 1000000.0);
 }
 
@@ -463,10 +500,10 @@ void
 test_reuse_after_zero()
 {
     truesum::AccumulationMatrix m(1, 1);
-    m.add(0, 0, 1.0);
+    add_at(m, 0, 0, 1.0);
     m.set_zero();
     CHECK(m.is_zero(0, 0));
-    m.add(0, 0, 2.5);
+    add_at(m, 0, 0, 2.5);
     CHECK_DOUBLE(m.to_double(0, 0), 2.5);
 }
 
@@ -570,7 +607,7 @@ test_large_matrix_matches_scalar()
         for (std::size_t j = 0; j < cols; ++j) {
             truesum::AccumulationMatrix one(1, 1);
             for (int b = 0; b < batches; ++b) {
-                one.add(0, 0, wide_sample(i, j, b));
+                add_at(one, 0, 0, wide_sample(i, j, b));
             }
             CHECK_STR(big.to_exact_decimal(i, j), one.to_exact_decimal(0, 0));
             CHECK_DOUBLE(big.to_double(i, j), one.to_double(0, 0));
@@ -604,7 +641,7 @@ test_large_matrix_cancels_to_zero()
     for (int b = batches; b-- > 0;) {
         for (std::size_t i = rows; i-- > 0;) {
             for (std::size_t j = cols; j-- > 0;) {
-                m.sub(i, j, wide_sample(i, j, b));
+                add_at(m, i, j, -(wide_sample(i, j, b)));
             }
         }
     }
@@ -951,9 +988,9 @@ test_order_independent_across_entry_points()
                 // Exercise sub() as well: adding -v and subtracting v must be
                 // the same operation.
                 if ((i + j) & 1) {
-                    by_element.sub(i, j, -v);
+                    add_at(by_element, i, j, -(-v));
                 } else {
-                    by_element.add(i, j, v);
+                    add_at(by_element, i, j, v);
                 }
             }
         }
@@ -1419,30 +1456,30 @@ test_symmetric_keeps_exactness()
 
     // Cancellation across the whole double range, on an off-diagonal entry.
     truesum::AccumulationMatrix a(4, truesum::Uplo::Lower);
-    a.add(2, 1, 1e300);
-    a.add(2, 1, 1.0);
-    a.add(1, 2, -1e300);  // the mirrored index reaches the same entry
+    add_at(a, 2, 1, 1e300);
+    add_at(a, 2, 1, 1.0);
+    add_at(a, 1, 2, -1e300);  // the mirrored index reaches the same entry
     CHECK_DOUBLE(a.to_double(2, 1), 1.0);
     CHECK_DOUBLE(a.to_double(1, 2), 1.0);
     CHECK_STR(a.to_exact_decimal(1, 2), "1");
 
     // sub through the mirror cancels exactly.
-    a.sub(1, 2, 1.0);
+    add_at(a, 1, 2, -(1.0));
     CHECK(a.is_zero(2, 1));
 
     // A value far below the column's scale forces a rescale of a triangular
     // column; nothing is lost and the mirror still agrees.
     truesum::AccumulationMatrix r(6, truesum::Uplo::Upper);
-    r.add(4, 2, 1.0);
-    r.add(4, 2, std::ldexp(1.0, -300));
+    add_at(r, 4, 2, 1.0);
+    add_at(r, 4, 2, std::ldexp(1.0, -300));
     CHECK(r.column_exponent(4) == -300);
-    r.sub(2, 4, 1.0);
+    add_at(r, 2, 4, -(1.0));
     CHECK_DOUBLE(r.to_double(2, 4), std::ldexp(1.0, -300));
     CHECK(r.is_exactly_representable(4, 2));
 
     // Residuals work through the mirror too.
     truesum::AccumulationMatrix q(3, truesum::Uplo::Lower);
-    for (int k = 0; k < 10; ++k) q.add(2, 0, 0.1);
+    for (int k = 0; k < 10; ++k) add_at(q, 2, 0, 0.1);
     double lo = 0.0;
     CHECK_DOUBLE(q.to_double(&lo, 0, 2), 1.0);
     CHECK_DOUBLE(lo, std::ldexp(1.0, -54));
@@ -1979,7 +2016,7 @@ test_mean_matches_double_division()
         if (trial & 1) x = -x;
 
         a.set_zero();
-        a.add(0, 0, x);
+        add_at(a, 0, 0, x);
         const double want = x / static_cast<double>(n);
         CHECK_DOUBLE(a.to_double_mean(0, 0, n), want);
 
@@ -2162,18 +2199,18 @@ test_mean_edge_cases()
     CHECK_DOUBLE(lo, 0.0);
 
     // 1/3 rounds down, and what it drops is exactly 2^-54 / 3.
-    a.add(0, 0, 1.0);
+    add_at(a, 0, 0, 1.0);
     CHECK_DOUBLE(a.to_double_mean(&lo, 0, 0, 3), 1.0 / 3.0);
     CHECK_DOUBLE(lo, std::ldexp(1.0 / 3.0, -54));
     a.set_zero();
-    a.add(0, 0, -1.0);
+    add_at(a, 0, 0, -1.0);
     CHECK_DOUBLE(a.to_double_mean(&lo, 0, 0, 3), -1.0 / 3.0);
     CHECK_DOUBLE(lo, -std::ldexp(1.0 / 3.0, -54));
 
     // The widest count. 1 / (2^64 - 1) is 2^-64 plus a sliver, and the
     // sliver, 1 / ((2^64 - 1) * 2^64), rounds to 2^-128.
     a.set_zero();
-    a.add(0, 0, 1.0);
+    add_at(a, 0, 0, 1.0);
     CHECK_DOUBLE(a.to_double_mean(&lo, 0, 0, ~std::uint64_t{0}),
                  std::ldexp(1.0, -64));
     CHECK_DOUBLE(lo, std::ldexp(1.0, -128));
@@ -2183,18 +2220,18 @@ test_mean_edge_cases()
     // to 4. 1/3 is below the halfway point and rounds to 0.
     const double tiny = std::numeric_limits<double>::denorm_min();
     a.set_zero();
-    a.add(0, 0, tiny);
+    add_at(a, 0, 0, tiny);
     CHECK_DOUBLE(a.to_double_mean(0, 0, 2), 0.0);
     CHECK_DOUBLE(a.to_double_mean(0, 0, 3), 0.0);
-    a.add(0, 0, tiny);
-    a.add(0, 0, tiny);
+    add_at(a, 0, 0, tiny);
+    add_at(a, 0, 0, tiny);
     CHECK_DOUBLE(a.to_double_mean(0, 0, 2), 2 * tiny);
     CHECK_DOUBLE(a.to_double_mean(0, 0, 3), tiny);
-    a.add(0, 0, tiny);
-    a.add(0, 0, tiny);
+    add_at(a, 0, 0, tiny);
+    add_at(a, 0, 0, tiny);
     CHECK_DOUBLE(a.to_double_mean(0, 0, 2), 2 * tiny);
-    a.add(0, 0, tiny);
-    a.add(0, 0, tiny);
+    add_at(a, 0, 0, tiny);
+    add_at(a, 0, 0, tiny);
     CHECK_DOUBLE(a.to_double_mean(&lo, 0, 0, 2), 4 * tiny);
     // What that rounding dropped is half the smallest denormal, which no
     // double can carry: the residual is itself a tie, and goes to +0.0.
@@ -2204,23 +2241,23 @@ test_mean_edge_cases()
     // three it overflows, and the residual of an overflow is 0.0.
     const double big = std::numeric_limits<double>::max();
     a.set_zero();
-    for (int r = 0; r < 4; ++r) a.add(0, 0, big);
+    for (int r = 0; r < 4; ++r) add_at(a, 0, 0, big);
     CHECK_DOUBLE(a.to_double_mean(&lo, 0, 0, 4), big);
     CHECK_DOUBLE(lo, 0.0);
     CHECK_DOUBLE(a.to_double_mean(&lo, 0, 0, 3), inf);
     CHECK_DOUBLE(lo, 0.0);
     a.set_zero();
-    for (int r = 0; r < 4; ++r) a.add(0, 0, -big);
+    for (int r = 0; r < 4; ++r) add_at(a, 0, 0, -big);
     CHECK_DOUBLE(a.to_double_mean(0, 0, 3), -inf);
 
     // A mean over the count that produced it recovers a common value exactly.
     a.set_zero();
-    for (int r = 0; r < 1000; ++r) a.add(0, 0, 0.1);
+    for (int r = 0; r < 1000; ++r) add_at(a, 0, 0, 0.1);
     CHECK_DOUBLE(a.to_double_mean(&lo, 0, 0, 1000), 0.1);
     CHECK_DOUBLE(lo, 0.0);
     // ... and the sum of 1..n over n is (n+1)/2.
     a.set_zero();
-    for (int r = 1; r <= 999; ++r) a.add(0, 0, static_cast<double>(r));
+    for (int r = 1; r <= 999; ++r) add_at(a, 0, 0, static_cast<double>(r));
     CHECK_DOUBLE(a.to_double_mean(0, 0, 999), 500.0);
     CHECK_DOUBLE(a.to_double_mean(0, 0, 1000), 499.5);
 }
@@ -2234,7 +2271,7 @@ test_mean_matrix_entry_points()
     for (int r = 0; r < 5; ++r) {
         for (std::size_t j = 0; j < cols; ++j) {
             for (std::size_t i = 0; i < rows; ++i) {
-                a.add(i, j,
+                add_at(a, i, j,
                       std::ldexp(static_cast<double>(rng() >> 11),
                                  static_cast<int>(rng() % 40) - 20));
             }
@@ -2264,8 +2301,8 @@ test_mean_matrix_entry_points()
 
     // Symmetric storage reaches the mean through the same fold as to_double.
     truesum::AccumulationMatrix s(4, truesum::Uplo::Lower);
-    s.add(2, 1, 1.0);
-    s.add(2, 1, 1.0);
+    add_at(s, 2, 1, 1.0);
+    add_at(s, 2, 1, 1.0);
     CHECK_DOUBLE(s.to_double_mean(1, 2, 3), 2.0 / 3.0);
     CHECK_DOUBLE(s.to_double_mean(2, 1, 3), 2.0 / 3.0);
 }

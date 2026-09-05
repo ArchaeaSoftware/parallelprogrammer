@@ -367,57 +367,6 @@ AccumulationMatrix::rescale(Column &c, int new_exponent)
 }
 
 void
-AccumulationMatrix::accumulate(std::size_t i, std::size_t j, double v,
-                               bool negate, int log2_scale)
-{
-    check_index(i, j);
-    if (!std::isfinite(v)) {
-        throw std::domain_error(
-            "truesum: cannot accumulate a non-finite value");
-    }
-
-    const DoubleParts p = decompose(v);
-    if (0 == p.mantissa) return;
-
-    const long long e64 = static_cast<long long>(p.exponent) + log2_scale;
-    if (e64 < -kExponentLimit || e64 > kExponentLimit) {
-        throw std::domain_error(
-            "truesum: log2_scale puts the value out of range");
-    }
-    const int e = static_cast<int>(e64);
-
-    std::size_t col = 0, slot = 0;
-    locate(col, slot, i, j);
-    Column &c = cols_state_[col];
-    if (!c.initialized) {
-        c.exponent = e;
-        c.initialized = true;
-    }
-    if (e < c.exponent) rescale(c, e);
-
-    const std::size_t shift = static_cast<std::size_t>(e - c.exponent);
-    c.max_addend_bits =
-        std::max(c.max_addend_bits, shift + bit_width_u64(p.mantissa));
-    ++c.add_count;
-    fit_column(c);
-
-    kernels::accumulate_one(c.bases.data(), c.limbs.size(), slot, p.mantissa,
-                            shift, p.negative != negate);
-}
-
-void
-AccumulationMatrix::add(std::size_t i, std::size_t j, double v)
-{
-    accumulate(i, j, v, false, 0);
-}
-
-void
-AccumulationMatrix::sub(std::size_t i, std::size_t j, double v)
-{
-    accumulate(i, j, v, true, 0);
-}
-
-void
 AccumulationMatrix::add_matrix(const double *b, std::size_t row_stride)
 {
     add_matrix_scaled_pow2(b, 0, row_stride);

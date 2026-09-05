@@ -63,7 +63,7 @@ double x = acc.to_double(i, j);                   // correctly rounded, once
 std::string exact = acc.to_exact_decimal(i, j);   // every digit, never rounds
 ```
 
-Also available: `add` / `sub` per element, `add_matrix_scaled_pow2` (exact
+Also available: `add_matrix_scaled_pow2` (exact
 scaling by any power of two), `to_matrix` for bulk readback,
 `is_exactly_representable`, and `describe()` for a per-column exponent/width
 report.

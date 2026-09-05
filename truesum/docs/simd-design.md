@@ -183,8 +183,11 @@ offset, spanning limb positions `off` and `off+1`, so each position needs masked
 selects. Compute all offsets, start at the horizontal minimum, and exit via
 `_kortestz` once every lane's carry has died.
 
-Cost accepted: scalar `add(i, j, v)` touches L cache lines instead of one or
-two. Bulk `add_matrix` gets much faster; single-element updates get slower.
+Cost accepted: a scalar element-at-a-time add touches L cache lines instead of
+one or two, and charges the whole column for one addend. Bulk `add_matrix`
+gets much faster; single-element updates get slower. That entry point was
+later removed for exactly those reasons: a caller who wants one cell builds
+the column, which is all it ever did.
 
 ## Allocation: 64-byte aligned, deliberately skewed
 

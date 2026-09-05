@@ -100,12 +100,6 @@ public:
 
     // --- exact accumulation ------------------------------------------------
 
-    // A(i, j) += v. Exact. Throws std::domain_error on inf/NaN.
-    void add(std::size_t i, std::size_t j, double v);
-
-    // A(i, j) -= v. Exact.
-    void sub(std::size_t i, std::size_t j, double v);
-
     // A += B, where B is a dense row-major rows() x cols() matrix whose rows
     // are `row_stride` doubles apart (0 means "tightly packed", i.e. cols()).
     void add_matrix(const double *b, std::size_t row_stride = 0);
@@ -382,8 +376,6 @@ private:
     void fit_column(Column &c);
     void rescale(Column &c, int new_exponent);
     bool column_is_zero(const Column &c) const;
-    void accumulate(std::size_t i, std::size_t j, double v, bool negate,
-                    int log2_scale);
 
     // Absolute value of entry (i, j) as a magnitude limb vector, plus its
     // sign. Gathers across limb positions, so this is a readback path only.

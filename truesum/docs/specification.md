@@ -174,8 +174,6 @@ never surveys an incoming batch.
 ### Accumulation
 
 ```cpp
-void add(i, j, v);                          // A(i,j) += v
-void sub(i, j, v);                          // A(i,j) -= v
 void add_matrix(b, row_stride = 0);         // row-major
 void add_matrix_col_major(b, col_stride = 0);
 void add_matrix_scaled_pow2(b, log2_scale, row_stride = 0);
