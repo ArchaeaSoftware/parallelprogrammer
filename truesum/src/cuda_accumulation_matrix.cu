@@ -9,8 +9,8 @@
 #include <type_traits>
 #include <vector>
 
-#include "truesum/column_accumulator.hpp"
-#include "truesum/cuda_accumulator.hpp"
+#include "truesum/accumulation_matrix.hpp"
+#include "truesum/cuda_accumulation_matrix.hpp"
 #include "kernels.hpp"
 
 namespace truesum {
@@ -330,93 +330,93 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols, InputSet in,
     for (std::size_t i = (std::size_t)blockIdx.x * blockDim.x + threadIdx.x;
                      i < rows;
                      i += (std::size_t)blockDim.x * gridDim.x) {
-      // Blocking over the input set, not over the accumulator. Every matrix's
-      // addend lands in the same limbs of the same row, back to back, so those
-      // read-modify-writes hit L1 and only the first read and the last write
-      // reach DRAM. Traffic an element goes from 8 + 16*nlimbs to
-      // 8*n + 16*nlimbs, and it needs no register array -- so the limb count
-      // does not have to be a compile-time constant, which it could not be:
-      // columns of one matrix carry their own widths.
-      for (unsigned bi = 0; bi < in.n; ++bi) {
-        const double *col = in.p[bi] + col_off;
-        unsigned long long m;
-        int e, top;
-        bool neg, bad;
-        split_device(col[i], m, e, top, neg, bad);
-        if (bad) t_flags |= kBadNonFinite;
-        if (0 == m) continue;
+        // Blocking over the input set, not over the accumulation matrix. Every
+        // matrix's addend lands in the same limbs of the same row, back to
+        // back, so those read-modify-writes hit L1 and only the first read and
+        // the last write reach DRAM. Traffic an element goes from 8 + 16*nlimbs
+        // to 8*n + 16*nlimbs, and it needs no register array -- so the limb
+        // count does not have to be a compile-time constant, which it could not
+        // be: columns of one matrix carry their own widths.
+        for (unsigned bi = 0; bi < in.n; ++bi) {
+            const double *col = in.p[bi] + col_off;
+            unsigned long long m;
+            int e, top;
+            bool neg, bad;
+            split_device(col[i], m, e, top, neg, bad);
+            if (bad) t_flags |= kBadNonFinite;
+            if (0 == m) continue;
 
-        // A negative shift converts to an `off` far above nlimbs, so the
-        // loop below does not run and the value is silently dropped. That
-        // is the failure the flags exist to name.
-        const int shift = e - c.exponent;
-        const unsigned off = static_cast<unsigned>(shift) / kRadix;
-        if (shift < 0) t_flags |= kBadExponent;
-        // The addend's top must stay below the sign bit, which also keeps
-        // the sign test at the top limb exact.
-        if (top - c.exponent >= static_cast<int>(kRadix * c.nlimbs)) {
-            t_flags |= kBadWidth;
-        }
-        const unsigned bit = static_cast<unsigned>(shift) % kRadix;
+            // A negative shift converts to an `off` far above nlimbs, so the
+            // loop below does not run and the value is silently dropped. That
+            // is the failure the flags exist to name.
+            const int shift = e - c.exponent;
+            const unsigned off = static_cast<unsigned>(shift) / kRadix;
+            if (shift < 0) t_flags |= kBadExponent;
+            // The addend's top must stay below the sign bit, which also keeps
+            // the sign test at the top limb exact.
+            if (top - c.exponent >= static_cast<int>(kRadix * c.nlimbs)) {
+                t_flags |= kBadWidth;
+            }
+            const unsigned bit = static_cast<unsigned>(shift) % kRadix;
 
-        // A 53-bit significand at intra-limb offset `bit` spans two limbs at
-        // radix 64 and at radix 52 alike.
-        unsigned long long lo, hi;
-        if (0 == bit) {
-            lo = m & kLimbMask;
-            hi = kRadix == 64 ? 0ull : (m >> kRadix) & kLimbMask;
-        } else {
-            lo = (m << bit) & kLimbMask;
-            hi = (m >> (kRadix - bit)) & kLimbMask;
-        }
-
-        // Add and subtract share the loop shape; `carry` is a borrow when the
-        // lane is negative. Past the addend with nothing propagating, no
-        // higher limb can change.
-        unsigned long long carry = 0;
-        for (unsigned p = off; p < c.nlimbs; ++p) {
-            const unsigned long long a =
-                (p == off) ? lo : ((p == off + 1) ? hi : 0ull);
-            limb_t *dst = c.bases[p] + i;
-            const unsigned long long x = *dst;
-            unsigned long long written;
-            // Signed overflow at the top limb -- a negative value that lost
-            // its sign bit, or a non-negative one that gained it -- kept as
-            // a bit rather than branched on, so lanes do not diverge on the
-            // sign of a running sum.
-            if (neg) {
-                const unsigned long long d = x - a;
-                const unsigned long long b1 = (x < a) ? 1ull : 0ull;
-                const unsigned long long d2 = d - carry;
-                const unsigned long long b2 = (d < carry) ? 1ull : 0ull;
-                written = d2;
-                carry = b1 | b2;
-                if (p + 1 == c.nlimbs) t_overflow |= (x & ~d2) >> 63;
+            // A 53-bit significand at intra-limb offset `bit` spans two limbs
+            // at radix 64 and at radix 52 alike.
+            unsigned long long lo, hi;
+            if (0 == bit) {
+                lo = m & kLimbMask;
+                hi = kRadix == 64 ? 0ull : (m >> kRadix) & kLimbMask;
             } else {
-                const unsigned long long s = x + a;
-                const unsigned long long c1 = (s < x) ? 1ull : 0ull;
-                const unsigned long long s2 = s + carry;
-                const unsigned long long c2 = (s2 < s) ? 1ull : 0ull;
-                written = s2;
-                carry = c1 | c2;
-                if (p + 1 == c.nlimbs) t_overflow |= (~x & s2) >> 63;
+                lo = (m << bit) & kLimbMask;
+                hi = (m >> (kRadix - bit)) & kLimbMask;
             }
-            *dst = written;
 
-            // Significant, not merely written. All-zeros and all-ones are
-            // exactly what a two's complement sign extension leaves behind,
-            // and a borrow out of a negative addend writes all-ones every
-            // limb to the top of the column -- so counting writes would
-            // report the full width for any column that ever goes negative.
-            // A value's topmost significant limb can never be all-ones when
-            // positive (the sign bit would be set) nor all-zeros when
-            // negative, so this test finds exactly that limb.
-            if (0ull != written && ~0ull != written &&
-                static_cast<int>(p) > t_lim) {
-                t_lim = static_cast<int>(p);
+            // Add and subtract share the loop shape; `carry` is a borrow when
+            // the lane is negative. Past the addend with nothing propagating,
+            // no higher limb can change.
+            unsigned long long carry = 0;
+            for (unsigned p = off; p < c.nlimbs; ++p) {
+                const unsigned long long a =
+                    (p == off) ? lo : ((p == off + 1) ? hi : 0ull);
+                limb_t *dst = c.bases[p] + i;
+                const unsigned long long x = *dst;
+                unsigned long long written;
+                // Signed overflow at the top limb -- a negative value that lost
+                // its sign bit, or a non-negative one that gained it -- kept as
+                // a bit rather than branched on, so lanes do not diverge on the
+                // sign of a running sum.
+                if (neg) {
+                    const unsigned long long d = x - a;
+                    const unsigned long long b1 = (x < a) ? 1ull : 0ull;
+                    const unsigned long long d2 = d - carry;
+                    const unsigned long long b2 = (d < carry) ? 1ull : 0ull;
+                    written = d2;
+                    carry = b1 | b2;
+                    if (p + 1 == c.nlimbs) t_overflow |= (x & ~d2) >> 63;
+                } else {
+                    const unsigned long long s = x + a;
+                    const unsigned long long c1 = (s < x) ? 1ull : 0ull;
+                    const unsigned long long s2 = s + carry;
+                    const unsigned long long c2 = (s2 < s) ? 1ull : 0ull;
+                    written = s2;
+                    carry = c1 | c2;
+                    if (p + 1 == c.nlimbs) t_overflow |= (~x & s2) >> 63;
+                }
+                *dst = written;
+
+                // Significant, not merely written. All-zeros and all-ones are
+                // exactly what a two's complement sign extension leaves behind,
+                // and a borrow out of a negative addend writes all-ones every
+                // limb to the top of the column -- so counting writes would
+                // report the full width for any column that ever goes negative.
+                // A value's topmost significant limb can never be all-ones when
+                // positive (the sign bit would be set) nor all-zeros when
+                // negative, so this test finds exactly that limb.
+                if (0ull != written && ~0ull != written &&
+                    static_cast<int>(p) > t_lim) {
+                    t_lim = static_cast<int>(p);
+                }
+                if (0 == carry && p >= off + 1) break;
             }
-            if (0 == carry && p >= off + 1) break;
-        }
       }
     }
 
@@ -604,7 +604,8 @@ survey_matrix_col_major_device(Survey *out, const double *b,
     Survey *dst = static_cast<Survey *>(attr.devicePointer);
 
     // Every column is the full height: this surveys a matrix, not an
-    // accumulator's stored triangle, so there is no per-column shape to carry.
+    // accumulation matrix's stored triangle, so there is no per-column shape to
+    // carry.
     std::vector<ColumnShape> host_shapes(cols);
     for (auto &sh : host_shapes) {
         sh.rows = static_cast<unsigned>(rows);
@@ -633,7 +634,8 @@ cuda_available()
     return cudaSuccess == cudaGetDeviceCount(&n) && n > 0;
 }
 
-CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t rows, std::size_t cols)
+CudaAccumulationMatrix::CudaAccumulationMatrix(std::size_t rows,
+                                               std::size_t cols)
     : rows_(rows), cols_(cols), cols_state_(cols)
 {
     if (!cuda_available()) {
@@ -679,8 +681,8 @@ CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t rows, std::size_t cols)
     init_columns();
 }
 
-CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t n, Uplo uplo)
-    : CudaColumnBlockMatrix(n, n)
+CudaAccumulationMatrix::CudaAccumulationMatrix(std::size_t n, Uplo uplo)
+    : CudaAccumulationMatrix(n, n)
 {
     symmetric_ = true;
     uplo_ = uplo;
@@ -691,7 +693,7 @@ CudaColumnBlockMatrix::CudaColumnBlockMatrix(std::size_t n, Uplo uplo)
 // the device. Called again by the symmetric constructor because the
 // delegated-to one has already run with the full shape.
 void
-CudaColumnBlockMatrix::init_columns()
+CudaAccumulationMatrix::init_columns()
 {
     std::vector<ColumnShape> shapes(cols_);
     for (std::size_t j = 0; j < cols_; ++j) {
@@ -714,32 +716,32 @@ CudaColumnBlockMatrix::init_columns()
                 cudaMemcpyHostToDevice));
 }
 
-CudaColumnBlockMatrix::CudaColumnBlockMatrix(
+CudaAccumulationMatrix::CudaAccumulationMatrix(
     std::size_t rows, std::size_t cols,
     const std::vector<std::vector<Survey>> &surveys)
-    : CudaColumnBlockMatrix(rows, cols)
+    : CudaAccumulationMatrix(rows, cols)
 {
     reserve_from_surveys(surveys);
 }
 
-CudaColumnBlockMatrix::CudaColumnBlockMatrix(
+CudaAccumulationMatrix::CudaAccumulationMatrix(
     std::size_t n, Uplo uplo, const std::vector<std::vector<Survey>> &surveys)
-    : CudaColumnBlockMatrix(n, uplo)
+    : CudaAccumulationMatrix(n, uplo)
 {
     reserve_from_surveys(surveys);
 }
 
-// The same aggregate ColumnBlockMatrix forms: minimum of the minima, maximum
+// The same aggregate AccumulationMatrix forms: minimum of the minima, maximum
 // of the maxima, count from the outer size. Reducing to one reservation per
 // column is what makes submission order irrelevant -- any matrix inside these
-// extents fits, so the accumulator never needs to know which one it is being
-// handed.
+// extents fits, so the accumulation matrix never needs to know which one it is
+// being handed.
 //
 // Unlike the CPU, a column with nothing in it is still reserved: the device
 // can grow a column but only from the host between launches, and a pre-sized
-// accumulator is meant never to go back to the host at all.
+// accumulation matrix is meant never to go back to the host at all.
 void
-CudaColumnBlockMatrix::reserve_from_surveys(
+CudaAccumulationMatrix::reserve_from_surveys(
     const std::vector<std::vector<Survey>> &surveys)
 {
     if (surveys.empty()) {
@@ -781,25 +783,27 @@ CudaColumnBlockMatrix::reserve_from_surveys(
 }
 
 std::size_t
-CudaColumnBlockMatrix::column_rows(std::size_t j) const
+CudaAccumulationMatrix::column_rows(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
+    if (j >= cols_)
+        throw std::out_of_range("truesum: column index out of range");
     return cols_state_[j].rows;
 }
 
 std::size_t
-CudaColumnBlockMatrix::column_first_row(std::size_t j) const
+CudaAccumulationMatrix::column_first_row(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
+    if (j >= cols_)
+        throw std::out_of_range("truesum: column index out of range");
     return cols_state_[j].first_row;
 }
 
-// The same fold ColumnBlockMatrix uses: Lower puts (i, j) and (j, i) both in
+// The same fold AccumulationMatrix uses: Lower puts (i, j) and (j, i) both in
 // column min(i, j) at slot |i - j|, Upper in column max(i, j) at slot
 // min(i, j).
 void
-CudaColumnBlockMatrix::locate(std::size_t &col, std::size_t &slot,
-                              std::size_t i, std::size_t j) const
+CudaAccumulationMatrix::locate(std::size_t &col, std::size_t &slot,
+                               std::size_t i, std::size_t j) const
 {
     if (!symmetric_) {
         col = j;
@@ -815,7 +819,7 @@ CudaColumnBlockMatrix::locate(std::size_t &col, std::size_t &slot,
     }
 }
 
-CudaColumnBlockMatrix::~CudaColumnBlockMatrix()
+CudaAccumulationMatrix::~CudaAccumulationMatrix()
 {
     // Deliberately unchecked: a destructor must not throw, and there is
     // nothing useful to do about a failed free during teardown.
@@ -844,7 +848,7 @@ CudaColumnBlockMatrix::~CudaColumnBlockMatrix()
 }
 
 void
-CudaColumnBlockMatrix::check_index(std::size_t i, std::size_t j) const
+CudaAccumulationMatrix::check_index(std::size_t i, std::size_t j) const
 {
     if (i >= rows_ || j >= cols_) {
         throw std::out_of_range("truesum: matrix index out of range");
@@ -852,24 +856,27 @@ CudaColumnBlockMatrix::check_index(std::size_t i, std::size_t j) const
 }
 
 int
-CudaColumnBlockMatrix::column_exponent(std::size_t j) const
+CudaAccumulationMatrix::column_exponent(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
+    if (j >= cols_)
+        throw std::out_of_range("truesum: column index out of range");
     return cols_state_[j].exponent;
 }
 
 std::size_t
-CudaColumnBlockMatrix::column_limbs(std::size_t j) const
+CudaAccumulationMatrix::column_limbs(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
+    if (j >= cols_)
+        throw std::out_of_range("truesum: column index out of range");
     return cols_state_[j].nlimbs;
 }
 
 void
-CudaColumnBlockMatrix::reserve_column(std::size_t j, int exponent,
-                                      std::size_t bits)
+CudaAccumulationMatrix::reserve_column(std::size_t j, int exponent,
+                                       std::size_t bits)
 {
-    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
+    if (j >= cols_)
+        throw std::out_of_range("truesum: column index out of range");
     Column &c = cols_state_[j];
     if (c.reserved) {
         throw std::runtime_error(
@@ -909,7 +916,7 @@ CudaColumnBlockMatrix::reserve_column(std::size_t j, int exponent,
 // kernels are reading, and it is rare enough that draining once is simpler
 // than versioning the descriptors.
 void
-CudaColumnBlockMatrix::grow_column(std::size_t j, std::size_t needed)
+CudaAccumulationMatrix::grow_column(std::size_t j, std::size_t needed)
 {
     Column &c = cols_state_[j];
     if (c.nlimbs >= needed) return;
@@ -939,11 +946,11 @@ CudaColumnBlockMatrix::grow_column(std::size_t j, std::size_t needed)
 }
 
 // Lowers a column's exponent, shifting every entry left to match. Mirrors
-// ColumnBlockMatrix::rescale: widen enough to hold the shifted value, then
+// AccumulationMatrix::rescale: widen enough to hold the shifted value, then
 // shift. Unlike widening this moves every bit in the column, which is why the
 // exponent is the half worth pre-sizing correctly.
 void
-CudaColumnBlockMatrix::rescale_column(std::size_t j, int new_exponent)
+CudaAccumulationMatrix::rescale_column(std::size_t j, int new_exponent)
 {
     Column &c = cols_state_[j];
     if (new_exponent >= c.exponent) return;
@@ -969,12 +976,12 @@ CudaColumnBlockMatrix::rescale_column(std::size_t j, int new_exponent)
     descriptors_stale_ = true;
 }
 
-// The derived bound ColumnBlockMatrix::fit_column applies, checked against
+// The derived bound AccumulationMatrix::fit_column applies, checked against
 // what the column was actually reserved for. Called once per column per batch,
 // after the survey has established that batch's extent.
 void
-CudaColumnBlockMatrix::require_fit(std::size_t j, int min_exponent,
-                                   int max_top)
+CudaAccumulationMatrix::require_fit(std::size_t j, int min_exponent,
+                                    int max_top)
 {
     if (min_exponent < cols_state_[j].exponent) {
         rescale_column(j, static_cast<int>(min_exponent));
@@ -991,12 +998,12 @@ CudaColumnBlockMatrix::require_fit(std::size_t j, int min_exponent,
 }
 
 // Shared tail of both reserve_for entry points: turn per-column exponent
-// extents into reservations. Mirrors ColumnBlockMatrix::reserve_for, with one
+// extents into reservations. Mirrors AccumulationMatrix::reserve_for, with one
 // deliberate difference -- a column with nothing in it is still reserved,
 // since the device cannot grow one later.
 void
-CudaColumnBlockMatrix::reserve_from_extents(const int *low, const int *high,
-                                            const char *any, std::size_t count)
+CudaAccumulationMatrix::reserve_from_extents(const int *low, const int *high,
+                                             const char *any, std::size_t count)
 {
     const std::size_t headroom =
         ceil_log2(count < 1 ? 1 : count) + 1;  // +1 for the sign
@@ -1011,8 +1018,8 @@ CudaColumnBlockMatrix::reserve_from_extents(const int *low, const int *high,
 }
 
 void
-CudaColumnBlockMatrix::reserve_for(const double *b, std::size_t count,
-                                   std::size_t col_stride)
+CudaAccumulationMatrix::reserve_for(const double *b, std::size_t count,
+                                    std::size_t col_stride)
 {
     if (0 == cols_) return;
     const std::size_t stride = col_stride ? col_stride : rows_;
@@ -1039,8 +1046,8 @@ CudaColumnBlockMatrix::reserve_for(const double *b, std::size_t count,
 }
 
 void
-CudaColumnBlockMatrix::reserve_for_device(const double *b, std::size_t count,
-                                          std::size_t col_stride)
+CudaAccumulationMatrix::reserve_for_device(const double *b, std::size_t count,
+                                           std::size_t col_stride)
 {
     if (0 == cols_ || 0 == rows_) return;
     const std::size_t stride = col_stride ? col_stride : rows_;
@@ -1072,14 +1079,14 @@ CudaColumnBlockMatrix::reserve_for_device(const double *b, std::size_t count,
 }
 
 void
-CudaColumnBlockMatrix::reserve_like(const ColumnBlockMatrix &cpu)
+CudaAccumulationMatrix::reserve_like(const AccumulationMatrix &cpu)
 {
     if (cpu.rows() != rows_ || cpu.cols() != cols_) {
         throw std::runtime_error(
             "truesum: reserve_like requires matching dimensions");
     }
     // Same shape, not merely the same extent: a triangular column is a
-    // different length, so copying a full accumulator's widths into a
+    // different length, so copying a full accumulation matrix's widths into a
     // triangular one would reserve the right bits for the wrong entries.
     if (cpu.symmetric() != symmetric_ ||
         (symmetric_ && cpu.uplo() != uplo_)) {
@@ -1092,19 +1099,20 @@ CudaColumnBlockMatrix::reserve_like(const ColumnBlockMatrix &cpu)
 }
 
 int
-CudaColumnBlockMatrix::column_occupancy(std::size_t j) const
+CudaAccumulationMatrix::column_occupancy(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
+    if (j >= cols_)
+        throw std::out_of_range("truesum: column index out of range");
     flush_pending_zero();
     synchronize();
-    const_cast<CudaColumnBlockMatrix *>(this)->harvest_occupancy();
+    const_cast<CudaAccumulationMatrix *>(this)->harvest_occupancy();
     return cols_state_[j].max_limb_used;
 }
 
 // The device staging accumulates across launches, so the mapped array already
 // holds the high-water mark; this only copies it where the column keeps it.
 void
-CudaColumnBlockMatrix::harvest_occupancy()
+CudaAccumulationMatrix::harvest_occupancy()
 {
     if (nullptr == occupancy_host_) return;
     for (std::size_t j = 0; j < cols_; ++j) {
@@ -1113,7 +1121,7 @@ CudaColumnBlockMatrix::harvest_occupancy()
 }
 
 std::size_t
-CudaColumnBlockMatrix::memory_bytes() const
+CudaAccumulationMatrix::memory_bytes() const
 {
     std::size_t total = 0;
     for (const auto &c : cols_state_) {
@@ -1126,7 +1134,7 @@ CudaColumnBlockMatrix::memory_bytes() const
 // row per array, so a short column costs a block that exits at once rather
 // than a separate API call that does not.
 void
-CudaColumnBlockMatrix::flush_pending_zero() const
+CudaAccumulationMatrix::flush_pending_zero() const
 {
     if (zero_ptr_.empty()) return;
     const std::size_t n = zero_ptr_.size();
@@ -1158,7 +1166,7 @@ CudaColumnBlockMatrix::flush_pending_zero() const
 }
 
 void
-CudaColumnBlockMatrix::sync_descriptors()
+CudaAccumulationMatrix::sync_descriptors()
 {
     if (!descriptors_stale_) return;
 
@@ -1186,7 +1194,7 @@ CudaColumnBlockMatrix::sync_descriptors()
 }
 
 void
-CudaColumnBlockMatrix::ensure_slots(std::size_t words)
+CudaAccumulationMatrix::ensure_slots(std::size_t words)
 {
     if (slot_words_ >= words) return;
     synchronize();
@@ -1203,10 +1211,11 @@ CudaColumnBlockMatrix::ensure_slots(std::size_t words)
 }
 
 // Validates a packed column-major batch on the host, using the same survey the
-// CPU accumulator uses -- which is the AVX-512 one where available, at ~0.12
-// ns/elem. Cheap enough to hide entirely behind the transfer it runs against.
+// CPU accumulation matrix uses -- which is the AVX-512 one where available, at
+// ~0.12 ns/elem. Cheap enough to hide entirely behind the transfer it runs
+// against.
 void
-CudaColumnBlockMatrix::require_all_reserved() const
+CudaAccumulationMatrix::require_all_reserved() const
 {
     for (std::size_t j = 0; j < cols_; ++j) {
         if (!cols_state_[j].reserved) {
@@ -1218,8 +1227,8 @@ CudaColumnBlockMatrix::require_all_reserved() const
 }
 
 void
-CudaColumnBlockMatrix::validate_host_survey(const double *b,
-                                            std::size_t col_stride)
+CudaAccumulationMatrix::validate_host_survey(const double *b,
+                                             std::size_t col_stride)
 {
     require_all_reserved();
 
@@ -1248,12 +1257,11 @@ CudaColumnBlockMatrix::validate_host_survey(const double *b,
 // the transfer was not already going to spend.
 //
 // Validation therefore still happens *before* the accumulate is launched, so a
-// bad batch is rejected without having touched the accumulator -- which a
-// device-side survey cannot do without a round-trip that drains the pipeline.
-
+// bad batch is rejected without having touched the accumulation matrix -- which
+// a device-side survey cannot do without a round-trip that drains the pipeline.
 
 double *
-CudaColumnBlockMatrix::acquire_input()
+CudaAccumulationMatrix::acquire_input()
 {
     ensure_slots(rows_ * cols_);
     Slot &s = slots_[slot_];
@@ -1265,8 +1273,8 @@ CudaColumnBlockMatrix::acquire_input()
 }
 
 InputRead
-CudaColumnBlockMatrix::add_matrix_col_major(const double *b,
-                                                     std::size_t col_stride)
+CudaAccumulationMatrix::add_matrix_col_major(const double *b,
+                                             std::size_t col_stride)
 {
     if (0 == rows_ || 0 == cols_) return InputRead();
     const std::size_t stride = col_stride ? col_stride : rows_;
@@ -1315,7 +1323,7 @@ CudaColumnBlockMatrix::add_matrix_col_major(const double *b,
 }
 
 InputRead
-CudaColumnBlockMatrix::record_input_read()
+CudaAccumulationMatrix::record_input_read()
 {
     CUevent_st *ev = nullptr;
     cuda(EventCreateWithFlags(&ev, cudaEventDisableTiming));
@@ -1327,9 +1335,9 @@ CudaColumnBlockMatrix::record_input_read()
 // and atomicMax, so successive launches accumulate the union of their extents
 // -- which is exactly the aggregate a fold has to be sized for.
 void
-CudaColumnBlockMatrix::survey_device_inputs(const double *const *b,
-                                            std::size_t count,
-                                            std::size_t col_stride)
+CudaAccumulationMatrix::survey_device_inputs(const double *const *b,
+                                             std::size_t count,
+                                             std::size_t col_stride)
 {
     const dim3 grid = launch_grid(rows_, cols_);
     std::vector<Survey> surveys(cols_);
@@ -1356,9 +1364,9 @@ CudaColumnBlockMatrix::survey_device_inputs(const double *const *b,
 }
 
 InputRead
-CudaColumnBlockMatrix::add_matrices_col_major_device(const double *const *b,
-                                                     std::size_t count,
-                                                     std::size_t col_stride)
+CudaAccumulationMatrix::add_matrices_col_major_device(const double *const *b,
+                                                      std::size_t count,
+                                                      std::size_t col_stride)
 {
     if (0 == count || 0 == rows_ || 0 == cols_) return InputRead();
     if (count > kMaxFoldInputs) {
@@ -1389,8 +1397,8 @@ CudaColumnBlockMatrix::add_matrices_col_major_device(const double *const *b,
 }
 
 InputRead
-CudaColumnBlockMatrix::add_matrix_col_major_device(const double *b,
-                                                   std::size_t col_stride)
+CudaAccumulationMatrix::add_matrix_col_major_device(const double *b,
+                                                    std::size_t col_stride)
 {
     if (0 == rows_ || 0 == cols_) return InputRead();
     accumulate_device(b, col_stride ? col_stride : rows_);
@@ -1398,16 +1406,17 @@ CudaColumnBlockMatrix::add_matrix_col_major_device(const double *b,
 }
 
 void
-CudaColumnBlockMatrix::synchronize() const
+CudaAccumulationMatrix::synchronize() const
 {
     cuda(StreamSynchronize(st_compute_));
     report_contradictions();
 }
 
 unsigned
-CudaColumnBlockMatrix::column_contradictions(std::size_t j) const
+CudaAccumulationMatrix::column_contradictions(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
+    if (j >= cols_)
+        throw std::out_of_range("truesum: column index out of range");
     cuda(StreamSynchronize(st_compute_));  // not synchronize(): do not throw
     return nullptr == flags_host_ ? 0u : flags_host_[j];
 }
@@ -1418,7 +1427,7 @@ CudaColumnBlockMatrix::column_contradictions(std::size_t j) const
 // bug. Either way the sums are already wrong, so this reports rather than
 // recovers -- the same contract, and the same wording, as the CPU container.
 void
-CudaColumnBlockMatrix::report_contradictions() const
+CudaAccumulationMatrix::report_contradictions() const
 {
     if (nullptr == flags_host_) return;
     for (std::size_t j = 0; j < cols_; ++j) {
@@ -1433,14 +1442,14 @@ CudaColumnBlockMatrix::report_contradictions() const
         }
         if (0 != (flags & kBadWidth)) os << " an addend past its width;";
         if (0 != (flags & kBadOverflow)) os << " a sum past its width;";
-        os << " the accumulator is no longer consistent";
+        os << " the accumulation matrix is no longer consistent";
         throw std::runtime_error(os.str());
     }
 }
 
 void
-CudaColumnBlockMatrix::accumulate_device(const double *b,
-                                         std::size_t col_stride)
+CudaAccumulationMatrix::accumulate_device(const double *b,
+                                          std::size_t col_stride)
 {
     for (std::size_t j = 0; j < cols_; ++j) {
         if (!cols_state_[j].reserved) {
@@ -1500,9 +1509,9 @@ CudaColumnBlockMatrix::accumulate_device(const double *b,
 // Queues the accumulate. Asynchronous: the caller is not blocked, so batches
 // pipeline against each other without the caller doing anything.
 void
-CudaColumnBlockMatrix::launch_accumulate(const double *const *b,
-                                         std::size_t count,
-                                         std::size_t col_stride)
+CudaAccumulationMatrix::launch_accumulate(const double *const *b,
+                                          std::size_t count,
+                                          std::size_t col_stride)
 {
     flush_pending_zero();
     for (std::size_t j = 0; j < cols_; ++j) {
@@ -1527,7 +1536,7 @@ CudaColumnBlockMatrix::launch_accumulate(const double *const *b,
 }
 
 std::vector<limb_t>
-CudaColumnBlockMatrix::entry_limbs(std::size_t i, std::size_t j) const
+CudaAccumulationMatrix::entry_limbs(std::size_t i, std::size_t j) const
 {
     check_index(i, j);
     flush_pending_zero();
@@ -1546,9 +1555,10 @@ CudaColumnBlockMatrix::entry_limbs(std::size_t i, std::size_t j) const
 }
 
 std::vector<limb_t>
-CudaColumnBlockMatrix::download_column(std::size_t j) const
+CudaAccumulationMatrix::download_column(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
+    if (j >= cols_)
+        throw std::out_of_range("truesum: column index out of range");
     flush_pending_zero();
     synchronize();
     const Column &c = cols_state_[j];

@@ -34,9 +34,9 @@ namespace detail {
 class ThreadPool;
 }
 
-class ColumnBlockMatrix {
+class AccumulationMatrix {
 public:
-    ColumnBlockMatrix(std::size_t rows, std::size_t cols);
+    AccumulationMatrix(std::size_t rows, std::size_t cols);
 
     // Symmetric n x n, storing one triangle. A(i, j) and A(j, i) are the same
     // stored entry rather than two that happen to agree, which matters here
@@ -49,35 +49,36 @@ public:
     // the input traffic halves as well. The input is taken to be symmetric;
     // that is not checked, because checking it means reading the half this
     // exists to avoid reading.
-    ColumnBlockMatrix(std::size_t n, Uplo uplo);
+    AccumulationMatrix(std::size_t n, Uplo uplo);
 
     // Pre-sized from the surveys of every matrix that will be accumulated:
     // `surveys` is indexed by matrix and then by column, so its outer size is
     // how many will arrive and supplies the headroom term that would otherwise
     // come from counting them.
     //
-    // Sized this way the accumulator never rescales, never widens, and never
-    // surveys an incoming batch, because it already knows what is in one. The
-    // metadata is taken on trust: a matrix reaching outside what was declared,
-    // or more matrices than were described, voids the sizing and the sums are
-    // then simply wrong. Only the count is checked, because that costs nothing.
-    ColumnBlockMatrix(std::size_t rows, std::size_t cols,
-                      const std::vector<std::vector<Survey>> &surveys);
+    // Sized this way the accumulation matrix never rescales, never widens, and
+    // never surveys an incoming batch, because it already knows what is in one.
+    // The metadata is taken on trust: a matrix reaching outside what was
+    // declared, or more matrices than were described, voids the sizing and the
+    // sums are then simply wrong. Only the count is checked, because that costs
+    // nothing.
+    AccumulationMatrix(std::size_t rows, std::size_t cols,
+                       const std::vector<std::vector<Survey>> &surveys);
 
     // Both at once. Each survey describes the stored triangle of one matrix,
     // column by column: entry j must cover the column_rows(j) values beginning
     // at row column_first_row(j), since those are the only ones that will be
     // read.
-    ColumnBlockMatrix(std::size_t n, Uplo uplo,
-                      const std::vector<std::vector<Survey>> &surveys);
+    AccumulationMatrix(std::size_t n, Uplo uplo,
+                       const std::vector<std::vector<Survey>> &surveys);
 
     // Declared, not implicit: the worker pool is held by unique_ptr to an
     // incomplete type, so the destructor has to be defined where that type is.
     // The moves are spelled out because declaring a destructor would otherwise
     // suppress them.
-    ~ColumnBlockMatrix();
-    ColumnBlockMatrix(ColumnBlockMatrix &&) noexcept;
-    ColumnBlockMatrix &operator=(ColumnBlockMatrix &&) noexcept;
+    ~AccumulationMatrix();
+    AccumulationMatrix(AccumulationMatrix &&) noexcept;
+    AccumulationMatrix &operator=(AccumulationMatrix &&) noexcept;
 
     std::size_t rows() const { return rows_; }
 
@@ -117,23 +118,24 @@ public:
 
     // A += B, where B is column-major: column j begins at b + j*col_stride and
     // its rows are contiguous (0 means tightly packed, i.e. rows()). This is
-    // the layout the accumulator itself wants, so it avoids the staging copy
-    // that a row-major input needs.
+    // the layout the accumulation matrix itself wants, so it avoids the staging
+    // copy that a row-major input needs.
     void add_matrix_col_major(const double *b, std::size_t col_stride = 0);
 
     void add_matrix_col_major_scaled_pow2(const double *b, int log2_scale,
                                           std::size_t col_stride = 0);
 
     // A += B[0] + B[1] + ... + B[count-1], all in one pass over the
-    // accumulator. `b` is an array of `count` pointers, each to a column-major
-    // matrix laid out as add_matrix_col_major expects.
+    // accumulation matrix. `b` is an array of `count` pointers, each to a
+    // column-major matrix laid out as add_matrix_col_major expects.
     //
     // Identical results to calling add_matrix_col_major once per matrix --
     // exact accumulation does not care about order or grouping. What changes
     // is traffic. One at a time, each batch reads and writes every limb it
     // touches; folded, the limbs are read once, all `count` addends applied in
-    // registers, and written once. That is a saving in accumulator traffic
-    // only, so it shows up where accumulator traffic is the bound.
+    // registers, and written once. That is a saving in accumulation matrix
+    // traffic only, so it shows up where accumulation matrix traffic is the
+    // bound.
     //
     // Which `count` to pass is not obvious, because two costs pull the other
     // way: `count` input columns are `count` concurrent streams rather than
@@ -161,7 +163,8 @@ public:
                                 std::size_t col_stride = 0);
 
     // A(., j) += v, where v is column_rows(j) contiguous doubles. Lets a caller
-    // stream one column at a time, so only the accumulator has to be resident
+    // stream one column at a time, so only the accumulation matrix has to be
+    // resident
     // -- the difference between holding a whole input matrix and holding
     // 8*rows() bytes of it.
     //
@@ -201,9 +204,10 @@ public:
     //
     // Writes what the rounding discarded:
     // exactly (stored value - returned double), itself correctly rounded to a
-    // double. The subtraction happens in the accumulator's own fixed point, so
-    // the residual is the true difference and not an estimate -- forming it in
-    // floating point would be the cancellation this container exists to avoid.
+    // double. The subtraction happens in the accumulation matrix's own fixed
+    // point, so the residual is the true difference and not an estimate --
+    // forming it in floating point would be the cancellation this container
+    // exists to avoid.
     //
     // Properties worth relying on:
     //   - the returned double is unaffected by asking for the residual;

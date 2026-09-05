@@ -58,15 +58,17 @@ inline constexpr unsigned kBadWidth = 4;
 inline constexpr unsigned kBadOverflow = 8;
 
 // Folds `count` contiguous columns, one per matrix, into a single pass over
-// the accumulator. Same arithmetic as AccumulateFn applied `count` times; what
-// differs is the traffic. One batch at a time reads and writes every limb it
-// touches once per batch, so K batches pay 8 bytes of input and 16*nlimbs of
-// accumulator per element. Folded, the limbs are read once, all K addends
-// applied to them in registers, and written once: 8*K + 16*nlimbs for the same
-// work. At two limbs and K=8 that is 96 bytes an element against 320.
+// the accumulation matrix. Same arithmetic as AccumulateFn applied `count`
+// times; what differs is the traffic. One batch at a time reads and writes
+// every limb it touches once per batch, so K batches pay 8 bytes of input and
+// 16*nlimbs of accumulation matrix per element. Folded, the limbs are read
+// once, all K addends applied to them in registers, and written once: 8*K +
+// 16*nlimbs for the same work. At two limbs and K=8 that is 96 bytes an element
+// against 320.
 //
-// The saving is in accumulator traffic, so it only shows where that traffic is
-// the bound -- past L3, where the CPU is waiting on DRAM rather than issue.
+// The saving is in accumulation matrix traffic, so it only shows where that
+// traffic is the bound -- past L3, where the CPU is waiting on DRAM rather than
+// issue.
 using AccumulateFoldFn = void (*)(std::uint64_t *const *, std::size_t,
                                   const double *const *, std::size_t,
                                   std::size_t, std::int32_t, unsigned *);

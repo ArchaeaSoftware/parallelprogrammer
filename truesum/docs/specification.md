@@ -70,7 +70,7 @@ test at every limb, which is what lets it vectorize. The top limb alone
 carries a sign test (§7), so a width the bound did not in fact cover is
 reported rather than wrapped.
 
-For a caller sizing an accumulator in advance, the same rule reads:
+For a caller sizing an accumulation matrix in advance, the same rule reads:
 
 ```
 bits = significand + exponent_spread + ceil_log2(count + 1) + 1
@@ -133,7 +133,7 @@ void survey_matrix_col_major_device(Survey *out, const double *b,
 ```
 
 The host and device forms agree field for field. Which side computes a survey
-cannot change how an accumulator is sized from it.
+cannot change how an accumulation matrix is sized from it.
 
 ### `Uplo`
 
@@ -151,15 +151,15 @@ It reports when the device has finished reading the submitted buffer. See §7.
 
 ---
 
-## 5. `ColumnBlockMatrix` — host
+## 5. `AccumulationMatrix` — host
 
 ### Construction
 
 ```cpp
-ColumnBlockMatrix(rows, cols);                    // adaptive
-ColumnBlockMatrix(n, uplo);                       // symmetric, adaptive
-ColumnBlockMatrix(rows, cols, surveys);           // pre-sized
-ColumnBlockMatrix(n, uplo, surveys);              // symmetric, pre-sized
+AccumulationMatrix(rows, cols);                    // adaptive
+AccumulationMatrix(n, uplo);                       // symmetric, adaptive
+AccumulationMatrix(rows, cols, surveys);           // pre-sized
+AccumulationMatrix(n, uplo, surveys);              // symmetric, pre-sized
 ```
 
 Move-only. `surveys` is indexed by matrix, then by column; its outer size
@@ -167,7 +167,7 @@ declares how many matrices will arrive and supplies the count term.
 
 Pre-sizing reduces the surveys to **one reservation per column** — minimum of
 the minima, maximum of the maxima. Because that is an aggregate, the
-accumulator never learns which matrix it is being handed, and **submission
+accumulation matrix never learns which matrix it is being handed, and **submission
 order is irrelevant**. Sized this way it never rescales, never widens, and
 never surveys an incoming batch.
 
@@ -191,7 +191,7 @@ stays exact without widening the mantissa; it is folded into the column
 exponent rather than applied to the values.
 
 `add_matrices_col_major` applies `count` matrices in a single pass over the
-accumulator. Results are identical to a loop; only the traffic differs. It is
+accumulation matrix. Results are identical to a loop; only the traffic differs. It is
 **column-major only** — folding row-major input would require staging `count`
 columns per worker, which is the traffic it exists to avoid. Columns wider than
 8 limbs fall back to one matrix at a time.
@@ -214,7 +214,7 @@ std::vector<limb_t> entry_limbs(i, j) const;
 without double rounding.
 
 The **residual** is exactly `(stored value − returned double)`, itself
-correctly rounded. It is computed by limb subtraction in the accumulator's own
+correctly rounded. It is computed by limb subtraction in the accumulation matrix's own
 fixed point, never in floating point. Guaranteed properties:
 
 - the returned `double` is unaffected by asking for the residual;
@@ -270,11 +270,11 @@ results are **bit-identical to single-threaded**. For symmetric matrices the
 partition is weighted by stored entries, since a triangular column's work runs
 from `n` down to 1.
 
-A `ColumnBlockMatrix` is not internally synchronized: one writer at a time.
+A `AccumulationMatrix` is not internally synchronized: one writer at a time.
 
 ---
 
-## 6. `CudaColumnBlockMatrix` — device
+## 6. `CudaAccumulationMatrix` — device
 
 Not a third kernel variant behind the host dispatch. What the two
 implementations share is the *algorithm* — when to rescale, when to widen, how
@@ -288,13 +288,13 @@ on its include path. Only the link needs `cudart`.
 ### Construction and reservation
 
 ```cpp
-CudaColumnBlockMatrix(rows, cols);
-CudaColumnBlockMatrix(n, uplo);
-CudaColumnBlockMatrix(rows, cols, surveys);
-CudaColumnBlockMatrix(n, uplo, surveys);
+CudaAccumulationMatrix(rows, cols);
+CudaAccumulationMatrix(n, uplo);
+CudaAccumulationMatrix(rows, cols, surveys);
+CudaAccumulationMatrix(n, uplo, surveys);
 
 void reserve_column(j, exponent, bits);
-void reserve_like(const ColumnBlockMatrix &cpu);
+void reserve_like(const AccumulationMatrix &cpu);
 void reserve_for(b, count = 1, col_stride = 0);          // host input
 void reserve_for_device(b, count = 1, col_stride = 0);   // device input
 ```
@@ -322,7 +322,7 @@ kernel reads the buffer in place over PCIe; there is no staging copy and no
 device-side copy of the input.
 
 `add_matrices_col_major_device` folds up to **16** device-resident matrices
-into one pass over the accumulator.
+into one pass over the accumulation matrix.
 
 Accumulation is asynchronous. `synchronize()` blocks until every submission has
 completed, and throws if any column reported a contradiction (§7).
@@ -366,12 +366,12 @@ Dropping the handle without waiting is a statement that the buffer will not be
 written again. Ignoring this corrupts results — measured at about 63% of
 entries.
 
-`acquire_input()` returns a buffer the accumulator owns and blocks only if the
+`acquire_input()` returns a buffer the accumulation matrix owns and blocks only if the
 device is still reading it, so two in rotation let the host fill one while the
 device streams the other. That buffer stays valid until the next
 `acquire_input()`.
 
-**Fill on your own CUDA stream, not the default one.** The accumulator's stream
+**Fill on your own CUDA stream, not the default one.** The accumulation matrix's stream
 is a blocking stream and therefore synchronizes with the legacy null stream: a
 producer using plain `cudaMemcpy` serializes against the accumulate and gets no
 overlap at all.
@@ -398,7 +398,7 @@ in registers, at 0.8–4.8% of the kernel:
 On the host, any of these conditions cause the `std::runtime_error` exception to be thrown. On the
 device, they are reported at the next `synchronize()`, or read without throwing via `column_contradictions(j)`.
 
-**A detected contradiction means the sums are incorrect.** The accumulator
+**A detected contradiction means the sums are incorrect.** The accumulation matrix
 is left inconsistent by design; the library reports rather than recovers. The
 failure being guarded against is silent: an exponent below the column's makes
 the shift negative, the conversion to unsigned puts the limb offset past the
@@ -424,9 +424,9 @@ bandwidth-bound and was not measured.
 
 ### Undefined and unchecked
 
-- Passing a non-symmetric matrix to a symmetric accumulator.
+- Passing a non-symmetric matrix to a symmetric accumulation matrix.
 - Writing a device input buffer before its `InputRead` clears.
-- Concurrent mutation of one accumulator from several threads.
+- Concurrent mutation of one accumulation matrix from several threads.
 
 ---
 

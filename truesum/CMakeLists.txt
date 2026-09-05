@@ -14,7 +14,7 @@ add_library(truesum
   src/limb_column.cpp
   src/kernels_scalar.cpp
   src/kernels_dispatch.cpp
-  src/column_accumulator.cpp
+  src/accumulation_matrix.cpp
   src/survey.cpp
 )
 
@@ -51,7 +51,7 @@ if(CMAKE_CUDA_COMPILER)
   enable_language(CUDA)
   set(CMAKE_CUDA_STANDARD 17)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-  add_library(truesum_cuda src/cuda_accumulator.cu)
+  add_library(truesum_cuda src/cuda_accumulation_matrix.cu)
   set_target_properties(truesum_cuda PROPERTIES CUDA_ARCHITECTURES "70;80;86")
   target_link_libraries(truesum_cuda PUBLIC truesum)
 

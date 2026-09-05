@@ -1,4 +1,4 @@
-#include "truesum/column_accumulator.hpp"
+#include "truesum/accumulation_matrix.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -110,7 +110,7 @@ decompose(double v)
     return p;
 }
 
-ColumnBlockMatrix::ColumnBlockMatrix(std::size_t rows, std::size_t cols)
+AccumulationMatrix::AccumulationMatrix(std::size_t rows, std::size_t cols)
     : rows_(rows), cols_(cols), cols_state_(cols)
 {
     for (std::size_t j = 0; j < cols_; ++j) {
@@ -124,7 +124,7 @@ ColumnBlockMatrix::ColumnBlockMatrix(std::size_t rows, std::size_t cols)
     column_buffers_[0].resize(rows_);
 }
 
-ColumnBlockMatrix::ColumnBlockMatrix(std::size_t n, Uplo uplo)
+AccumulationMatrix::AccumulationMatrix(std::size_t n, Uplo uplo)
     : rows_(n), cols_(n), symmetric_(true), uplo_(uplo), cols_state_(n)
 {
     for (std::size_t j = 0; j < cols_; ++j) {
@@ -140,16 +140,18 @@ ColumnBlockMatrix::ColumnBlockMatrix(std::size_t n, Uplo uplo)
 }
 
 std::size_t
-ColumnBlockMatrix::column_rows(std::size_t j) const
+AccumulationMatrix::column_rows(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
+    if (j >= cols_)
+        throw std::out_of_range("truesum: column index out of range");
     return cols_state_[j].rows;
 }
 
 std::size_t
-ColumnBlockMatrix::column_first_row(std::size_t j) const
+AccumulationMatrix::column_first_row(std::size_t j) const
 {
-    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
+    if (j >= cols_)
+        throw std::out_of_range("truesum: column index out of range");
     return cols_state_[j].first_row;
 }
 
@@ -157,8 +159,8 @@ ColumnBlockMatrix::column_first_row(std::size_t j) const
 // slot |i - j|. Upper stores i <= j, so both land in column max(i, j) at slot
 // min(i, j). Neither needs a branch on which side of the diagonal it started.
 void
-ColumnBlockMatrix::locate(std::size_t &col, std::size_t &slot, std::size_t i,
-                          std::size_t j) const
+AccumulationMatrix::locate(std::size_t &col, std::size_t &slot, std::size_t i,
+                           std::size_t j) const
 {
     if (!symmetric_) {
         col = j;
@@ -174,13 +176,14 @@ ColumnBlockMatrix::locate(std::size_t &col, std::size_t &slot, std::size_t i,
     }
 }
 
-ColumnBlockMatrix::~ColumnBlockMatrix() = default;
-ColumnBlockMatrix::ColumnBlockMatrix(ColumnBlockMatrix &&) noexcept = default;
-ColumnBlockMatrix &
-ColumnBlockMatrix::operator=(ColumnBlockMatrix &&) noexcept = default;
+AccumulationMatrix::~AccumulationMatrix() = default;
+AccumulationMatrix::AccumulationMatrix(AccumulationMatrix &&) noexcept =
+    default;
+AccumulationMatrix &
+AccumulationMatrix::operator=(AccumulationMatrix &&) noexcept = default;
 
 void
-ColumnBlockMatrix::set_threads(unsigned n)
+AccumulationMatrix::set_threads(unsigned n)
 {
     if (n < 1) n = 1;
     if (n == threads()) return;
@@ -190,28 +193,28 @@ ColumnBlockMatrix::set_threads(unsigned n)
 }
 
 unsigned
-ColumnBlockMatrix::threads() const
+AccumulationMatrix::threads() const
 {
     return static_cast<unsigned>(column_buffers_.size());
 }
 
-ColumnBlockMatrix::ColumnBlockMatrix(
+AccumulationMatrix::AccumulationMatrix(
     std::size_t rows, std::size_t cols,
     const std::vector<std::vector<Survey>> &surveys)
-    : ColumnBlockMatrix(rows, cols)
+    : AccumulationMatrix(rows, cols)
 {
     reserve_from_surveys(surveys);
 }
 
-ColumnBlockMatrix::ColumnBlockMatrix(
+AccumulationMatrix::AccumulationMatrix(
     std::size_t n, Uplo uplo, const std::vector<std::vector<Survey>> &surveys)
-    : ColumnBlockMatrix(n, uplo)
+    : AccumulationMatrix(n, uplo)
 {
     reserve_from_surveys(surveys);
 }
 
 void
-ColumnBlockMatrix::reserve_from_surveys(
+AccumulationMatrix::reserve_from_surveys(
     const std::vector<std::vector<Survey>> &surveys)
 {
     if (surveys.empty()) {
@@ -229,7 +232,7 @@ ColumnBlockMatrix::reserve_from_surveys(
     // the maximum of the maxima for the top, and the count from the outer
     // size. Reducing to an aggregate is what makes submission order
     // irrelevant -- any matrix inside these extents fits the reservation, so
-    // the accumulator never needs to know which one it is being handed.
+    // the accumulation matrix never needs to know which one it is being handed.
     const std::size_t headroom = ceil_log2(surveys.size() + 1) + 1;
     for (std::size_t j = 0; j < cols_; ++j) {
         bool any = false;
@@ -259,7 +262,7 @@ ColumnBlockMatrix::reserve_from_surveys(
 // it means the survey and the accumulate disagree, which is a bug. Either way
 // the sums are already wrong, so this reports rather than recovers.
 void
-ColumnBlockMatrix::report_contradiction(std::size_t j, unsigned flags) const
+AccumulationMatrix::report_contradiction(std::size_t j, unsigned flags) const
 {
     std::ostringstream os;
     os << "truesum: column " << j << " received values it was not sized for:";
@@ -269,12 +272,12 @@ ColumnBlockMatrix::report_contradiction(std::size_t j, unsigned flags) const
     }
     if (0 != (flags & kernels::kBadWidth)) os << " an addend past its width;";
     if (0 != (flags & kernels::kBadOverflow)) os << " a sum past its width;";
-    os << " the accumulator is no longer consistent";
+    os << " the accumulation matrix is no longer consistent";
     throw std::runtime_error(os.str());
 }
 
 void
-ColumnBlockMatrix::check_index(std::size_t i, std::size_t j) const
+AccumulationMatrix::check_index(std::size_t i, std::size_t j) const
 {
     if (i >= rows_ || j >= cols_) {
         throw std::out_of_range("truesum: matrix index out of range");
@@ -282,7 +285,7 @@ ColumnBlockMatrix::check_index(std::size_t i, std::size_t j) const
 }
 
 void
-ColumnBlockMatrix::rebuild_bases(Column &c)
+AccumulationMatrix::rebuild_bases(Column &c)
 {
     c.bases.resize(c.limbs.size());
     for (std::size_t k = 0; k < c.limbs.size(); ++k) {
@@ -291,7 +294,7 @@ ColumnBlockMatrix::rebuild_bases(Column &c)
 }
 
 void
-ColumnBlockMatrix::ensure_limb_count(Column &c, std::size_t needed)
+AccumulationMatrix::ensure_limb_count(Column &c, std::size_t needed)
 {
     if (c.limbs.size() >= needed) return;
 
@@ -308,7 +311,7 @@ ColumnBlockMatrix::ensure_limb_count(Column &c, std::size_t needed)
 }
 
 void
-ColumnBlockMatrix::fit_column(Column &c)
+AccumulationMatrix::fit_column(Column &c)
 {
     const std::size_t bits =
         c.max_addend_bits + ceil_log2(c.add_count + 1) + 1;  // +1 for the sign
@@ -316,7 +319,7 @@ ColumnBlockMatrix::fit_column(Column &c)
 }
 
 bool
-ColumnBlockMatrix::column_is_zero(const Column &c) const
+AccumulationMatrix::column_is_zero(const Column &c) const
 {
     for (const auto &lc : c.limbs) {
         const limb_t *p = lc.data();
@@ -328,7 +331,7 @@ ColumnBlockMatrix::column_is_zero(const Column &c) const
 }
 
 void
-ColumnBlockMatrix::rescale(Column &c, int new_exponent)
+AccumulationMatrix::rescale(Column &c, int new_exponent)
 {
     if (new_exponent >= c.exponent) return;
     const unsigned shift = static_cast<unsigned>(
@@ -364,12 +367,13 @@ ColumnBlockMatrix::rescale(Column &c, int new_exponent)
 }
 
 void
-ColumnBlockMatrix::accumulate(std::size_t i, std::size_t j, double v,
-                              bool negate, int log2_scale)
+AccumulationMatrix::accumulate(std::size_t i, std::size_t j, double v,
+                               bool negate, int log2_scale)
 {
     check_index(i, j);
     if (!std::isfinite(v)) {
-        throw std::domain_error("truesum: cannot accumulate a non-finite value");
+        throw std::domain_error(
+            "truesum: cannot accumulate a non-finite value");
     }
 
     const DoubleParts p = decompose(v);
@@ -377,7 +381,8 @@ ColumnBlockMatrix::accumulate(std::size_t i, std::size_t j, double v,
 
     const long long e64 = static_cast<long long>(p.exponent) + log2_scale;
     if (e64 < -kExponentLimit || e64 > kExponentLimit) {
-        throw std::domain_error("truesum: log2_scale puts the value out of range");
+        throw std::domain_error(
+            "truesum: log2_scale puts the value out of range");
     }
     const int e = static_cast<int>(e64);
 
@@ -401,50 +406,51 @@ ColumnBlockMatrix::accumulate(std::size_t i, std::size_t j, double v,
 }
 
 void
-ColumnBlockMatrix::add(std::size_t i, std::size_t j, double v)
+AccumulationMatrix::add(std::size_t i, std::size_t j, double v)
 {
     accumulate(i, j, v, false, 0);
 }
 
 void
-ColumnBlockMatrix::sub(std::size_t i, std::size_t j, double v)
+AccumulationMatrix::sub(std::size_t i, std::size_t j, double v)
 {
     accumulate(i, j, v, true, 0);
 }
 
 void
-ColumnBlockMatrix::add_matrix(const double *b, std::size_t row_stride)
+AccumulationMatrix::add_matrix(const double *b, std::size_t row_stride)
 {
     add_matrix_scaled_pow2(b, 0, row_stride);
 }
 
 void
-ColumnBlockMatrix::add_matrix_scaled_pow2(const double *b, int log2_scale,
-                                          std::size_t row_stride)
+AccumulationMatrix::add_matrix_scaled_pow2(const double *b, int log2_scale,
+                                           std::size_t row_stride)
 {
     accumulate_columns(b, 1, row_stride ? row_stride : cols_, log2_scale);
 }
 
 void
-ColumnBlockMatrix::add_matrix_col_major(const double *b, std::size_t col_stride)
+AccumulationMatrix::add_matrix_col_major(const double *b,
+                                         std::size_t col_stride)
 {
     add_matrix_col_major_scaled_pow2(b, 0, col_stride);
 }
 
 void
-ColumnBlockMatrix::add_matrix_col_major_scaled_pow2(const double *b,
-                                                    int log2_scale,
-                                                    std::size_t col_stride)
+AccumulationMatrix::add_matrix_col_major_scaled_pow2(const double *b,
+                                                     int log2_scale,
+                                                     std::size_t col_stride)
 {
     accumulate_columns(b, col_stride ? col_stride : rows_, 1, log2_scale);
 }
 
 void
-ColumnBlockMatrix::accumulate_column_range(const double *b,
-                                           std::size_t column_step,
-                                           std::size_t row_step, int log2_scale,
-                                           std::size_t begin, std::size_t end,
-                                           unsigned slot)
+AccumulationMatrix::accumulate_column_range(const double *b,
+                                            std::size_t column_step,
+                                            std::size_t row_step,
+                                            int log2_scale, std::size_t begin,
+                                            std::size_t end, unsigned slot)
 {
     std::vector<double> &staging = column_buffers_[slot];
     for (std::size_t j = begin; j < end; ++j) {
@@ -469,8 +475,8 @@ ColumnBlockMatrix::accumulate_column_range(const double *b,
 // rises monotonically, so each slot still gets a contiguous block and a
 // worker's columns stay near one another in memory.
 void
-ColumnBlockMatrix::partition_columns(std::size_t &begin, std::size_t &end,
-                                     unsigned slot) const
+AccumulationMatrix::partition_columns(std::size_t &begin, std::size_t &end,
+                                      unsigned slot) const
 {
     const unsigned n = threads();
     if (!symmetric_) {
@@ -500,8 +506,8 @@ ColumnBlockMatrix::partition_columns(std::size_t &begin, std::size_t &end,
 }
 
 void
-ColumnBlockMatrix::accumulate_columns(const double *b, std::size_t column_step,
-                                      std::size_t row_step, int log2_scale)
+AccumulationMatrix::accumulate_columns(const double *b, std::size_t column_step,
+                                       std::size_t row_step, int log2_scale)
 {
     if (0 == rows_ || 0 == cols_) return;
     if (presized_ && ++submitted_matrices_ > declared_matrices_) {
@@ -527,9 +533,9 @@ ColumnBlockMatrix::accumulate_columns(const double *b, std::size_t column_step,
 }
 
 void
-ColumnBlockMatrix::add_matrices_col_major(const double *const *b,
-                                          std::size_t count,
-                                          std::size_t col_stride)
+AccumulationMatrix::add_matrices_col_major(const double *const *b,
+                                           std::size_t count,
+                                           std::size_t col_stride)
 {
     if (0 == count) return;
     if (0 == rows_ || 0 == cols_) return;
@@ -556,9 +562,9 @@ ColumnBlockMatrix::add_matrices_col_major(const double *const *b,
 }
 
 void
-ColumnBlockMatrix::fold_column_range(const double *const *b, std::size_t count,
-                                     std::size_t col_stride, std::size_t begin,
-                                     std::size_t end)
+AccumulationMatrix::fold_column_range(const double *const *b, std::size_t count,
+                                      std::size_t col_stride, std::size_t begin,
+                                      std::size_t end)
 {
     // One pointer per matrix, rebuilt per column. Small and on the stack of
     // whichever worker is running, so the columns share nothing.
@@ -573,8 +579,8 @@ ColumnBlockMatrix::fold_column_range(const double *const *b, std::size_t count,
 }
 
 void
-ColumnBlockMatrix::fold_column(std::size_t j, const double *const *columns,
-                               std::size_t count)
+AccumulationMatrix::fold_column(std::size_t j, const double *const *columns,
+                                std::size_t count)
 {
     Column &c = cols_state_[j];
 
@@ -638,23 +644,24 @@ ColumnBlockMatrix::fold_column(std::size_t j, const double *const *columns,
 }
 
 void
-ColumnBlockMatrix::add_column(std::size_t j, const double *v)
+AccumulationMatrix::add_column(std::size_t j, const double *v)
 {
     add_column_scaled_pow2(j, v, 0);
 }
 
 void
-ColumnBlockMatrix::add_column_scaled_pow2(std::size_t j, const double *v,
-                                          int log2_scale)
+AccumulationMatrix::add_column_scaled_pow2(std::size_t j, const double *v,
+                                           int log2_scale)
 {
-    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
+    if (j >= cols_)
+        throw std::out_of_range("truesum: column index out of range");
     if (0 == cols_state_[j].rows) return;
     accumulate_column(j, v, log2_scale);
 }
 
 void
-ColumnBlockMatrix::accumulate_column(std::size_t j, const double *column,
-                                     int log2_scale)
+AccumulationMatrix::accumulate_column(std::size_t j, const double *column,
+                                      int log2_scale)
 {
     // First pass learns only the exponent range, because the rescale and widen
     // decisions have to be made before any value can be added.
@@ -682,7 +689,8 @@ ColumnBlockMatrix::accumulate_column(std::size_t j, const double *column,
     const kernels::Survey sc =
         kernels::survey()(column, c.rows, floor_exponent);
     if (sc.nonfinite) {
-        throw std::domain_error("truesum: cannot accumulate a non-finite value");
+        throw std::domain_error(
+            "truesum: cannot accumulate a non-finite value");
     }
     if (!sc.any) return;
 
@@ -693,7 +701,8 @@ ColumnBlockMatrix::accumulate_column(std::size_t j, const double *column,
         static_cast<long long>(sc.min_exponent) + log2_scale;
     const long long max_top = static_cast<long long>(sc.max_top) + log2_scale;
     if (min_exponent < -kExponentLimit || max_top > kExponentLimit) {
-        throw std::domain_error("truesum: log2_scale puts the value out of range");
+        throw std::domain_error(
+            "truesum: log2_scale puts the value out of range");
     }
 
     if (!c.initialized) {
@@ -722,7 +731,7 @@ ColumnBlockMatrix::accumulate_column(std::size_t j, const double *column,
 }
 
 void
-ColumnBlockMatrix::set_zero()
+AccumulationMatrix::set_zero()
 {
     for (auto &c : cols_state_) {
         for (auto &lc : c.limbs) {
@@ -734,7 +743,8 @@ ColumnBlockMatrix::set_zero()
 }
 
 std::vector<limb_t>
-ColumnBlockMatrix::magnitude(bool *negative, std::size_t i, std::size_t j) const
+AccumulationMatrix::magnitude(bool *negative, std::size_t i,
+                              std::size_t j) const
 {
     check_index(i, j);
     std::size_t col = 0, slot = 0;
@@ -760,7 +770,7 @@ ColumnBlockMatrix::magnitude(bool *negative, std::size_t i, std::size_t j) const
 }
 
 std::vector<limb_t>
-ColumnBlockMatrix::entry_limbs(std::size_t i, std::size_t j) const
+AccumulationMatrix::entry_limbs(std::size_t i, std::size_t j) const
 {
     check_index(i, j);
     std::size_t col = 0, slot = 0;
@@ -774,7 +784,7 @@ ColumnBlockMatrix::entry_limbs(std::size_t i, std::size_t j) const
 }
 
 bool
-ColumnBlockMatrix::is_zero(std::size_t i, std::size_t j) const
+AccumulationMatrix::is_zero(std::size_t i, std::size_t j) const
 {
     check_index(i, j);
     std::size_t col = 0, slot = 0;
@@ -869,14 +879,14 @@ residual_of(const std::vector<limb_t> &mag, long long exp, const Rounded &r)
 }  // namespace
 
 double
-ColumnBlockMatrix::to_double(std::size_t i, std::size_t j) const
+AccumulationMatrix::to_double(std::size_t i, std::size_t j) const
 {
     return to_double(nullptr, i, j);
 }
 
 double
-ColumnBlockMatrix::to_double(double *residual, std::size_t i,
-                             std::size_t j) const
+AccumulationMatrix::to_double(double *residual, std::size_t i,
+                              std::size_t j) const
 {
     bool neg = false;
     const std::vector<limb_t> mag = magnitude(&neg, i, j);
@@ -896,7 +906,7 @@ ColumnBlockMatrix::to_double(double *residual, std::size_t i,
 }
 
 void
-ColumnBlockMatrix::to_matrix(double *out, std::size_t row_stride) const
+AccumulationMatrix::to_matrix(double *out, std::size_t row_stride) const
 {
     const std::size_t stride = row_stride ? row_stride : cols_;
     for (std::size_t j = 0; j < cols_; ++j) {
@@ -907,8 +917,8 @@ ColumnBlockMatrix::to_matrix(double *out, std::size_t row_stride) const
 }
 
 void
-ColumnBlockMatrix::to_matrix_with_residual(double *out, double *residual,
-                                           std::size_t row_stride) const
+AccumulationMatrix::to_matrix_with_residual(double *out, double *residual,
+                                            std::size_t row_stride) const
 {
     const std::size_t stride = row_stride ? row_stride : cols_;
     for (std::size_t j = 0; j < cols_; ++j) {
@@ -920,7 +930,7 @@ ColumnBlockMatrix::to_matrix_with_residual(double *out, double *residual,
 }
 
 bool
-ColumnBlockMatrix::is_exactly_representable(std::size_t i, std::size_t j) const
+AccumulationMatrix::is_exactly_representable(std::size_t i, std::size_t j) const
 {
     bool neg = false;
     const std::vector<limb_t> mag = magnitude(&neg, i, j);
@@ -938,7 +948,7 @@ ColumnBlockMatrix::is_exactly_representable(std::size_t i, std::size_t j) const
 }
 
 std::string
-ColumnBlockMatrix::to_exact_decimal(std::size_t i, std::size_t j) const
+AccumulationMatrix::to_exact_decimal(std::size_t i, std::size_t j) const
 {
     bool neg = false;
     std::vector<limb_t> mag = magnitude(&neg, i, j);
@@ -985,9 +995,11 @@ ColumnBlockMatrix::to_exact_decimal(std::size_t i, std::size_t j) const
 }
 
 void
-ColumnBlockMatrix::reserve_column(std::size_t j, int exponent, std::size_t bits)
+AccumulationMatrix::reserve_column(std::size_t j, int exponent,
+                                   std::size_t bits)
 {
-    if (j >= cols_) throw std::out_of_range("truesum: column index out of range");
+    if (j >= cols_)
+        throw std::out_of_range("truesum: column index out of range");
     Column &c = cols_state_[j];
     if (!c.initialized) {
         c.exponent = exponent;
@@ -999,8 +1011,8 @@ ColumnBlockMatrix::reserve_column(std::size_t j, int exponent, std::size_t bits)
 }
 
 void
-ColumnBlockMatrix::reserve_for(const double *b, std::size_t count,
-                               std::size_t row_stride)
+AccumulationMatrix::reserve_for(const double *b, std::size_t count,
+                                std::size_t row_stride)
 {
     const std::size_t stride = row_stride ? row_stride : cols_;
     const std::size_t headroom = ceil_log2(std::max<std::size_t>(count, 1)) + 1;
@@ -1034,7 +1046,7 @@ ColumnBlockMatrix::reserve_for(const double *b, std::size_t count,
 }
 
 std::size_t
-ColumnBlockMatrix::memory_bytes() const
+AccumulationMatrix::memory_bytes() const
 {
     std::size_t total = sizeof(*this);
     for (const auto &c : cols_state_) {
@@ -1047,7 +1059,7 @@ ColumnBlockMatrix::memory_bytes() const
 }
 
 std::string
-ColumnBlockMatrix::describe() const
+AccumulationMatrix::describe() const
 {
     std::ostringstream os;
     os << rows_ << " x " << cols_ << " column-block fixed-point matrix (";

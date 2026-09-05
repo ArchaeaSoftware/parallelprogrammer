@@ -1,9 +1,9 @@
 // A fixed set of workers, parked between calls.
 //
-// Both accumulators want the same thing: run one function over a partition of
-// the columns and wait. Creating threads per call is not viable -- a batch is
-// often only a hundred microseconds, and thread creation is a real fraction of
-// that, measured at 2.73 Gelem/s against 4.64 for a pool.
+// Both accumulation matrices want the same thing: run one function over a
+// partition of the columns and wait. Creating threads per call is not viable --
+// a batch is often only a hundred microseconds, and thread creation is a real
+// fraction of that, measured at 2.73 Gelem/s against 4.64 for a pool.
 //
 // The calling thread takes slot 0 and runs its own share, so `n` threads means
 // n-1 workers and no handoff for the single-threaded case.

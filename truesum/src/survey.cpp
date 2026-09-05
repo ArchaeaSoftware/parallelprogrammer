@@ -32,7 +32,7 @@ survey_matrix(Survey *out, const double *b, std::size_t rows, std::size_t cols,
     const std::size_t stride = row_stride ? row_stride : cols;
     // The kernels want a contiguous column and a strided gather costs more
     // than the work it feeds, so each column is staged once -- the same
-    // trade the accumulator makes for row-major input.
+    // trade the accumulation matrix makes for row-major input.
     std::vector<double> column(rows);
     for (std::size_t j = 0; j < cols; ++j) {
         for (std::size_t i = 0; i < rows; ++i) column[i] = b[i * stride + j];

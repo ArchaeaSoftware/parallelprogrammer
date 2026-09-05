@@ -6,8 +6,8 @@
 // contiguous, which is what lets the vector and coalescing properties of the
 // limb-major layout survive being made triangular.
 //
-// Its own header so that both accumulators can name it without the CUDA one
-// having to include the CPU class it otherwise only forward-declares.
+// Its own header so that both accumulation matrices can name it without the
+// CUDA one having to include the CPU class it otherwise only forward-declares.
 #pragma once
 
 namespace truesum {

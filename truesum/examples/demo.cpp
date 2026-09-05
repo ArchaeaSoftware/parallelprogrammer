@@ -5,7 +5,7 @@
 #include <random>
 #include <vector>
 
-#include "truesum/column_accumulator.hpp"
+#include "truesum/accumulation_matrix.hpp"
 
 namespace {
 
@@ -50,7 +50,7 @@ main()
         batches.push_back(std::move(m));
     }
 
-    truesum::ColumnBlockMatrix exact(kRows, kCols);
+    truesum::AccumulationMatrix exact(kRows, kCols);
     exact.reserve_for(batches[0].data(), kBatches);
 
     std::vector<double> naive(kRows * kCols, 0.0);

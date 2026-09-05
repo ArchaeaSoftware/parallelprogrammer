@@ -279,8 +279,8 @@ accumulate_fold_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
         return q;
     };
 
-    // The one difference from accumulate_avx512: the accumulator lives in `v`
-    // for the whole fold rather than being loaded and stored per addend.
+    // The one difference from accumulate_avx512: the accumulation matrix lives
+    // in `v` for the whole fold rather than being loaded and stored per addend.
     const auto apply_reg = [&](const Addend8 &q, __m512i *v) {
         if (0 == q.m_live) return;
         __m512i v_carry = _mm512_setzero_si512();

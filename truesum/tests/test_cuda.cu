@@ -1,4 +1,4 @@
-// Cross-checks the device accumulator against the CPU one, bit for bit.
+// Cross-checks the device accumulation matrix against the CPU one, bit for bit.
 //
 // The two hold the same integer only if they agree about every step: the
 // IEEE-754 field extraction, the odd normalization, the limb offset, the
@@ -22,8 +22,8 @@
 #include <utility>
 #include <vector>
 
-#include "truesum/column_accumulator.hpp"
-#include "truesum/cuda_accumulator.hpp"
+#include "truesum/accumulation_matrix.hpp"
+#include "truesum/cuda_accumulation_matrix.hpp"
 
 namespace {
 
@@ -43,7 +43,7 @@ check(bool ok, const std::string &what)
 // The CPU container still takes ordinary memory, so this is a pass-through.
 // Having both overloads lets a cross-check read the same on either side.
 void
-submit(truesum::ColumnBlockMatrix &m, const std::vector<double> &v,
+submit(truesum::AccumulationMatrix &m, const std::vector<double> &v,
        std::size_t col_stride = 0)
 {
     m.add_matrix_col_major(v.data(), col_stride);
@@ -54,7 +54,7 @@ submit(truesum::ColumnBlockMatrix &m, const std::vector<double> &v,
 // It waits on the handle before the pinned buffer goes out of scope, which is
 // exactly the contract the API states rather than the library guessing at it.
 void
-submit(truesum::CudaColumnBlockMatrix &g, const std::vector<double> &v,
+submit(truesum::CudaAccumulationMatrix &g, const std::vector<double> &v,
        std::size_t col_stride = 0)
 {
     double *p = nullptr;
@@ -96,12 +96,12 @@ cross_check(const char *name, std::size_t rows, std::size_t cols, int nbatches,
         }
     }
 
-    truesum::ColumnBlockMatrix cpu(rows, cols);
+    truesum::AccumulationMatrix cpu(rows, cols);
     for (int b = 0; b < nbatches; ++b) {
         submit(cpu, batches[b]);
     }
 
-    truesum::CudaColumnBlockMatrix gpu(rows, cols);
+    truesum::CudaAccumulationMatrix gpu(rows, cols);
     gpu.reserve_like(cpu);
     for (int b = 0; b < nbatches; ++b) {
         submit(gpu, batches[b]);
@@ -232,7 +232,7 @@ test_occupancy()
             v[1 * rows + i] = (7 == i) ? -1.0 : 1.0;
             v[2 * rows + i] = -1.0;
         }
-        truesum::CudaColumnBlockMatrix gpu(rows, cols);
+        truesum::CudaAccumulationMatrix gpu(rows, cols);
         for (std::size_t j = 0; j < cols; ++j) gpu.reserve_column(j, 0, 256);
         submit(gpu, v);
         check(0 == gpu.column_occupancy(0), "occupancy: all positive, limb 0");
@@ -257,9 +257,9 @@ test_occupancy()
             for (auto &one : b) {
                 for (auto &x : one) x = random_value(spread);
             }
-            truesum::ColumnBlockMatrix cpu(rows, cols);
+            truesum::AccumulationMatrix cpu(rows, cols);
             for (auto &one : b) submit(cpu, one);
-            truesum::CudaColumnBlockMatrix gpu(rows, cols);
+            truesum::CudaAccumulationMatrix gpu(rows, cols);
             gpu.reserve_like(cpu);
             for (auto &one : b) submit(gpu, one);
 
@@ -303,8 +303,8 @@ test_reserve_for()
     // can grow on first use
     for (std::size_t i = 0; i < rows; ++i) batch[3 * rows + i] = 0.0;
 
-    truesum::ColumnBlockMatrix cpu(rows, cols);
-    truesum::CudaColumnBlockMatrix gpu(rows, cols);
+    truesum::AccumulationMatrix cpu(rows, cols);
+    truesum::CudaAccumulationMatrix gpu(rows, cols);
     gpu.reserve_for(batch.data(), nbatches);
 
     bool threw = false;
@@ -350,7 +350,7 @@ test_reserve_for()
         cudaMalloc(&dev, batch.size() * sizeof(double));
         cudaMemcpy(dev, batch.data(), batch.size() * sizeof(double),
                    cudaMemcpyHostToDevice);
-        truesum::CudaColumnBlockMatrix g2(rows, cols);
+        truesum::CudaAccumulationMatrix g2(rows, cols);
         g2.reserve_for_device(dev, nbatches);
         std::size_t differ = 0;
         for (std::size_t j = 0; j < cols; ++j) {
@@ -378,8 +378,8 @@ test_accumulated_bound()
     std::vector<double> b(rows * cols);
     for (std::size_t i = 0; i < rows; ++i) b[i] = std::ldexp(1.0, 60);
 
-    truesum::ColumnBlockMatrix cpu(rows, cols);
-    truesum::CudaColumnBlockMatrix gpu(rows, cols);
+    truesum::AccumulationMatrix cpu(rows, cols);
+    truesum::CudaAccumulationMatrix gpu(rows, cols);
     gpu.reserve_column(0, 0, 64);  // one limb, deliberately too narrow
 
     for (int k = 0; k < nbatches; ++k) {
@@ -414,8 +414,9 @@ test_accumulated_bound()
 // different exponents and widths: the device holds V * 2^egpu, the CPU
 // V * 2^ecpu, so the CPU's limbs shifted left by the difference must match.
 bool
-same_value(const truesum::ColumnBlockMatrix &cpu,
-           const truesum::CudaColumnBlockMatrix &gpu, std::size_t i, std::size_t j)
+same_value(const truesum::AccumulationMatrix &cpu,
+           const truesum::CudaAccumulationMatrix &gpu, std::size_t i,
+           std::size_t j)
 {
     const std::vector<std::uint64_t> h = cpu.entry_limbs(i, j);
     const std::vector<std::uint64_t> d = gpu.entry_limbs(i, j);
@@ -469,8 +470,8 @@ test_rescale()
         }
     }
 
-    truesum::ColumnBlockMatrix cpu(rows, cols);
-    truesum::CudaColumnBlockMatrix gpu(rows, cols);
+    truesum::AccumulationMatrix cpu(rows, cols);
+    truesum::CudaAccumulationMatrix gpu(rows, cols);
     // Deliberately sized for the first batch only, so every later batch
     // forces both a rescale and a widen.
     gpu.reserve_for(b[0].data(), 1);
@@ -496,8 +497,8 @@ test_rescale()
     // A shift that is a whole number of limbs, and one that is not, both
     // exercise the in-place walk differently.
     for (unsigned sh : {64u, 3u, 130u}) {
-        truesum::ColumnBlockMatrix c2(8, 1);
-        truesum::CudaColumnBlockMatrix g2(8, 1);
+        truesum::AccumulationMatrix c2(8, 1);
+        truesum::CudaAccumulationMatrix g2(8, 1);
         std::vector<double> hi(8), lo(8);
         for (std::size_t i = 0; i < 8; ++i) {
             hi[i] = std::ldexp(1.0 + i, 0);
@@ -517,10 +518,10 @@ test_rescale()
 }
 
 // Buffers borrowed from acquire_input are read in place by the kernel rather
-// than copied, so the accumulator has to know when the device has finished
-// with one before handing it back. Refilling a buffer the device is still
-// streaming corrupted about 63% of entries when the fast path was keyed on
-// the pointer's memory type instead of on ownership.
+// than copied, so the accumulation matrix has to know when the device has
+// finished with one before handing it back. Refilling a buffer the device is
+// still streaming corrupted about 63% of entries when the fast path was keyed
+// on the pointer's memory type instead of on ownership.
 void
 test_acquired_input()
 {
@@ -531,11 +532,11 @@ test_acquired_input()
     std::vector<double> data(n);
     for (auto &x : data) x = random_value(150);
 
-    truesum::ColumnBlockMatrix cpu(rows, cols);
+    truesum::AccumulationMatrix cpu(rows, cols);
     for (int b = 0; b < nbatches; ++b) submit(cpu, data);
 
     // Staged: the caller's buffer is copied, so it may be reused at once.
-    truesum::CudaColumnBlockMatrix staged(rows, cols);
+    truesum::CudaAccumulationMatrix staged(rows, cols);
     staged.reserve_like(cpu);
     {
         std::vector<double> buf(n);
@@ -548,7 +549,7 @@ test_acquired_input()
 
     // Borrowed: read in place, and acquire_input blocks until that is over.
     // The loop refills as fast as it can, which is the shape that raced.
-    truesum::CudaColumnBlockMatrix borrowed(rows, cols);
+    truesum::CudaAccumulationMatrix borrowed(rows, cols);
     borrowed.reserve_like(cpu);
     for (int b = 0; b < nbatches; ++b) {
         double *buf = borrowed.acquire_input();
@@ -575,11 +576,11 @@ test_errors()
 {
     // A non-finite value must be rejected by the survey, not silently added.
     {
-        truesum::ColumnBlockMatrix cpu(64, 2);
+        truesum::AccumulationMatrix cpu(64, 2);
         std::vector<double> ok(64 * 2, 1.0);
         submit(cpu, ok);
 
-        truesum::CudaColumnBlockMatrix gpu(64, 2);
+        truesum::CudaAccumulationMatrix gpu(64, 2);
         gpu.reserve_like(cpu);
         std::vector<double> bad = ok;
         bad[70] = std::nan("");
@@ -604,7 +605,7 @@ test_errors()
     // A column reserved at too high an exponent must be an error rather than
     // a silent loss of precision: rescaling is impossible mid-launch.
     {
-        truesum::CudaColumnBlockMatrix gpu(64, 1);
+        truesum::CudaAccumulationMatrix gpu(64, 1);
         gpu.reserve_column(0, 0, 128);  // exponent 2^0, so no fractions fit
         std::vector<double> v(64, 0.5);
         bool threw = false;
@@ -622,7 +623,7 @@ test_errors()
     // Only the exponent cannot be fixed after the fact, since that needs every
     // entry shifted rather than a limb appended.
     {
-        truesum::CudaColumnBlockMatrix gpu(64, 1);
+        truesum::CudaAccumulationMatrix gpu(64, 1);
         gpu.reserve_column(0, 0, 64);
         std::vector<double> v(64, std::ldexp(1.0, 100));
         bool threw = false;
@@ -637,7 +638,7 @@ test_errors()
 
     // Accumulating into a column that was never reserved.
     {
-        truesum::CudaColumnBlockMatrix gpu(64, 2);
+        truesum::CudaAccumulationMatrix gpu(64, 2);
         gpu.reserve_column(0, 0, 64);
         std::vector<double> v(64 * 2, 1.0);
         bool threw = false;
@@ -650,7 +651,7 @@ test_errors()
     }
 }
 
-// The same cross-check, on a triangular accumulator. Column j stores
+// The same cross-check, on a triangular accumulation matrix. Column j stores
 // column_rows(j) entries beginning at column_first_row(j), so both the
 // download and the host lookup have to be indexed through that rather than by
 // the matrix dimension.
@@ -671,12 +672,12 @@ cross_check_symmetric(const char *name, std::size_t n, truesum::Uplo uplo,
         }
     }
 
-    truesum::ColumnBlockMatrix cpu(n, uplo);
+    truesum::AccumulationMatrix cpu(n, uplo);
     for (int b = 0; b < nbatches; ++b) {
         submit(cpu, batches[b]);
     }
 
-    truesum::CudaColumnBlockMatrix gpu(n, uplo);
+    truesum::CudaAccumulationMatrix gpu(n, uplo);
     gpu.reserve_like(cpu);
     for (int b = 0; b < nbatches; ++b) {
         submit(gpu, batches[b]);
@@ -753,9 +754,9 @@ test_symmetric()
 
     // The shape itself, and half the device memory.
     {
-        truesum::CudaColumnBlockMatrix lo(256, truesum::Uplo::Lower);
-        truesum::CudaColumnBlockMatrix up(256, truesum::Uplo::Upper);
-        truesum::CudaColumnBlockMatrix full(256, 256);
+        truesum::CudaAccumulationMatrix lo(256, truesum::Uplo::Lower);
+        truesum::CudaAccumulationMatrix up(256, truesum::Uplo::Upper);
+        truesum::CudaAccumulationMatrix full(256, 256);
         bool shape_ok = lo.symmetric() && !full.symmetric();
         for (std::size_t j = 0; j < 256; ++j) {
             shape_ok = shape_ok && lo.column_rows(j) == 256 - j &&
@@ -765,11 +766,11 @@ test_symmetric()
         }
         check(shape_ok, "device triangular columns have the right extents");
 
-        truesum::ColumnBlockMatrix cpu(256, truesum::Uplo::Lower);
+        truesum::AccumulationMatrix cpu(256, truesum::Uplo::Lower);
         std::vector<double> v(256 * 256, 1.0);
         submit(cpu, v);
         lo.reserve_like(cpu);
-        full.reserve_like(truesum::ColumnBlockMatrix(256, 256));
+        full.reserve_like(truesum::AccumulationMatrix(256, 256));
         check(lo.memory_bytes() < full.memory_bytes(),
               "and cost less device memory than full storage");
     }
@@ -777,10 +778,10 @@ test_symmetric()
     // reserve_like has to refuse a mismatched shape: a triangular column is a
     // different length, so full-storage widths would size the wrong entries.
     {
-        truesum::ColumnBlockMatrix cpu_full(64, 64);
+        truesum::AccumulationMatrix cpu_full(64, 64);
         std::vector<double> v(64 * 64, 1.0);
         submit(cpu_full, v);
-        truesum::CudaColumnBlockMatrix gpu_sym(64, truesum::Uplo::Lower);
+        truesum::CudaAccumulationMatrix gpu_sym(64, truesum::Uplo::Lower);
         bool threw = false;
         try {
             gpu_sym.reserve_like(cpu_full);
@@ -789,9 +790,9 @@ test_symmetric()
         }
         check(threw, "reserve_like rejects a mismatched symmetry");
 
-        truesum::ColumnBlockMatrix cpu_lo(64, truesum::Uplo::Lower);
+        truesum::AccumulationMatrix cpu_lo(64, truesum::Uplo::Lower);
         submit(cpu_lo, v);
-        truesum::CudaColumnBlockMatrix gpu_up(64, truesum::Uplo::Upper);
+        truesum::CudaAccumulationMatrix gpu_up(64, truesum::Uplo::Upper);
         threw = false;
         try {
             gpu_up.reserve_like(cpu_lo);
@@ -803,9 +804,10 @@ test_symmetric()
 }
 
 // Surveys of a column-major batch, one entry per column, taken over exactly
-// the slice the accumulator will read.
+// the slice the accumulation matrix will read.
 std::vector<truesum::Survey>
-survey_batch(const std::vector<double> &b, const truesum::ColumnBlockMatrix &shape)
+survey_batch(const std::vector<double> &b,
+             const truesum::AccumulationMatrix &shape)
 {
     std::vector<truesum::Survey> out(shape.cols());
     for (std::size_t j = 0; j < shape.cols(); ++j) {
@@ -835,14 +837,14 @@ test_presized()
             for (auto &x : batches[b]) x = random_value(variant == 1 ? 300 : 8);
         }
 
-        truesum::ColumnBlockMatrix shape(rows, cols);
+        truesum::AccumulationMatrix shape(rows, cols);
         std::vector<std::vector<truesum::Survey>> surveys;
         for (int b = 0; b < nbatches; ++b) {
             surveys.push_back(survey_batch(batches[b], shape));
         }
 
-        truesum::ColumnBlockMatrix cpu(rows, cols, surveys);
-        truesum::CudaColumnBlockMatrix gpu(rows, cols, surveys);
+        truesum::AccumulationMatrix cpu(rows, cols, surveys);
+        truesum::CudaAccumulationMatrix gpu(rows, cols, surveys);
         for (int b = 0; b < nbatches; ++b) {
             submit(cpu, batches[b]);
             submit(gpu, batches[b]);
@@ -864,9 +866,10 @@ test_presized()
                 }
             }
         }
-        check(mismatches == 0, "presized device matches presized host, variant " +
-                                   std::to_string(variant) + ": " +
-                                   std::to_string(mismatches) + " mismatches");
+        check(mismatches == 0,
+              "presized device matches presized host, variant " +
+                  std::to_string(variant) + ": " + std::to_string(mismatches) +
+                  " mismatches");
     }
 
     // Symmetric and pre-sized together.
@@ -879,11 +882,12 @@ test_presized()
                 b[j * n + i] = b[i * n + j] = v;
             }
         }
-        truesum::ColumnBlockMatrix shape(n, truesum::Uplo::Lower);
-        std::vector<std::vector<truesum::Survey>> surveys{survey_batch(b, shape)};
+        truesum::AccumulationMatrix shape(n, truesum::Uplo::Lower);
+        std::vector<std::vector<truesum::Survey>> surveys{
+            survey_batch(b, shape)};
 
-        truesum::ColumnBlockMatrix cpu(n, truesum::Uplo::Lower, surveys);
-        truesum::CudaColumnBlockMatrix gpu(n, truesum::Uplo::Lower, surveys);
+        truesum::AccumulationMatrix cpu(n, truesum::Uplo::Lower, surveys);
+        truesum::CudaAccumulationMatrix gpu(n, truesum::Uplo::Lower, surveys);
         submit(cpu, b);
         submit(gpu, b);
 
@@ -912,10 +916,10 @@ test_presized()
     // The count is the one thing checked, because it costs nothing.
     {
         std::vector<double> v(64 * 2, 1.0);
-        truesum::ColumnBlockMatrix shape(64, 2);
-        std::vector<std::vector<truesum::Survey>> surveys{survey_batch(v, shape),
-                                                       survey_batch(v, shape)};
-        truesum::CudaColumnBlockMatrix gpu(64, 2, surveys);
+        truesum::AccumulationMatrix shape(64, 2);
+        std::vector<std::vector<truesum::Survey>> surveys{
+            survey_batch(v, shape), survey_batch(v, shape)};
+        truesum::CudaAccumulationMatrix gpu(64, 2, surveys);
         submit(gpu, v);
         submit(gpu, v);
         bool threw = false;
@@ -942,7 +946,7 @@ test_device_detector()
         std::vector<double> v(rows, 0.5);  // exponent -1
         truesum::Survey lie{0, 8, true, false};  // claims nothing below 2^0
         std::vector<std::vector<truesum::Survey>> surveys{{lie}};
-        truesum::CudaColumnBlockMatrix gpu(rows, 1, surveys);
+        truesum::CudaAccumulationMatrix gpu(rows, 1, surveys);
         submit(gpu, v);
         const unsigned f = gpu.column_contradictions(0);
         check(0 != (f & 2u), "a too-low exponent is detected");
@@ -961,7 +965,7 @@ test_device_detector()
         std::vector<double> v(rows, std::ldexp(1.0, 300));
         truesum::Survey lie{0, 8, true, false};
         std::vector<std::vector<truesum::Survey>> surveys{{lie}};
-        truesum::CudaColumnBlockMatrix gpu(rows, 1, surveys);
+        truesum::CudaAccumulationMatrix gpu(rows, 1, surveys);
         submit(gpu, v);
         check(0 != (gpu.column_contradictions(0) & 4u),
               "an addend past the width is detected");
@@ -973,7 +977,7 @@ test_device_detector()
         v[rows / 2] = std::numeric_limits<double>::infinity();
         truesum::Survey ok{0, 8, true, false};
         std::vector<std::vector<truesum::Survey>> surveys{{ok}};
-        truesum::CudaColumnBlockMatrix gpu(rows, 1, surveys);
+        truesum::CudaAccumulationMatrix gpu(rows, 1, surveys);
         submit(gpu, v);
         check(0 != (gpu.column_contradictions(0) & 1u),
               "a non-finite value is detected");
@@ -985,7 +989,7 @@ test_device_detector()
         std::vector<double> v(rows, std::ldexp(1.0, 62));
         truesum::Survey lie{0, 60, true, false};
         std::vector<std::vector<truesum::Survey>> surveys{{lie}, {lie}, {lie}};
-        truesum::CudaColumnBlockMatrix gpu(rows, 1, surveys);
+        truesum::CudaAccumulationMatrix gpu(rows, 1, surveys);
         submit(gpu, v);
         check(0 == gpu.column_contradictions(0), "2^62 fits a 63-bit column");
         submit(gpu, v);
@@ -1001,7 +1005,7 @@ test_device_detector()
             std::ldexp(static_cast<double>((std::uint64_t{1} << 53) - 1), 20));
         truesum::Survey lie{0, 8, true, false};
         std::vector<std::vector<truesum::Survey>> surveys{{lie}};
-        truesum::CudaColumnBlockMatrix gpu(rows, 1, surveys);
+        truesum::CudaAccumulationMatrix gpu(rows, 1, surveys);
         submit(gpu, v);
         check(0 != (gpu.column_contradictions(0) & 4u),
               "an addend reaching the sign bit is detected");
@@ -1012,9 +1016,10 @@ test_device_detector()
     {
         std::vector<double> v(rows * 3);
         for (auto &x : v) x = random_value(6);
-        truesum::ColumnBlockMatrix shape(rows, 3);
-        std::vector<std::vector<truesum::Survey>> surveys{survey_batch(v, shape)};
-        truesum::CudaColumnBlockMatrix gpu(rows, 3, surveys);
+        truesum::AccumulationMatrix shape(rows, 3);
+        std::vector<std::vector<truesum::Survey>> surveys{
+            survey_batch(v, shape)};
+        truesum::CudaAccumulationMatrix gpu(rows, 3, surveys);
         submit(gpu, v);
         gpu.synchronize();  // must not throw
         bool clean = true;
@@ -1035,11 +1040,11 @@ test_in_place_input()
     for (auto &x : host) x = random_value(10);
 
     // The reference: the same batches through the staging path.
-    truesum::ColumnBlockMatrix cpu(rows, cols);
+    truesum::AccumulationMatrix cpu(rows, cols);
     submit(cpu, host);
     submit(cpu, host);
 
-    truesum::CudaColumnBlockMatrix staged(rows, cols);
+    truesum::CudaAccumulationMatrix staged(rows, cols);
     staged.reserve_like(cpu);
     submit(staged, host);
     submit(staged, host);
@@ -1050,11 +1055,12 @@ test_in_place_input()
           "pinned mapped allocation succeeds");
     std::memcpy(pinned, host.data(), n * sizeof(double));
 
-    truesum::CudaColumnBlockMatrix in_place(rows, cols);
+    truesum::CudaAccumulationMatrix in_place(rows, cols);
     in_place.reserve_like(cpu);
     truesum::InputRead r1 = in_place.add_matrix_col_major(pinned);
     // The buffer must not be rewritten until the handle clears; wait, then
-    // resubmit the same contents so the two accumulators see the same batches.
+    // resubmit the same contents so the two accumulation matrices see the same
+    // batches.
     r1.wait();
     check(r1.ready(), "the handle reports ready once waited on");
     truesum::InputRead r2 = in_place.add_matrix_col_major(pinned);
@@ -1075,7 +1081,7 @@ test_in_place_input()
                                std::to_string(mismatches) + " mismatches");
 
     // A default-constructed handle is already clear, and so is one from an
-    // empty accumulator.
+    // empty accumulation matrix.
     {
         truesum::InputRead none;
         check(none.ready(), "a default handle is ready");
@@ -1096,7 +1102,7 @@ test_in_place_input()
 
     // Pageable memory is refused rather than left to fault in the kernel.
     {
-        truesum::CudaColumnBlockMatrix g(rows, cols);
+        truesum::CudaAccumulationMatrix g(rows, cols);
         g.reserve_like(cpu);
         bool threw = false;
         try {
@@ -1108,11 +1114,12 @@ test_in_place_input()
         }
         check(threw, "pageable input is rejected, not copied");
 
-        // And the accumulator is still usable afterwards, so the check is a
-        // rejection and not a wound.
+        // And the accumulation matrix is still usable afterwards, so the check
+        // is a rejection and not a wound.
         submit(g, host);
         g.synchronize();
-        check(g.column_limbs(0) >= 1, "the accumulator survives the rejection");
+        check(g.column_limbs(0) >= 1,
+              "the accumulation matrix survives the rejection");
     }
 
     // Registered rather than allocated: cudaHostRegister is the other way to
@@ -1122,9 +1129,9 @@ test_in_place_input()
         for (auto &x : own) x = random_value(6);
         if (cudaSuccess == cudaHostRegister(own.data(), n * sizeof(double),
                                             cudaHostRegisterMapped)) {
-            truesum::ColumnBlockMatrix c2(rows, cols);
+            truesum::AccumulationMatrix c2(rows, cols);
             submit(c2, own);
-            truesum::CudaColumnBlockMatrix g(rows, cols);
+            truesum::CudaAccumulationMatrix g(rows, cols);
             g.reserve_like(c2);
             truesum::InputRead r = g.add_matrix_col_major(own.data());
             r.wait();
@@ -1164,9 +1171,9 @@ test_device_fold()
             for (auto &x : v) x = random_value(spread);
 
         // Sequential reference, one matrix per launch.
-        truesum::ColumnBlockMatrix cpu(rows, cols);
+        truesum::AccumulationMatrix cpu(rows, cols);
         for (auto &v : batches) submit(cpu, v);
-        truesum::CudaColumnBlockMatrix seq(rows, cols);
+        truesum::CudaAccumulationMatrix seq(rows, cols);
         seq.reserve_like(cpu);
 
         std::vector<double *> dev(count);
@@ -1180,7 +1187,7 @@ test_device_fold()
         }
         seq.synchronize();
 
-        truesum::CudaColumnBlockMatrix fold(rows, cols);
+        truesum::CudaAccumulationMatrix fold(rows, cols);
         fold.reserve_like(cpu);
         fold.add_matrices_col_major_device(devc.data(), count);
         fold.synchronize();
@@ -1200,9 +1207,9 @@ test_device_fold()
         for (auto *p : dev) cudaFree(p);
     }
 
-    // An adaptively sized accumulator has to survey every matrix and fit once
-    // before adding any of them, or a widen partway through would leave the
-    // earlier ones written into a column of the wrong shape.
+    // An adaptively sized accumulation matrix has to survey every matrix and
+    // fit once before adding any of them, or a widen partway through would
+    // leave the earlier ones written into a column of the wrong shape.
     {
         const std::size_t rows = 512, cols = 4, count = 3;
         std::vector<std::vector<double>> batches(
@@ -1211,7 +1218,7 @@ test_device_fold()
             for (auto &x : batches[k])
                 x = std::ldexp(1.0 + (double)(rng() % 100), -40 * (int)k);
 
-        truesum::ColumnBlockMatrix cpu(rows, cols);
+        truesum::AccumulationMatrix cpu(rows, cols);
         for (auto &v : batches) submit(cpu, v);
 
         std::vector<double *> dev(count);
@@ -1224,7 +1231,7 @@ test_device_fold()
         }
         // Reserved wide enough only for the first matrix, so the fold must
         // widen and lower the exponent from the aggregate of all three.
-        truesum::CudaColumnBlockMatrix g(rows, cols);
+        truesum::CudaAccumulationMatrix g(rows, cols);
         for (std::size_t j = 0; j < cols; ++j) g.reserve_column(j, 0, 64);
         g.add_matrices_col_major_device(devc.data(), count);
         g.synchronize();
@@ -1248,10 +1255,10 @@ test_device_fold()
 
     // More than the parameter block holds is an error, not a silent truncation.
     {
-        truesum::ColumnBlockMatrix cpu(64, 2);
+        truesum::AccumulationMatrix cpu(64, 2);
         std::vector<double> v(64 * 2, 1.0);
         submit(cpu, v);
-        truesum::CudaColumnBlockMatrix g(64, 2);
+        truesum::CudaAccumulationMatrix g(64, 2);
         g.reserve_like(cpu);
         double *d = nullptr;
         cudaMalloc(&d, 64 * 2 * sizeof(double));
@@ -1268,9 +1275,9 @@ test_device_fold()
 }
 
 // The pattern the device path exists for: a producer cycling device buffers,
-// filling one while the accumulator reads another. The handle is what makes it
-// possible to wait for the one buffer about to be overwritten instead of
-// draining the whole stream.
+// filling one while the accumulation matrix reads another. The handle is what
+// makes it possible to wait for the one buffer about to be overwritten instead
+// of draining the whole stream.
 void
 test_device_ping_pong()
 {
@@ -1281,14 +1288,14 @@ test_device_ping_pong()
     for (auto &v : host)
         for (auto &x : v) x = random_value(10);
 
-    truesum::ColumnBlockMatrix cpu(rows, cols);
+    truesum::AccumulationMatrix cpu(rows, cols);
     for (auto &v : host) submit(cpu, v);
 
     // Two device buffers in rotation, which is all a real producer would keep.
     double *buf[2] = {nullptr, nullptr};
     for (int i = 0; i < 2; ++i) cudaMalloc(&buf[i], n * sizeof(double));
 
-    truesum::CudaColumnBlockMatrix g(rows, cols);
+    truesum::CudaAccumulationMatrix g(rows, cols);
     g.reserve_like(cpu);
     truesum::InputRead h[2];
     for (int r = 0; r < batches; ++r) {
@@ -1332,16 +1339,18 @@ test_device_ping_pong()
         cudaMemset(buf[1], 0xFF, n * sizeof(double));
         cudaDeviceSynchronize();
         check(g.download_column(0) == before,
-              "overwriting a cleared buffer does not disturb the accumulator");
+              "overwriting a cleared buffer does not disturb the accumulation "
+              "matrix");
     }
 
     for (int i = 0; i < 2; ++i) cudaFree(buf[i]);
 }
 
 // Zeroing a freshly reserved column is deferred to the first launch or
-// readback, so that a whole pre-sized accumulator is zeroed in one kernel
-// rather than one cudaMemsetAsync per limb position. A reader must not be able
-// to see that: the limbs read as zero whether or not anything has been added.
+// readback, so that a whole pre-sized accumulation matrix is zeroed in one
+// kernel rather than one cudaMemsetAsync per limb position. A reader must not
+// be able to see that: the limbs read as zero whether or not anything has been
+// added.
 void
 test_deferred_zeroing()
 {
@@ -1350,7 +1359,7 @@ test_deferred_zeroing()
     // Read back before anything is accumulated -- the readback path has to
     // settle the pending zeroing itself.
     {
-        truesum::CudaColumnBlockMatrix g(rows, cols);
+        truesum::CudaAccumulationMatrix g(rows, cols);
         for (std::size_t j = 0; j < cols; ++j) g.reserve_column(j, 0, 256);
         bool zero = true;
         for (std::size_t j = 0; j < cols; ++j) {
@@ -1375,9 +1384,9 @@ test_deferred_zeroing()
                 v[j * rows + i] = (j == 2) ? 0.0 : random_value(6);
             }
         }
-        truesum::ColumnBlockMatrix cpu(rows, cols);
+        truesum::AccumulationMatrix cpu(rows, cols);
         submit(cpu, v);
-        truesum::CudaColumnBlockMatrix g(rows, cols);
+        truesum::CudaAccumulationMatrix g(rows, cols);
         g.reserve_like(cpu);
         submit(g, v);
         g.synchronize();
@@ -1403,7 +1412,7 @@ test_deferred_zeroing()
 
 // The device survey has to agree with the host one field for field, or a
 // producer computing it on whichever side its data happens to be on would
-// size an accumulator differently depending on where the survey ran.
+// size an accumulation matrix differently depending on where the survey ran.
 void
 test_device_survey()
 {
@@ -1461,13 +1470,14 @@ test_device_survey()
         check(threw, "a pageable output pointer is rejected");
     }
 
-    // A survey taken on the device must size an accumulator the same way one
-    // taken on the host does -- which is the whole point of sending it ahead.
+    // A survey taken on the device must size an accumulation matrix the same
+    // way one taken on the host does -- which is the whole point of sending it
+    // ahead.
     {
         std::vector<std::vector<truesum::Survey>> from_dev{device};
         std::vector<std::vector<truesum::Survey>> from_host{host};
-        truesum::ColumnBlockMatrix a(rows, cols, from_dev);
-        truesum::ColumnBlockMatrix b(rows, cols, from_host);
+        truesum::AccumulationMatrix a(rows, cols, from_dev);
+        truesum::AccumulationMatrix b(rows, cols, from_host);
         bool same = true;
         for (std::size_t j = 0; j < cols; ++j) {
             same = same && a.column_exponent(j) == b.column_exponent(j) &&
@@ -1487,7 +1497,8 @@ test_device_survey()
         // Mapped pinned output: the other kind of memory the device can
         // write, and how a caller asks for the answer on the host.
         truesum::Survey *mapped = nullptr;
-        cudaHostAlloc(&mapped, 2 * sizeof(truesum::Survey), cudaHostAllocMapped);
+        cudaHostAlloc(&mapped, 2 * sizeof(truesum::Survey),
+                      cudaHostAllocMapped);
         truesum::survey_matrix_col_major_device(mapped, d2, rows, 2);
         check(!mapped[0].nonfinite && mapped[1].nonfinite,
               "the device survey flags a non-finite column and only that one");

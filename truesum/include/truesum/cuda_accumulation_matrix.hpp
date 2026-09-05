@@ -1,4 +1,4 @@
-// Device-resident sibling of ColumnBlockMatrix.
+// Device-resident sibling of AccumulationMatrix.
 //
 // This is deliberately not a third kernel variant behind the CPU's dispatch.
 // Swapping a CPU kernel leaves the memory and the object identical, so that is
@@ -32,14 +32,14 @@
 // cuda_runtime.h so this header stays usable from a plain C++ translation unit
 // with no CUDA toolkit headers on its include path -- only the link needs
 // cudart. cudaStream_t and cudaEvent_t are exactly these pointer types, and
-// cuda_accumulator.cu static_asserts as much, so drift would be a compile
-// error rather than a silent one.
+// cuda_accumulation_matrix.cu static_asserts as much, so drift would be a
+// compile error rather than a silent one.
 struct CUstream_st;
 struct CUevent_st;
 
 namespace truesum {
 
-class ColumnBlockMatrix;
+class AccumulationMatrix;
 
 // True if a CUDA device is present and usable. Everything below throws
 // std::runtime_error if it is not.
@@ -76,7 +76,7 @@ public:
     bool ready() const;
 
 private:
-    friend class CudaColumnBlockMatrix;
+    friend class CudaAccumulationMatrix;
     explicit InputRead(CUevent_st *ev) : ev_(ev) {}
     CUevent_st *ev_ = nullptr;
 };
@@ -106,11 +106,11 @@ survey_matrix_col_major_device(Survey *out, const double *b,
                                std::size_t rows, std::size_t cols,
                                std::size_t col_stride = 0);
 
-class CudaColumnBlockMatrix {
+class CudaAccumulationMatrix {
 public:
-    CudaColumnBlockMatrix(std::size_t rows, std::size_t cols);
+    CudaAccumulationMatrix(std::size_t rows, std::size_t cols);
 
-    // Symmetric n x n, storing one triangle, exactly as ColumnBlockMatrix
+    // Symmetric n x n, storing one triangle, exactly as AccumulationMatrix
     // does. Column j holds n-j entries (Lower) or j+1 (Upper), and each
     // column's stored rows stay contiguous, so a warp still reads 32
     // consecutive rows of one limb column as a single coalesced access.
@@ -118,10 +118,10 @@ public:
     // The kernels read only the stored slice of an input matrix, so the
     // bytes crossing PCIe halve along with the device memory. The input is
     // taken to be symmetric and that is not checked.
-    CudaColumnBlockMatrix(std::size_t n, Uplo uplo);
+    CudaAccumulationMatrix(std::size_t n, Uplo uplo);
 
     // Pre-sized from the surveys of every matrix that will be accumulated,
-    // exactly as ColumnBlockMatrix is: `surveys` is indexed by matrix and
+    // exactly as AccumulationMatrix is: `surveys` is indexed by matrix and
     // then by column, so its outer size is how many will arrive.
     //
     // This buys more here than on the CPU. The device path's survey is a
@@ -134,18 +134,18 @@ public:
     // The metadata is taken on trust. A batch that contradicts it is
     // detected by the accumulate kernel rather than prevented, and reported
     // at the next synchronization -- see column_contradictions().
-    CudaColumnBlockMatrix(std::size_t rows, std::size_t cols,
-                          const std::vector<std::vector<Survey>> &surveys);
+    CudaAccumulationMatrix(std::size_t rows, std::size_t cols,
+                           const std::vector<std::vector<Survey>> &surveys);
 
-    CudaColumnBlockMatrix(std::size_t n, Uplo uplo,
-                          const std::vector<std::vector<Survey>> &surveys);
+    CudaAccumulationMatrix(std::size_t n, Uplo uplo,
+                           const std::vector<std::vector<Survey>> &surveys);
 
     // Declared, not implicit: the worker pool is held by unique_ptr to an
     // incomplete type, so the destructor must be defined where that is.
-    ~CudaColumnBlockMatrix();
+    ~CudaAccumulationMatrix();
 
-    CudaColumnBlockMatrix(const CudaColumnBlockMatrix &) = delete;
-    CudaColumnBlockMatrix &operator=(const CudaColumnBlockMatrix &) = delete;
+    CudaAccumulationMatrix(const CudaAccumulationMatrix &) = delete;
+    CudaAccumulationMatrix &operator=(const CudaAccumulationMatrix &) = delete;
 
     std::size_t rows() const { return rows_; }
 
@@ -168,17 +168,17 @@ public:
     // May be called once per column, before anything is accumulated into it.
     void reserve_column(std::size_t j, int exponent, std::size_t bits);
 
-    // Take every column's scale and width from a CPU accumulator that has
-    // already seen the data. This is the natural way to drive the device path
-    // and what makes the two directly comparable: given the same exponent and
-    // width, both must hold bit-identical limbs.
-    void reserve_like(const ColumnBlockMatrix &cpu);
+    // Take every column's scale and width from a CPU accumulation matrix that
+    // has already seen the data. This is the natural way to drive the device
+    // path and what makes the two directly comparable: given the same exponent
+    // and width, both must hold bit-identical limbs.
+    void reserve_like(const AccumulationMatrix &cpu);
 
     // Pre-size every column from a representative batch about to be
     // accumulated `count` times, the same arithmetic as
-    // ColumnBlockMatrix::reserve_for. This is what lets the device container
-    // stand on its own: reserve_like needs a CPU accumulator that has already
-    // seen the data, which means doing the whole computation twice.
+    // AccumulationMatrix::reserve_for. This is what lets the device container
+    // stand on its own: reserve_like needs a CPU accumulation matrix that has
+    // already seen the data, which means doing the whole computation twice.
     //
     // `b` is column-major on the host. A column that is entirely zero still
     // gets a minimal reservation, because an unreserved column is an error
@@ -204,9 +204,9 @@ public:
     // caller refilling it would be writing under the device. Measured, doing
     // so corrupts about 63% of entries.
     //
-    // The buffer belongs to the accumulator and stays valid until the next
-    // acquire_input. Ordinary host memory still works everywhere and is staged
-    // through the same buffers; this only removes that copy.
+    // The buffer belongs to the accumulation matrix and stays valid until the
+    // next acquire_input. Ordinary host memory still works everywhere and is
+    // staged through the same buffers; this only removes that copy.
     double *acquire_input();
 
     // --- accumulation ------------------------------------------------------
@@ -233,13 +233,13 @@ public:
     InputRead add_matrix_col_major(const double *b, std::size_t col_stride = 0);
 
     // A += B[0] + ... + B[count-1], all already resident in device memory, in
-    // a single pass over the accumulator.
+    // a single pass over the accumulation matrix.
     //
     // Identical results to submitting them one at a time. What changes is
     // traffic, and on this target that is the whole game: the accumulate is
     // bandwidth-bound at 97-99% of the card's streaming rate, moving ~8 bytes
-    // of input and ~16*nlimbs of accumulator per element. Folding turns that
-    // into 8*count + 16*nlimbs, because every matrix's addend lands in the
+    // of input and ~16*nlimbs of accumulation matrix per element. Folding turns
+    // that into 8*count + 16*nlimbs, because every matrix's addend lands in the
     // same limbs of the same row and L1 absorbs the repeats.
     //
     // Blocked over the input set rather than held in registers on purpose. A
@@ -258,15 +258,15 @@ public:
     // A += B, for B already resident in device memory.
     //
     // The returned handle is what lets a producer cycle device buffers: fill
-    // one while the accumulator reads another, wait on the handle for the one
-    // about to be overwritten, and never synchronize the stream. Without it a
-    // caller's only recourse is synchronize(), which drains everything and
-    // gives up exactly the overlap a rotation exists for.
+    // one while the accumulation matrix reads another, wait on the handle for
+    // the one about to be overwritten, and never synchronize the stream.
+    // Without it a caller's only recourse is synchronize(), which drains
+    // everything and gives up exactly the overlap a rotation exists for.
     //
-    // **Fill on your own stream, not the default one.** This accumulator's
-    // stream is a blocking stream, so it implicitly synchronizes with the
-    // legacy null stream: a producer using cudaMemcpy (or anything else on the
-    // null stream) serializes against the accumulate and gets no overlap at
+    // **Fill on your own stream, not the default one.** This accumulation
+    // matrix's stream is a blocking stream, so it implicitly synchronizes with
+    // the legacy null stream: a producer using cudaMemcpy (or anything else on
+    // the null stream) serializes against the accumulate and gets no overlap at
     // all. Measured at 65536x64, a two-buffer rotation costs 1776 us a batch
     // that way and 1301 us with the producer on its own stream, against 1256
     // for the fill alone -- so the accumulate is 96% hidden when the streams
@@ -301,7 +301,7 @@ public:
     std::size_t column_limbs(std::size_t j) const;
 
     // Entry (i, j)'s stored two's complement limbs, copied back from the
-    // device. The counterpart of ColumnBlockMatrix::entry_limbs.
+    // device. The counterpart of AccumulationMatrix::entry_limbs.
     std::vector<limbs::limb_t> entry_limbs(std::size_t i, std::size_t j) const;
 
     // Column j's limb arrays in bulk: out[k*rows() + i] is entry i's k-th
@@ -334,7 +334,7 @@ private:
         std::vector<limbs::limb_t *> bases;
         limbs::limb_t **dev_bases = nullptr;  // the same array, device-side
 
-        // The same derived width bound ColumnBlockMatrix keeps, and for the
+        // The same derived width bound AccumulationMatrix keeps, and for the
         // same reason: no entry can exceed count * 2^max_addend_bits, so that
         // bound plus a sign bit says how wide the column must be. Checking
         // only the incoming addend is not enough -- an addend does not grow
@@ -357,9 +357,9 @@ private:
     // copy of it: the kernel reads host memory directly. Measured at 65536x64,
     // copying 33.6 MB and then reading it from device memory takes 1768 us,
     // while reading it in place takes 1257 -- exactly what the transfer alone
-    // costs, so the accumulator work hides entirely behind the bus. That only
-    // holds because the input is read once: the host survey is what means the
-    // device never needs a second look at it.
+    // costs, so the accumulation matrix work hides entirely behind the bus.
+    // That only holds because the input is read once: the host survey is what
+    // means the device never needs a second look at it.
     struct Slot {
         double *mapped = nullptr;
         CUevent_st *ev_done = nullptr;  // last kernel to read it finished
@@ -394,8 +394,8 @@ private:
     void ensure_slots(std::size_t words);
     // Zeroes every limb array reserved since the last flush, in one launch.
     // Const because it settles deferred work rather than changing what the
-    // accumulator holds -- the limbs read as zero either way, and readback
-    // paths are const and must be able to settle it.
+    // accumulation matrix holds -- the limbs read as zero either way, and
+    // readback paths are const and must be able to settle it.
     void flush_pending_zero() const;
 
     std::size_t rows_;
@@ -442,8 +442,8 @@ private:
     // allocation per limb position, and zeroing each with its own
     // cudaMemsetAsync costs far more than one kernel over all of them: at 512
     // arrays, 827 us of memsets against 59 for a single launch. Deferred to
-    // the first launch or readback so a whole pre-sized accumulator is zeroed
-    // at once, which is where the count is largest.
+    // the first launch or readback so a whole pre-sized accumulation matrix is
+    // zeroed at once, which is where the count is largest.
     mutable std::vector<limbs::limb_t *> zero_ptr_;
     mutable std::vector<std::size_t> zero_rows_;
     mutable void *zero_targets_ = nullptr;  // device ZeroTarget[]

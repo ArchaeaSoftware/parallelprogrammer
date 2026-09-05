@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "truesum/column_accumulator.hpp"
+#include "truesum/accumulation_matrix.hpp"
 #include "truesum/survey.hpp"
 
 namespace {
@@ -124,7 +124,7 @@ test_single_value_roundtrip()
     };
 
     for (double v : values) {
-        truesum::ColumnBlockMatrix m(1, 1);
+        truesum::AccumulationMatrix m(1, 1);
         m.add(0, 0, v);
         // -0.0 accumulates as an exact zero; the sign of zero is not tracked.
         const double want = (v == 0.0) ? 0.0 : v;
@@ -143,7 +143,7 @@ test_catastrophic_cancellation()
     for (double t : terms) naive += t;
     CHECK_DOUBLE(naive, 0.0);
 
-    truesum::ColumnBlockMatrix m(1, 1);
+    truesum::AccumulationMatrix m(1, 1);
     for (double t : terms) m.add(0, 0, t);
     CHECK_DOUBLE(m.to_double(0, 0), 1.0);
     CHECK_STR(m.to_exact_decimal(0, 0), "1");
@@ -155,7 +155,7 @@ test_repeated_tenth()
     // double(0.1) is exactly 3602879701896397 * 2^-55, so ten of them sum to
     // exactly 1 + 2^-54 -- a quarter ulp above 1, which rounds back to 1.0.
     // Naive summation instead drifts one ulp below.
-    truesum::ColumnBlockMatrix m(1, 1);
+    truesum::AccumulationMatrix m(1, 1);
     double naive = 0.0;
     for (int i = 0; i < 10; ++i) {
         m.add(0, 0, 0.1);
@@ -170,7 +170,7 @@ test_repeated_tenth()
 void
 test_exact_decimal()
 {
-    truesum::ColumnBlockMatrix m(1, 4);
+    truesum::AccumulationMatrix m(1, 4);
     m.add(0, 0, 0.1);
     CHECK_STR(m.to_exact_decimal(0, 0),
               "0.1000000000000000055511151231257827021181583404541015625");
@@ -192,7 +192,7 @@ test_exact_decimal()
 void
 test_exponent_and_width_tracking()
 {
-    truesum::ColumnBlockMatrix m(1, 1);
+    truesum::AccumulationMatrix m(1, 1);
     m.add(0, 0, 1.0);
     CHECK(m.column_exponent(0) == 0);
 
@@ -219,7 +219,7 @@ void
 test_full_double_range()
 {
     // Span the entire binade range in a single column: 2^-1074 up to 2^1023.
-    truesum::ColumnBlockMatrix m(1, 1);
+    truesum::AccumulationMatrix m(1, 1);
     m.add(0, 0, std::ldexp(1.0, 1023));
     m.add(0, 0, std::numeric_limits<double>::denorm_min());
     CHECK(m.column_bit_width(0) >= 1024 + 1074);
@@ -239,20 +239,20 @@ test_rounding_ties_to_even()
 {
     {  // 1 + 2^-53 is exactly halfway between 1 and nextafter(1); ties to
        // even.
-        truesum::ColumnBlockMatrix m(1, 1);
+        truesum::AccumulationMatrix m(1, 1);
         m.add(0, 0, 1.0);
         m.add(0, 0, std::ldexp(1.0, -53));
         CHECK_DOUBLE(m.to_double(0, 0), 1.0);
     }
     {  // One bit above the tie rounds up.
-        truesum::ColumnBlockMatrix m(1, 1);
+        truesum::AccumulationMatrix m(1, 1);
         m.add(0, 0, 1.0);
         m.add(0, 0, std::ldexp(1.0, -53));
         m.add(0, 0, std::ldexp(1.0, -105));
         CHECK_DOUBLE(m.to_double(0, 0), std::nextafter(1.0, 2.0));
     }
     {  // Tie with an odd mantissa rounds up (to even).
-        truesum::ColumnBlockMatrix m(1, 1);
+        truesum::AccumulationMatrix m(1, 1);
         const double odd = std::nextafter(1.0, 2.0);  // 1 + 2^-52
         m.add(0, 0, odd);
         m.add(0, 0, std::ldexp(1.0, -53));
@@ -261,7 +261,7 @@ test_rounding_ties_to_even()
     {  // 2^-1075 is halfway between 0 and the smallest denormal: ties to
        // zero. It is below anything a double can hold, so it is reached by
        // accumulating the smallest denormal with an exact power-of-two scale.
-        truesum::ColumnBlockMatrix m(1, 1);
+        truesum::AccumulationMatrix m(1, 1);
         double sub = std::numeric_limits<double>::denorm_min();  // 2^-1074
         m.add_matrix_scaled_pow2(&sub, -1);                      // += 2^-1075
         CHECK_DOUBLE(m.to_double(0, 0), 0.0);
@@ -274,7 +274,7 @@ test_rounding_ties_to_even()
                      std::numeric_limits<double>::denorm_min());
     }
     {  // Two denormals that sum into the smallest normal.
-        truesum::ColumnBlockMatrix m(1, 1);
+        truesum::AccumulationMatrix m(1, 1);
         const double largest_sub = std::ldexp(4503599627370495.0, -1074);
         m.add(0, 0, largest_sub);
         m.add(0, 0, std::numeric_limits<double>::denorm_min());
@@ -282,7 +282,7 @@ test_rounding_ties_to_even()
         CHECK(m.is_exactly_representable(0, 0));
     }
     {  // Overflow of the double range on readback only.
-        truesum::ColumnBlockMatrix m(1, 1);
+        truesum::AccumulationMatrix m(1, 1);
         const double big = std::numeric_limits<double>::max();
         m.add(0, 0, big);
         m.add(0, 0, big);
@@ -304,7 +304,7 @@ test_add_then_subtract_is_zero()
     std::uniform_real_distribution<double> man_dist(-1.0, 1.0);
 
     const std::size_t rows = 7, cols = 5;
-    truesum::ColumnBlockMatrix m(rows, cols);
+    truesum::AccumulationMatrix m(rows, cols);
 
     std::vector<std::vector<double>> per_cell(rows * cols);
     for (std::size_t i = 0; i < rows; ++i) {
@@ -338,7 +338,7 @@ test_matrix_accumulation()
     };
     // clang-format on
 
-    truesum::ColumnBlockMatrix m(rows, cols);
+    truesum::AccumulationMatrix m(rows, cols);
     m.add_matrix(b.data());
     for (std::size_t i = 0; i < rows; ++i) {
         for (std::size_t j = 0; j < cols; ++j) {
@@ -359,7 +359,7 @@ test_matrix_accumulation()
     }
 
     // Power-of-two scaling is exact.
-    truesum::ColumnBlockMatrix h(rows, cols);
+    truesum::AccumulationMatrix h(rows, cols);
     h.add_matrix_scaled_pow2(b.data(), -3);
     for (std::size_t i = 0; i < rows; ++i) {
         for (std::size_t j = 0; j < cols; ++j) {
@@ -381,8 +381,8 @@ test_reserve_avoids_rescaling()
     };
     // clang-format on
 
-    truesum::ColumnBlockMatrix lazy(rows, cols);
-    truesum::ColumnBlockMatrix eager(rows, cols);
+    truesum::AccumulationMatrix lazy(rows, cols);
+    truesum::AccumulationMatrix eager(rows, cols);
     eager.reserve_for(b.data(), 500);
 
     for (int n = 0; n < 500; ++n) {
@@ -405,7 +405,7 @@ test_column_independence()
 {
     // Column 0 gets a huge dynamic range, column 1 stays cheap. The whole
     // point of per-column scaling is that column 1 does not pay for column 0.
-    truesum::ColumnBlockMatrix m(2, 2);
+    truesum::AccumulationMatrix m(2, 2);
     m.add(0, 0, std::ldexp(1.0, 900));
     m.add(0, 0, std::ldexp(1.0, -900));
     m.add(0, 1, 1.0);
@@ -419,7 +419,7 @@ test_column_independence()
 void
 test_errors()
 {
-    truesum::ColumnBlockMatrix m(2, 2);
+    truesum::AccumulationMatrix m(2, 2);
     bool threw = false;
     try {
         m.add(0, 0, std::numeric_limits<double>::infinity());
@@ -442,7 +442,7 @@ test_many_small_into_large()
 {
     // A million values whose ulp is far below the running total's ulp. Naive
     // summation stalls completely; this does not.
-    truesum::ColumnBlockMatrix m(1, 1);
+    truesum::AccumulationMatrix m(1, 1);
     const double big = std::ldexp(1.0, 60);
     const double small = 1.0;
     m.add(0, 0, big);
@@ -460,7 +460,7 @@ test_many_small_into_large()
 void
 test_reuse_after_zero()
 {
-    truesum::ColumnBlockMatrix m(1, 1);
+    truesum::AccumulationMatrix m(1, 1);
     m.add(0, 0, 1.0);
     m.set_zero();
     CHECK(m.is_zero(0, 0));
@@ -501,8 +501,8 @@ test_row_stride()
         }
     }
 
-    truesum::ColumnBlockMatrix a(rows, cols);
-    truesum::ColumnBlockMatrix b(rows, cols);
+    truesum::AccumulationMatrix a(rows, cols);
+    truesum::AccumulationMatrix b(rows, cols);
     a.reserve_for(padded.data(), 4, stride);
     b.reserve_for(packed.data(), 4);
 
@@ -541,14 +541,14 @@ void
 test_large_matrix_matches_scalar()
 {
     // A column of 257 rows shares one exponent across every row, while a 1x1
-    // accumulator picks the exponent that suits its single cell. The stored
-    // integers therefore differ, but the exact values must not: this pins down
-    // both the row-stride arithmetic and the claim that a column's shared
-    // scale never changes what it holds.
+    // accumulation matrix picks the exponent that suits its single cell. The
+    // stored integers therefore differ, but the exact values must not: this
+    // pins down both the row-stride arithmetic and the claim that a column's
+    // shared scale never changes what it holds.
     const std::size_t rows = 257, cols = 9;
     const int batches = 8;
 
-    truesum::ColumnBlockMatrix big(rows, cols);
+    truesum::AccumulationMatrix big(rows, cols);
     std::vector<double> buf(rows * cols);
     for (int b = 0; b < batches; ++b) {
         for (std::size_t i = 0; i < rows; ++i) {
@@ -566,7 +566,7 @@ test_large_matrix_matches_scalar()
 
     for (std::size_t i = 0; i < rows; ++i) {
         for (std::size_t j = 0; j < cols; ++j) {
-            truesum::ColumnBlockMatrix one(1, 1);
+            truesum::AccumulationMatrix one(1, 1);
             for (int b = 0; b < batches; ++b) {
                 one.add(0, 0, wide_sample(i, j, b));
             }
@@ -586,7 +586,7 @@ test_large_matrix_cancels_to_zero()
     const std::size_t rows = 257, cols = 9;
     const int batches = 6;
 
-    truesum::ColumnBlockMatrix m(rows, cols);
+    truesum::AccumulationMatrix m(rows, cols);
     std::vector<double> buf(rows * cols);
     for (int b = 0; b < batches; ++b) {
         for (std::size_t i = 0; i < rows; ++i) {
@@ -626,7 +626,7 @@ test_large_matrix_per_column_scales()
     const std::size_t rows = 512, cols = 64;
     const int batches = 16;
 
-    truesum::ColumnBlockMatrix m(rows, cols);
+    truesum::AccumulationMatrix m(rows, cols);
     std::vector<double> buf(rows * cols);
     std::vector<double> reference(rows * cols, 0.0);
 
@@ -680,8 +680,8 @@ test_column_major_input()
         }
     }
 
-    truesum::ColumnBlockMatrix a(rows, cols);
-    truesum::ColumnBlockMatrix b(rows, cols);
+    truesum::AccumulationMatrix a(rows, cols);
+    truesum::AccumulationMatrix b(rows, cols);
     for (int n = 0; n < batches; ++n) {
         a.add_matrix(row_major.data());
         b.add_matrix_col_major(col_major.data());
@@ -697,8 +697,8 @@ test_column_major_input()
     }
 
     // Power-of-two scaling agrees too.
-    truesum::ColumnBlockMatrix c(rows, cols);
-    truesum::ColumnBlockMatrix d(rows, cols);
+    truesum::AccumulationMatrix c(rows, cols);
+    truesum::AccumulationMatrix d(rows, cols);
     c.add_matrix_scaled_pow2(row_major.data(), -7);
     d.add_matrix_col_major_scaled_pow2(col_major.data(), -7);
     for (std::size_t i = 0; i < rows; ++i) {
@@ -717,7 +717,7 @@ test_column_major_input()
             padded[j * pad + i] = col_major[j * rows + i];
         }
     }
-    truesum::ColumnBlockMatrix e(rows, cols);
+    truesum::AccumulationMatrix e(rows, cols);
     for (int n = 0; n < batches; ++n)
         e.add_matrix_col_major(padded.data(), pad);
     for (std::size_t i = 0; i < rows; ++i) {
@@ -731,8 +731,8 @@ void
 test_streamed_columns()
 {
     // Feeding one column at a time must match feeding the whole matrix. This
-    // is what lets a caller hold an accumulator far larger than any input it
-    // could keep resident.
+    // is what lets a caller hold an accumulation matrix far larger than any
+    // input it could keep resident.
     const std::size_t rows = 97, cols = 11;
     const int batches = 4;
 
@@ -743,8 +743,8 @@ test_streamed_columns()
         }
     }
 
-    truesum::ColumnBlockMatrix whole(rows, cols);
-    truesum::ColumnBlockMatrix streamed(rows, cols);
+    truesum::AccumulationMatrix whole(rows, cols);
+    truesum::AccumulationMatrix streamed(rows, cols);
     for (int n = 0; n < batches; ++n) {
         whole.add_matrix_col_major(col_major.data());
         // Deliberately out of order: columns are independent.
@@ -765,7 +765,7 @@ test_streamed_columns()
     }
 
     // Scaled form agrees too, and a bad index is rejected.
-    truesum::ColumnBlockMatrix a(rows, cols), b(rows, cols);
+    truesum::AccumulationMatrix a(rows, cols), b(rows, cols);
     a.add_matrix_col_major_scaled_pow2(col_major.data(), -9);
     for (std::size_t j = 0; j < cols; ++j) {
         b.add_column_scaled_pow2(j, col_major.data() + j * rows, -9);
@@ -822,7 +822,7 @@ test_order_independence()
         mats.push_back(std::move(a));
     }
 
-    truesum::ColumnBlockMatrix ref(rows, cols);
+    truesum::AccumulationMatrix ref(rows, cols);
     for (int m = 0; m < count; ++m) ref.add_matrix(mats[m].data());
 
     std::vector<std::string> want(rows * cols);
@@ -838,7 +838,7 @@ test_order_independence()
 
     for (int trial = 0; trial < 24; ++trial) {
         std::shuffle(perm.begin(), perm.end(), rng);
-        truesum::ColumnBlockMatrix t(rows, cols);
+        truesum::AccumulationMatrix t(rows, cols);
         for (int k = 0; k < count; ++k) t.add_matrix(mats[perm[k]].data());
 
         for (std::size_t i = 0; i < rows; ++i) {
@@ -885,7 +885,7 @@ test_order_independent_cancellation()
 
     for (int trial = 0; trial < 20; ++trial) {
         std::shuffle(perm.begin(), perm.end(), rng);
-        truesum::ColumnBlockMatrix t(rows, cols);
+        truesum::AccumulationMatrix t(rows, cols);
         for (int k : perm) t.add_matrix(mats[k].data());
 
         std::size_t nonzero = 0;
@@ -920,10 +920,10 @@ test_order_independent_across_entry_points()
         col_major.push_back(std::move(c));
     }
 
-    truesum::ColumnBlockMatrix by_matrix(rows, cols);
-    truesum::ColumnBlockMatrix by_col_major(rows, cols);
-    truesum::ColumnBlockMatrix by_column(rows, cols);
-    truesum::ColumnBlockMatrix by_element(rows, cols);
+    truesum::AccumulationMatrix by_matrix(rows, cols);
+    truesum::AccumulationMatrix by_col_major(rows, cols);
+    truesum::AccumulationMatrix by_column(rows, cols);
+    truesum::AccumulationMatrix by_element(rows, cols);
 
     std::mt19937_64 rng(909);
     std::vector<int> perm(count);
@@ -996,7 +996,7 @@ test_zero_crossing_preserves_value()
 
     // Order A: the column reaches exact zero, and only then does a rescale
     // arrive -- so it takes the all-zero shortcut and resets the bound.
-    truesum::ColumnBlockMatrix a(rows, cols);
+    truesum::AccumulationMatrix a(rows, cols);
     a.add_matrix(big.data());
     a.add_matrix(neg_big.data());
     a.add_matrix(tiny.data());
@@ -1004,7 +1004,7 @@ test_zero_crossing_preserves_value()
 
     // Order B: the same values, but the rescale happens while the column
     // still holds data, so the bound is carried across it instead.
-    truesum::ColumnBlockMatrix b(rows, cols);
+    truesum::AccumulationMatrix b(rows, cols);
     b.add_matrix(big.data());
     b.add_matrix(tiny.data());
     b.add_matrix(neg_big.data());
@@ -1055,11 +1055,11 @@ test_threaded_matches_serial()
         }
     }
 
-    truesum::ColumnBlockMatrix serial(rows, cols);
+    truesum::AccumulationMatrix serial(rows, cols);
     for (const auto &b : batch) serial.add_matrix_col_major(b.data());
 
     for (unsigned n : {2u, 4u, 8u}) {
-        truesum::ColumnBlockMatrix threaded(rows, cols);
+        truesum::AccumulationMatrix threaded(rows, cols);
         threaded.set_threads(n);
         CHECK(threaded.threads() == n);
         for (const auto &b : batch) threaded.add_matrix_col_major(b.data());
@@ -1090,7 +1090,7 @@ test_threaded_matches_serial()
                 rowmajor[i * cols + j] = batch[0][j * rows + i];
             }
         }
-        truesum::ColumnBlockMatrix one(rows, cols), many(rows, cols);
+        truesum::AccumulationMatrix one(rows, cols), many(rows, cols);
         many.set_threads(8);
         one.add_matrix(rowmajor.data());
         many.add_matrix(rowmajor.data());
@@ -1134,7 +1134,7 @@ test_readback_residual()
         }
     }
 
-    truesum::ColumnBlockMatrix a(rows, cols);
+    truesum::AccumulationMatrix a(rows, cols);
     for (int r = 0; r < reps; ++r) a.add_matrix(batches[r].data());
 
     int nonzero_residuals = 0, negative_residuals = 0;
@@ -1149,7 +1149,7 @@ test_readback_residual()
             // The exact statement of what a residual is: re-accumulate the
             // same value, subtract the double that was returned, and what is
             // left must round to the residual.
-            truesum::ColumnBlockMatrix b(1, 1);
+            truesum::AccumulationMatrix b(1, 1);
             for (int r = 0; r < reps; ++r) {
                 b.add_column(0, &batches[r][i * cols + j]);
             }
@@ -1181,7 +1181,7 @@ test_readback_residual()
     CHECK(negative_residuals > 0);
 
     // An exactly representable entry reports a residual of zero, positive.
-    truesum::ColumnBlockMatrix e(1, 1);
+    truesum::AccumulationMatrix e(1, 1);
     const double two = 2.0;
     e.add_column(0, &two);
     double elo = 1.0;
@@ -1190,7 +1190,7 @@ test_readback_residual()
     CHECK(!std::signbit(elo));
 
     // So does an empty one.
-    truesum::ColumnBlockMatrix z(1, 1);
+    truesum::AccumulationMatrix z(1, 1);
     double zlo = 1.0;
     CHECK_DOUBLE(z.to_double(&zlo, 0, 0), 0.0);
     CHECK_DOUBLE(zlo, 0.0);
@@ -1214,7 +1214,7 @@ test_readback_residual()
 static void
 test_residual_recovers_cancellation()
 {
-    truesum::ColumnBlockMatrix a(1, 1);
+    truesum::AccumulationMatrix a(1, 1);
     const double big = 1e300, one = 1.0;
     a.add_column(0, &big);
     a.add_column(0, &one);
@@ -1229,7 +1229,7 @@ test_residual_recovers_cancellation()
     // 0.1 added ten times. The double 0.1 is 3602879701896397 * 2^-55, so ten
     // of them come to 4503599627370496.25 * 2^-52 -- a quarter of the way
     // above 1.0, which rounds down to exactly 1.0 and leaves 2^-54 behind.
-    truesum::ColumnBlockMatrix t(1, 1);
+    truesum::AccumulationMatrix t(1, 1);
     const double tenth = 0.1;
     for (int k = 0; k < 10; ++k) t.add_column(0, &tenth);
     double tlo = 0.0;
@@ -1238,7 +1238,7 @@ test_residual_recovers_cancellation()
     CHECK_DOUBLE(tlo, std::ldexp(1.0, -54));
 
     // And the pair reconstructs: subtracting the double leaves the residual.
-    truesum::ColumnBlockMatrix u(1, 1);
+    truesum::AccumulationMatrix u(1, 1);
     for (int k = 0; k < 10; ++k) u.add_column(0, &tenth);
     const double minus = -thi;
     u.add_column(0, &minus);
@@ -1246,8 +1246,8 @@ test_residual_recovers_cancellation()
 }
 
 // Storing one triangle has to be invisible in the answers. The reference is a
-// full-storage accumulator fed the same symmetric matrices: every entry must
-// agree, on both sides of the diagonal and for either uplo.
+// full-storage accumulation matrix fed the same symmetric matrices: every entry
+// must agree, on both sides of the diagonal and for either uplo.
 static void
 test_symmetric_matches_full_storage()
 {
@@ -1270,9 +1270,9 @@ test_symmetric_matches_full_storage()
         }
     }
 
-    truesum::ColumnBlockMatrix full(n, n);
-    truesum::ColumnBlockMatrix lo(n, truesum::Uplo::Lower);
-    truesum::ColumnBlockMatrix up(n, truesum::Uplo::Upper);
+    truesum::AccumulationMatrix full(n, n);
+    truesum::AccumulationMatrix lo(n, truesum::Uplo::Lower);
+    truesum::AccumulationMatrix up(n, truesum::Uplo::Upper);
     for (int r = 0; r < reps; ++r) {
         full.add_matrix(batches[r].data());
         lo.add_matrix(batches[r].data());
@@ -1314,9 +1314,9 @@ test_symmetric_matches_full_storage()
     CHECK(lo.memory_bytes() < full.memory_bytes());
     {
         const std::size_t big = 512;
-        truesum::ColumnBlockMatrix bf(big, big);
-        truesum::ColumnBlockMatrix bl(big, truesum::Uplo::Lower);
-        truesum::ColumnBlockMatrix bu(big, truesum::Uplo::Upper);
+        truesum::AccumulationMatrix bf(big, big);
+        truesum::AccumulationMatrix bl(big, truesum::Uplo::Lower);
+        truesum::AccumulationMatrix bu(big, truesum::Uplo::Upper);
         CHECK(bl.memory_bytes() < bf.memory_bytes() * 3 / 4);
         // The two triangles are the same multiset of column lengths, so they
         // cost exactly the same however the padding falls.
@@ -1354,21 +1354,22 @@ test_symmetric_entry_points_agree()
         }
     }
     for (std::size_t i = 0; i < n; ++i) {
-        for (std::size_t j = 0; j < n; ++j) colmajor[j * n + i] = rowmajor[i * n + j];
+        for (std::size_t j = 0; j < n; ++j)
+            colmajor[j * n + i] = rowmajor[i * n + j];
     }
 
-    truesum::ColumnBlockMatrix a(n, truesum::Uplo::Lower);
+    truesum::AccumulationMatrix a(n, truesum::Uplo::Lower);
     a.add_matrix(rowmajor.data());
 
-    truesum::ColumnBlockMatrix b(n, truesum::Uplo::Lower);
+    truesum::AccumulationMatrix b(n, truesum::Uplo::Lower);
     b.add_matrix_col_major(colmajor.data());
 
-    truesum::ColumnBlockMatrix c(n, truesum::Uplo::Lower);
+    truesum::AccumulationMatrix c(n, truesum::Uplo::Lower);
     c.set_threads(4);
     c.add_matrix(rowmajor.data());
 
     // Streamed one column at a time: each takes only its stored slice.
-    truesum::ColumnBlockMatrix d(n, truesum::Uplo::Lower);
+    truesum::AccumulationMatrix d(n, truesum::Uplo::Lower);
     for (std::size_t j = 0; j < n; ++j) {
         d.add_column(j, &colmajor[j * n + d.column_first_row(j)]);
     }
@@ -1385,9 +1386,9 @@ test_symmetric_entry_points_agree()
 
     // The upper triangle stored column-major is a different slice, so check it
     // separately rather than assuming the lower case covered it.
-    truesum::ColumnBlockMatrix e(n, truesum::Uplo::Upper);
+    truesum::AccumulationMatrix e(n, truesum::Uplo::Upper);
     e.add_matrix_col_major(colmajor.data());
-    truesum::ColumnBlockMatrix f(n, truesum::Uplo::Upper);
+    truesum::AccumulationMatrix f(n, truesum::Uplo::Upper);
     f.set_threads(3);
     f.add_matrix(rowmajor.data());
     for (std::size_t i = 0; i < n; ++i) {
@@ -1398,13 +1399,13 @@ test_symmetric_entry_points_agree()
     }
 }
 
-// A symmetric accumulator still has to do everything the general one does:
-// widen, rescale, report exactly, and pre-size from surveys.
+// A symmetric accumulation matrix still has to do everything the general one
+// does: widen, rescale, report exactly, and pre-size from surveys.
 static void
 test_symmetric_keeps_exactness()
 {
     // The diagonal is stored once and must be added once, not twice.
-    truesum::ColumnBlockMatrix d(3, truesum::Uplo::Lower);
+    truesum::AccumulationMatrix d(3, truesum::Uplo::Lower);
     std::vector<double> m(9, 0.0);
     m[0] = 2.0;   // (0,0)
     m[4] = -7.5;  // (1,1)
@@ -1415,7 +1416,7 @@ test_symmetric_keeps_exactness()
     CHECK_DOUBLE(d.to_double(2, 2), 0.0);
 
     // Cancellation across the whole double range, on an off-diagonal entry.
-    truesum::ColumnBlockMatrix a(4, truesum::Uplo::Lower);
+    truesum::AccumulationMatrix a(4, truesum::Uplo::Lower);
     a.add(2, 1, 1e300);
     a.add(2, 1, 1.0);
     a.add(1, 2, -1e300);  // the mirrored index reaches the same entry
@@ -1429,7 +1430,7 @@ test_symmetric_keeps_exactness()
 
     // A value far below the column's scale forces a rescale of a triangular
     // column; nothing is lost and the mirror still agrees.
-    truesum::ColumnBlockMatrix r(6, truesum::Uplo::Upper);
+    truesum::AccumulationMatrix r(6, truesum::Uplo::Upper);
     r.add(4, 2, 1.0);
     r.add(4, 2, std::ldexp(1.0, -300));
     CHECK(r.column_exponent(4) == -300);
@@ -1438,7 +1439,7 @@ test_symmetric_keeps_exactness()
     CHECK(r.is_exactly_representable(4, 2));
 
     // Residuals work through the mirror too.
-    truesum::ColumnBlockMatrix q(3, truesum::Uplo::Lower);
+    truesum::AccumulationMatrix q(3, truesum::Uplo::Lower);
     for (int k = 0; k < 10; ++k) q.add(2, 0, 0.1);
     double lo = 0.0;
     CHECK_DOUBLE(q.to_double(&lo, 0, 2), 1.0);
@@ -1456,7 +1457,7 @@ test_symmetric_keeps_exactness()
             b[i * n + j] = b[j * n + i] = v;
         }
     }
-    truesum::ColumnBlockMatrix adaptive(n, truesum::Uplo::Lower);
+    truesum::AccumulationMatrix adaptive(n, truesum::Uplo::Lower);
     adaptive.add_matrix(b.data());
     adaptive.add_matrix(b.data());
 
@@ -1464,11 +1465,12 @@ test_symmetric_keeps_exactness()
         2, std::vector<truesum::Survey>(n));
     for (std::size_t j = 0; j < n; ++j) {
         std::vector<double> slice;
-        for (std::size_t k = 0; k < n - j; ++k) slice.push_back(b[(j + k) * n + j]);
+        for (std::size_t k = 0; k < n - j; ++k)
+            slice.push_back(b[(j + k) * n + j]);
         surveys[0][j] = surveys[1][j] =
             truesum::survey_column(slice.data(), slice.size());
     }
-    truesum::ColumnBlockMatrix presized(n, truesum::Uplo::Lower, surveys);
+    truesum::AccumulationMatrix presized(n, truesum::Uplo::Lower, surveys);
     const std::size_t limbs_before = presized.column_limbs(0);
     const int exp_before = presized.column_exponent(0);
     presized.add_matrix(b.data());
@@ -1510,10 +1512,10 @@ test_fold_matches_sequential()
         std::vector<const double *> ptrs;
         for (auto &b : batches) ptrs.push_back(b.data());
 
-        truesum::ColumnBlockMatrix seq(rows, cols);
+        truesum::AccumulationMatrix seq(rows, cols);
         for (auto &b : batches) seq.add_matrix_col_major(b.data());
 
-        truesum::ColumnBlockMatrix fold(rows, cols);
+        truesum::AccumulationMatrix fold(rows, cols);
         fold.add_matrices_col_major(ptrs.data(), ptrs.size());
 
         // Exact decimal rather than limbs: an adaptive container that rescaled
@@ -1560,10 +1562,10 @@ test_fold_matches_sequential()
             surveys.push_back(s);
         }
 
-        truesum::ColumnBlockMatrix seq(rows, cols, surveys);
+        truesum::AccumulationMatrix seq(rows, cols, surveys);
         for (auto &b : batches) seq.add_matrix_col_major(b.data());
 
-        truesum::ColumnBlockMatrix fold(rows, cols, surveys);
+        truesum::AccumulationMatrix fold(rows, cols, surveys);
         fold.add_matrices_col_major(ptrs.data(), ptrs.size());
 
         std::size_t bad = 0;
@@ -1609,10 +1611,10 @@ test_fold_matches_sequential()
         std::vector<const double *> ptrs;
         for (auto &b : batches) ptrs.push_back(b.data());
 
-        truesum::ColumnBlockMatrix seq(n, truesum::Uplo::Lower);
+        truesum::AccumulationMatrix seq(n, truesum::Uplo::Lower);
         for (auto &b : batches) seq.add_matrix_col_major(b.data());
 
-        truesum::ColumnBlockMatrix fold(n, truesum::Uplo::Lower);
+        truesum::AccumulationMatrix fold(n, truesum::Uplo::Lower);
         fold.set_threads(4);
         fold.add_matrices_col_major(ptrs.data(), ptrs.size());
 
@@ -1626,9 +1628,9 @@ test_fold_matches_sequential()
         }
         CHECK(0 == bad);
 
-        truesum::ColumnBlockMatrix one(n, truesum::Uplo::Lower);
+        truesum::AccumulationMatrix one(n, truesum::Uplo::Lower);
         one.add_matrices_col_major(ptrs.data(), 1);
-        truesum::ColumnBlockMatrix plain(n, truesum::Uplo::Lower);
+        truesum::AccumulationMatrix plain(n, truesum::Uplo::Lower);
         plain.add_matrix_col_major(batches[0].data());
         bad = 0;
         for (std::size_t i = 0; i < n; ++i) {
@@ -1639,9 +1641,9 @@ test_fold_matches_sequential()
         CHECK(0 == bad);
     }
 
-    // A fold is not a mode the accumulator is put into: folded and one-at-a-
-    // time calls interleave freely, and a fold may rescale or widen a column
-    // that earlier calls had already put values in. Nothing requires the
+    // A fold is not a mode the accumulation matrix is put into: folded and
+    // one-at-a- time calls interleave freely, and a fold may rescale or widen a
+    // column that earlier calls had already put values in. Nothing requires the
     // folded matrices to be all of them, or to come first.
     {
         const std::size_t r2 = 71, c2 = 5;
@@ -1658,18 +1660,18 @@ test_fold_matches_sequential()
                 if (rng() & 1) x = -x;
             }
         }
-        truesum::ColumnBlockMatrix all(r2, c2);
+        truesum::AccumulationMatrix all(r2, c2);
         for (auto &b : batches) all.add_matrix_col_major(b.data());
 
         // one, then a fold of two, then one.
-        truesum::ColumnBlockMatrix mixed(r2, c2);
+        truesum::AccumulationMatrix mixed(r2, c2);
         const double *mid[2] = {batches[1].data(), batches[2].data()};
         mixed.add_matrix_col_major(batches[0].data());
         mixed.add_matrices_col_major(mid, 2);
         mixed.add_matrix_col_major(batches[3].data());
 
         // a fold first, then singles.
-        truesum::ColumnBlockMatrix fold_first(r2, c2);
+        truesum::AccumulationMatrix fold_first(r2, c2);
         const double *head[2] = {batches[0].data(), batches[1].data()};
         fold_first.add_matrices_col_major(head, 2);
         fold_first.add_matrix_col_major(batches[2].data());
@@ -1694,7 +1696,7 @@ test_fold_matches_sequential()
         const double *p[1] = {v.data()};
         std::vector<std::vector<truesum::Survey>> lie{
             {truesum::Survey{0, 8, true, false}}};
-        truesum::ColumnBlockMatrix m(64, 1, lie);
+        truesum::AccumulationMatrix m(64, 1, lie);
         bool threw = false;
         try {
             m.add_matrices_col_major(p, 1);
@@ -1705,9 +1707,9 @@ test_fold_matches_sequential()
     }
 }
 
-// The public survey is what a producer computes so an accumulator need not.
-// It has to agree with what the accumulator would have worked out itself,
-// or preallocating from it is worse than useless.
+// The public survey is what a producer computes so an accumulation matrix need
+// not. It has to agree with what the accumulation matrix would have worked out
+// itself, or preallocating from it is worse than useless.
 static void
 test_public_survey()
 {
@@ -1743,7 +1745,7 @@ test_public_survey()
     // The extents must actually bound the data: accumulating one matrix into a
     // column reserved from its own survey must need no rescale and no widen.
     for (std::size_t j = 1; j < cols; ++j) {
-        truesum::ColumnBlockMatrix one(rows, 1);
+        truesum::AccumulationMatrix one(rows, 1);
         one.reserve_column(
             j == 1 ? 0 : 0, static_cast<int>(a[j].min_exponent),
             static_cast<std::size_t>(a[j].max_top - a[j].min_exponent) + 2);
@@ -1763,9 +1765,10 @@ test_public_survey()
     }
 }
 
-// An accumulator given the surveys of every matrix it will receive must reach
-// exactly the same limbs as one that worked them out for itself -- otherwise
-// pre-sizing is a different algorithm rather than the same one told in advance.
+// An accumulation matrix given the surveys of every matrix it will receive must
+// reach exactly the same limbs as one that worked them out for itself --
+// otherwise pre-sizing is a different algorithm rather than the same one told
+// in advance.
 static void
 test_presized_matches_adaptive()
 {
@@ -1792,8 +1795,8 @@ test_presized_matches_adaptive()
                                       rows, cols);
     }
 
-    truesum::ColumnBlockMatrix adaptive(rows, cols);
-    truesum::ColumnBlockMatrix presized(rows, cols, surveys);
+    truesum::AccumulationMatrix adaptive(rows, cols);
+    truesum::AccumulationMatrix presized(rows, cols, surveys);
     for (int b = 0; b < nbatches; ++b) {
         adaptive.add_matrix_col_major(batch[b].data());
         presized.add_matrix_col_major(batch[b].data());
@@ -1821,7 +1824,7 @@ test_presized_matches_adaptive()
     // reservation is an aggregate and knows nothing about which matrix is
     // which.
     {
-        truesum::ColumnBlockMatrix reversed(rows, cols, surveys);
+        truesum::AccumulationMatrix reversed(rows, cols, surveys);
         for (int b = nbatches; b-- > 0;) {
             reversed.add_matrix_col_major(batch[b].data());
         }
@@ -1833,8 +1836,9 @@ test_presized_matches_adaptive()
     }
 
     // A matrix outside what was declared is detected and reported rather than
-    // quietly producing a wrong sum. The accumulator is not usable afterwards,
-    // which is the point: the contract was broken, not accommodated.
+    // quietly producing a wrong sum. The accumulation matrix is not usable
+    // afterwards, which is the point: the contract was broken, not
+    // accommodated.
     {
         std::vector<std::vector<truesum::Survey>> one(
             1, std::vector<truesum::Survey>(1));
@@ -1843,7 +1847,7 @@ test_presized_matches_adaptive()
 
         // ...then hand it something far outside those extents.
         std::vector<double> huge(rows, std::ldexp(1.0, 400));
-        truesum::ColumnBlockMatrix lied(rows, 1, one);
+        truesum::AccumulationMatrix lied(rows, 1, one);
         bool threw = false;
         try {
             lied.add_matrix_col_major(huge.data());
@@ -1855,7 +1859,7 @@ test_presized_matches_adaptive()
         // And a value below the declared exponent, which is the other
         // direction and the one that silently dropped values before.
         std::vector<double> tiny(rows, std::ldexp(1.0, -400));
-        truesum::ColumnBlockMatrix lied2(rows, 1, one);
+        truesum::AccumulationMatrix lied2(rows, 1, one);
         threw = false;
         try {
             lied2.add_matrix_col_major(tiny.data());
@@ -1876,7 +1880,7 @@ test_presized_matches_adaptive()
             3, std::vector<truesum::Survey>(1, lie));
         const std::vector<double> big(rows, std::ldexp(1.0, 62));
 
-        truesum::ColumnBlockMatrix w(rows, 1, three);
+        truesum::AccumulationMatrix w(rows, 1, three);
         CHECK(1 == w.column_limbs(0));
         w.add_matrix_col_major(big.data());  // fits
         CHECK_DOUBLE(w.to_double(0, 0), std::ldexp(1.0, 62));
@@ -1891,7 +1895,7 @@ test_presized_matches_adaptive()
         // Downward, one more fits: -2^63 is the most negative 64-bit value,
         // so the third add is the one that wraps.
         const std::vector<double> nbig(rows, -std::ldexp(1.0, 62));
-        truesum::ColumnBlockMatrix wn(rows, 1, three);
+        truesum::AccumulationMatrix wn(rows, 1, three);
         wn.add_matrix_col_major(nbig.data());
         wn.add_matrix_col_major(nbig.data());
         CHECK_DOUBLE(wn.to_double(0, 0), -std::ldexp(1.0, 63));
@@ -1905,7 +1909,7 @@ test_presized_matches_adaptive()
 
         // The fold applies its addends in registers and must notice too.
         const double *pair[2] = {big.data(), big.data()};
-        truesum::ColumnBlockMatrix wf(rows, 1, three);
+        truesum::AccumulationMatrix wf(rows, 1, three);
         threw = false;
         try {
             wf.add_matrices_col_major(pair, 2);
@@ -1925,7 +1929,7 @@ test_presized_matches_adaptive()
         const std::vector<double> wide(
             rows,
             std::ldexp(static_cast<double>((std::uint64_t{1} << 53) - 1), 20));
-        truesum::ColumnBlockMatrix w(rows, 1, one);
+        truesum::AccumulationMatrix w(rows, 1, one);
         CHECK(1 == w.column_limbs(0));
         bool threw = false;
         try {
@@ -1939,7 +1943,7 @@ test_presized_matches_adaptive()
     // The count is the one part of the contract that is enforced, because it
     // costs nothing: the width bound holds for that many matrices, not more.
     {
-        truesum::ColumnBlockMatrix full(rows, cols, surveys);
+        truesum::AccumulationMatrix full(rows, cols, surveys);
         for (int b = 0; b < nbatches; ++b)
             full.add_matrix_col_major(batch[0].data());
         bool threw = false;

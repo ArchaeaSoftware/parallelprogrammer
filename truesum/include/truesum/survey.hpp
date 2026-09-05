@@ -1,5 +1,5 @@
-// What an accumulator needs to know about a matrix before it can size itself
-// for one.
+// What an accumulation matrix needs to know about a matrix before it can size
+// itself for one.
 //
 // This is deliberately public, and small. Sizing a column requires the lowest
 // bit weight its values will reach and the highest they will occupy, which
@@ -7,9 +7,9 @@
 // already done, with the values in registers. A survey is 12 bytes per column
 // against eight bytes per element: 768 bytes beside a 33.6 MB matrix at
 // 65536x64, one part in 43690. So it can travel with the matrix rather than
-// being recomputed from it, and an accumulator given the surveys of every
-// matrix it will receive can be allocated once, exactly, and never rescale or
-// widen afterwards.
+// being recomputed from it, and an accumulation matrix given the surveys of
+// every matrix it will receive can be allocated once, exactly, and never
+// rescale or widen afterwards.
 #pragma once
 
 #include <cstddef>

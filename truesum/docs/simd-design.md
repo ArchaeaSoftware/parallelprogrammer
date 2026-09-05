@@ -33,7 +33,7 @@ RTX 3060 (sm_86, CUDA 12.9).
 | No templates in the public API; radix templated in kernels only | settled |
 | Radix: 52-bit carry-save vs 64-bit canonical | **closed: stays at 64** |
 | Whether limb arrays get separate allocations on CUDA | measured neutral, kept separate |
-| Survey supplied by the producer; accumulator pre-sized from it | landed, both targets |
+| Survey supplied by the producer; accumulation matrix pre-sized from it | landed, both targets |
 | Symmetric matrices store one triangle, LAPACK `uplo` | landed, both targets |
 | Readback returns the residual alongside the rounded double | landed |
 | Multi-batch folding, K matrices per pass | landed, CPU |
@@ -93,7 +93,7 @@ it charges three things the bound never did:
   There is no SIMD integer divide, so it is a magic multiply plus a shift, and
   a second multiply to recover `bit`. Radix 64 pays none of this.
 - **The same range needs more limbs**: 1 -> 2, 2 -> 3, 4 -> 5, 8 -> 10. That
-  is 1.25-2x the accumulator memory, which costs nothing while it fits in
+  is 1.25-2x the accumulation matrix memory, which costs nothing while it fits in
   cache and a great deal when it does not.
 - **Normalization**, which turned out to be negligible: under 0.002 ns/elem
   amortized over the 2048 addends the 11 bits of headroom allow.
@@ -112,7 +112,7 @@ loses outright on one-limb columns -- the narrowest and most common case, and
 the one the CPU's best single-thread rate is measured on -- because there is
 no carry chain to remove there and the width doubles anyway. And the widest
 case, where the bound looked best at 45-52%, is where the extra limbs cost
-most once the accumulator outgrows L3: 1.69x collapses to 1.18x.
+most once the accumulation matrix outgrows L3: 1.69x collapses to 1.18x.
 
 Where it pays is the middle, 2-4 limbs, at 1.33-1.55x, and that holds up past
 L3. So the useful form of this is not a global radix but a **per-column**
@@ -156,7 +156,7 @@ Each `LimbColumn` is a slice at **fixed significance spanning all rows**: row
 `2^(exponent + 64k + 63)`. They are ordered least-significant first, and the
 topmost one is special — it carries the two's-complement sign bit.
 
-Naming caveat: `LimbColumn` sits next to `Column` in `ColumnBlockMatrix` and a
+Naming caveat: `LimbColumn` sits next to `Column` in `AccumulationMatrix` and a
 `LimbColumn` is *not* a column of the matrix. Worth a comment at the
 declaration; naming conventions may be revisited.
 
@@ -247,8 +247,8 @@ Storage is `uint64_t` on both targets — the plan of record — and the only
 parameter worth exposing is the *radix*, meaning how many of those 64 bits are
 used before headroom begins.
 
-RTX 3060, 2^20 rows x 256 accumulations, ~512-bit accumulator held in
-registers, reported as accumulator bits updated per second:
+RTX 3060, 2^20 rows x 256 accumulations, ~512-bit accumulation matrix held in
+registers, reported as accumulation matrix bits updated per second:
 
 | scheme | limbs | storage / 512 bits | throughput |
 | --- | --- | --- | --- |
@@ -268,9 +268,9 @@ Two results, both against the direction this document previously took:
   2^11 deferred additions is ample for a batch. Normalizing every few thousand
   accumulations is cheap amortized.
 
-**This benchmark held the accumulator in registers, and that is what makes it
+**This benchmark held the accumulation matrix in registers, and that is what makes it
 misleading.** With no memory traffic the carry chain is the only cost, so
-removing it is the whole game. The real kernel keeps the accumulator in global
+removing it is the whole game. The real kernel keeps the accumulation matrix in global
 memory, where traffic dominates and the chain is free — measured, and recorded
 under the radix decision above. Treat the table below as a statement about
 register-resident accumulation, not about this workload.
@@ -314,7 +314,7 @@ test, no mask op, and no dependency between limb positions — with carries
 propagated once, lazily, before readback.
 
 The density term is what then favours 52 over 32: fewer limbs for the same
-accumulator width means fewer registers, fewer bytes moved, and a 53-bit
+accumulation matrix width means fewer registers, fewer bytes moved, and a 53-bit
 mantissa landing in two limbs instead of three.
 
 A redundant (non-canonical) representation stays exact — every add is still
@@ -348,7 +348,7 @@ sign test, `bit_length`, the decimal conversion — must work in radix bits
 rather than storage bits.
 
 **Fixed at 64 bits regardless**, because these describe IEEE-754 doubles rather
-than the accumulator: everything in `decompose` (52, 1075, `0x7FF`, the sign
+than the accumulation matrix: everything in `decompose` (52, 1075, `0x7FF`, the sign
 shift), `DoubleParts::mantissa`, `extract_u64`'s return type, and the rounding
 path in `to_double`. Keeping this boundary clean is most of the portability
 work. `60711df` fixed the two places that had already blurred it.
@@ -427,7 +427,7 @@ functions in a separately-compiled TU get exactly the same codegen, verified.
 
 The cost is real, though. CRTP makes the backend a *type*, and since AVX-512
 availability is a runtime property the branch still has to exist — now
-selecting between two types, which forces `ColumnBlockMatrix` to become a
+selecting between two types, which forces `AccumulationMatrix` to become a
 template or to be type-erased behind a vtable, the very thing CRTP was meant to
 avoid. The whole class body would also be instantiated per backend when only
 the handful of kernels differ.
@@ -444,7 +444,7 @@ produce exactly the leaky abstraction this design is trying to avoid.
 ## Templates: only in the kernels, never in the API
 
 Settling storage at 64 bits removed the case for templating the public class —
-there is no type left to vary. Templating `ColumnBlockMatrix` would force
+there is no type left to vary. Templating `AccumulationMatrix` would force
 header-only or explicit instantiation and make the most-read code less flat for
 no benefit.
 
@@ -542,7 +542,7 @@ memory first and the kernel reading it from there.
 
 Measured at 65536x64 from a pinned host buffer, copying 33.6 MB and then
 reading it from device memory takes 1768 us; reading it in place takes 1257.
-The transfer alone costs 1258, so the accumulator arithmetic hides entirely
+The transfer alone costs 1258, so the accumulation matrix arithmetic hides entirely
 behind the bus instead of queueing after it.
 
 | | 4096x64 | 16384x64 | 65536x64 |
@@ -553,7 +553,7 @@ behind the bus instead of queueing after it.
 The first row is now history: **`add_matrix_col_major` requires page-locked,
 device-mapped input and rejects anything else.** No staging copy remains to
 fall back on, so the second row is what every caller gets. Either the
-accumulator owns the buffer (`acquire_input`) or the caller does
+accumulation matrix owns the buffer (`acquire_input`) or the caller does
 (cudaHostAlloc/cudaHostRegister with the mapped flag); either way the call
 returns an `InputRead`, a CUDA event recorded after the launch, and the rule is
 the same for everyone: do not write the buffer until it clears.
@@ -645,11 +645,11 @@ mapped destination:
 | interleaved per column, no shared loads | ~0.92x |
 | shared loads, ordinary stores | 1.01x |
 | + non-temporal stores | 1.03x |
-| + two independent accumulator sets | **1.09x** |
+| + two independent accumulation matrix sets | **1.09x** |
 
 Two things surfaced getting there. The copy is not the weak part: an AVX-512
 loop with streaming stores beats `memcpy` outright, 1136 us against 1172. And
-the single-accumulator fused version was slower than running both operations
+the single-accumulation matrix fused version was slower than running both operations
 *separately* -- 2758 against 1136 + 1340 -- because the survey's min and max are
 loop-carried, and one set of them serializes iterations the copy could
 otherwise overlap. Two sets recover most of that, the same reason the
@@ -689,7 +689,7 @@ survey in, while pinned returns in 0.01 ms of 2.51 and is 58% faster besides.
 
 Validation stays fail-fast and costs nothing. The host survey finishes before
 the accumulate is launched, so a batch that does not fit is rejected without
-having touched the accumulator — which a device-side survey can only promise
+having touched the accumulation matrix — which a device-side survey can only promise
 by draining the pipeline to ask.
 
 **Why threading that survey buys nothing, stated carefully because the obvious
@@ -724,7 +724,7 @@ memory type, which gave one function two lifetime contracts: ordinary memory
 was copied and could be reused at once, mapped memory could not, and nothing
 said so. Switching allocator for speed silently corrupted 63% of entries.
 
-`acquire_input` lends out a buffer the accumulator owns and blocks only until
+`acquire_input` lends out a buffer the accumulation matrix owns and blocks only until
 the device has finished with the one being handed back, so the host fills one
 while the device streams the other. Ownership rather than memory type decides
 whether a buffer is read in place, so a pointer the caller passes is theirs
@@ -767,7 +767,7 @@ produce:
   finished per-column results to mapped memory and re-arms the sentinels for
   the next launch, so there is no H2D initialization either. The election costs
   ~3.4 us and the PCIe write itself 0.64. Do **not** mark the device
-  accumulator `volatile` — copied from the NVIDIA sample, it cost 5.71 us by
+  accumulation matrix `volatile` — copied from the NVIDIA sample, it cost 5.71 us by
   defeating caching on every atomic, and turned a 1.12x win into a 0.90x loss.
 
 The election serializes on one counter, so it is O(blocks); it wins below about
@@ -811,7 +811,7 @@ proportion to its size:
   reason the device path ever needed to ask the host a question mid-batch.
 - **Exact pre-sizing, before any processing begins.** `reserve_for` currently
   infers a column's exponent and width from one representative batch and a
-  count. Given the survey for every batch up front, an accumulator can be
+  count. Given the survey for every batch up front, an accumulation matrix can be
   allocated with precisely the limb columns the whole stream will need, and
   then never rescale or widen at all — which is the expensive half of adaptive
   sizing, and the half that must happen between launches.
@@ -864,7 +864,7 @@ The constructor reduces it to one reservation per column — the minimum of the
 minima for the exponent, the maximum of the maxima for the top, and the count
 from the outer size — which is `reserve_for`'s arithmetic with the extents
 supplied rather than inferred. Note what that reduction implies: the
-accumulator never needs to know *which* matrix it is being handed, because any
+accumulation matrix never needs to know *which* matrix it is being handed, because any
 matrix inside the aggregate extents fits the reservation. Submitting them in
 any order therefore falls out rather than having to be arranged, which suits a
 structure whose exactness already makes accumulation order-independent.
@@ -888,7 +888,7 @@ mean *concurrently* — two batches read-modify-write the same limbs of the same
 rows, so they still serialize, whatever order they arrive in.
 
 `Survey` presently lives in `src/kernels.hpp` and would have to become public
-vocabulary, shared between whoever produces a matrix and both accumulators.
+vocabulary, shared between whoever produces a matrix and both accumulation matrices.
 That argues for a small header of its own rather than exposing the kernel
 surface around it.
 
@@ -897,7 +897,7 @@ device but stop asking the host about it. Survey and accumulate launch back to
 back, and the accumulate reads the verdict first: if the batch fits — the
 common case, and the only one when `reserve_for` has done its job — it proceeds
 with no host involvement. If it does not, the accumulate does nothing, leaving
-the accumulator untouched, and the host discovers it at the next check and
+the accumulation matrix untouched, and the host discovers it at the next check and
 performs the rescale or widen it needs before resubmitting. That is optimiztic
 execution rather than deferred validation: a rejected batch is skipped, not
 half-applied, so there is no corrupted state to explain. The survey can also be
@@ -915,7 +915,7 @@ largest ever seen, and that all of them accumulated in the same direction.
 `max_addend_bits` is a high-water mark that never recedes, so after
 `1e300 + 1 - 1e300` it stands near 1000 bits while the value occupies one.
 
-The accumulate can report what the accumulator actually holds, nearly free — it
+The accumulate can report what the accumulation matrix actually holds, nearly free — it
 has already decomposed every value, and the carry loop already knows the
 highest limb it disturbed. Measured, the per-element statistics cost nothing
 (-0.2% in the divergent case, where the kernel does most work per element);
@@ -931,9 +931,9 @@ This needs no deferred validation. The host survey inspects the pending input
 before the accumulate runs, so non-finite values and out-of-range exponents are
 still rejected before anything is written. An earlier version of this plan
 assumed fusing the survey into the accumulate and accepting a corrupted
-accumulator on rejection; that was unnecessary, and the two statistics answer
+accumulation matrix on rejection; that was unnecessary, and the two statistics answer
 different questions — the survey describes the input, the accumulate describes
-the accumulator.
+the accumulation matrix.
 
 The structural consequence is what makes it worth the election: it is what lets
 the device widen at all. Widening is an error there today because the fit test
@@ -945,7 +945,7 @@ which is the property per-limb-position allocation exists to preserve.
 
 ## Symmetric matrices: store one triangle
 
-`ColumnBlockMatrix(n, Uplo)` and `CudaColumnBlockMatrix(n, Uplo)` keep only
+`AccumulationMatrix(n, Uplo)` and `CudaAccumulationMatrix(n, Uplo)` keep only
 `i >= j` (Lower) or `i <= j` (Upper). Column `j` then holds `n-j` entries or
 `j+1`, and either way its stored rows stay contiguous — which is the whole
 reason the triangle fits this layout at all. A warp still reads 32 consecutive
@@ -986,7 +986,7 @@ n = 2048 full storage is 34.8 MB against 32 MiB of L3 while the triangle is
 18.1 MB, so halving the footprint also buys back cache residency.
 
 The GPU's 1.4-1.5x above is short of the CPU's 2x, and **the kernel is not
-where it goes**. Timed on the device path with the accumulator pre-sized, so
+where it goes**. Timed on the device path with the accumulation matrix pre-sized, so
 that nothing but the kernel is in the measurement, n = 2048:
 
 | shape | stored | ns/stored |
@@ -1010,7 +1010,7 @@ caveats below.
 `to_double(i, j, &residual)` also returns what the rounding discarded: exactly
 `(stored value - returned double)`, itself correctly rounded.
 
-The subtraction happens in the accumulator's own fixed point, not in floating
+The subtraction happens in the accumulation matrix's own fixed point, not in floating
 point — forming `exact - hi` in doubles is precisely the cancellation this
 container exists to avoid. The rounding step returns the exact reconstruction
 of what it produced, `m * 2^scale` with `scale >= exp`, so `m << (scale - exp)`
@@ -1069,7 +1069,7 @@ Separating the two levers at 65536x64 on eight threads:
 | folded, K=8 | 2.148 | 3.068 |
 
 Folding alone is 1.81x; **pre-sizing alone is 1.01x**. The uplift is
-accumulator traffic, not allocation — both figures in the headline table were
+accumulation matrix traffic, not allocation — both figures in the headline table were
 already pre-sized, so neither reallocated at all. Pre-sizing then adds 1.43x on
 top of folding, because an adaptive fold still reads its K columns to survey
 them, and once folding has removed the dominant traffic those reads are what is
@@ -1182,7 +1182,7 @@ at radix 52 came off it by being measured rather than by being done.
    survey entry points were host-only, and the device survey kernel was private
    to `reserve_for_device`, which consumed its result and discarded it. Now the
    survey can be taken where the data is and sent ahead -- 768 bytes against
-   33.6 MB, so it arrives long before the matrix does and the accumulator is
+   33.6 MB, so it arrives long before the matrix does and the accumulation matrix is
    sized before the first byte of bulk data lands.
 
    Its `out` is a **device** pointer, and that is the interesting part of the
@@ -1202,12 +1202,12 @@ at radix 52 came off it by being measured rather than by being done.
    but a conversion at every boundary.
 
    Still missing, and known: neither side has a survey entry point that covers
-   only a symmetric accumulator's *stored triangle*. A caller pre-sizing a
-   triangular accumulator has to walk `column_rows(j)` values from
+   only a symmetric accumulation matrix's *stored triangle*. A caller pre-sizing a
+   triangular accumulation matrix has to walk `column_rows(j)` values from
    `column_first_row(j)` itself. The test suite hand-rolls exactly that helper,
    which is usually the sign it belongs in the library.
    `add_matrix_col_major_device` already accepts such input; what is missing is
-   a way for the producer to deliver into a buffer the accumulator will read --
+   a way for the producer to deliver into a buffer the accumulation matrix will read --
    the device-side counterpart of `acquire_input`.
 
    The block reductions were since cut back to what actually needs one. Only
@@ -1268,24 +1268,24 @@ at radix 52 came off it by being measured rather than by being done.
 
    **When folding is worth anything, stated plainly, because it usually is
    not.** Sixteen resident matrices is not a workload; cycling two or three
-   buffers is. And at PCIe rates the accumulator is not the bottleneck to begin
+   buffers is. And at PCIe rates the accumulation matrix is not the bottleneck to begin
    with, so making it faster changes nothing:
 
    | 65536x64 | us a batch |
    | --- | --- |
    | producer filling a device buffer, H2D at 26.7 GB/s | 1255 |
-   | accumulator alone, K=1 | 516 |
+   | accumulation matrix alone, K=1 | 516 |
    | two buffers rotating, producer on its own stream | 1301 |
    | two buffers rotating, producer on the null stream | 1776 |
 
-   The accumulator already has 2.4x of headroom under a PCIe-fed producer, and
+   The accumulation matrix already has 2.4x of headroom under a PCIe-fed producer, and
    a rotation hides it to within 4% of the fill. Folding would take 516 us to
    166 and the batch would still cost 1256. It earns its keep only where input
    arrives faster than about 65 GB/s -- GPUDirect from a NIC, NVLink, or data
    generated on the device -- which is the same conclusion the GPUDirect item
    above reaches from the other direction.
 
-   **The null-stream result is a usage trap worth naming.** This accumulator's
+   **The null-stream result is a usage trap worth naming.** This accumulation matrix's
    stream is a blocking stream, so it implicitly synchronizes with the legacy
    null stream. A producer using plain `cudaMemcpy` serializes against the
    accumulate and gets none of the overlap -- 1776 against 1301, which is the
@@ -1295,7 +1295,7 @@ at radix 52 came off it by being measured rather than by being done.
 ~~`reserve_column` issues a `cudaMemsetAsync` per limb position.~~ **Done.**
 The zeroing is deferred and then done in one launch, which is 14x cheaper than
 the calls it replaces -- 512 arrays took 827 us of `cudaMemsetAsync` against 59
-us for a single kernel. Reserving a whole pre-sized accumulator is where the
+us for a single kernel. Reserving a whole pre-sized accumulation matrix is where the
 count is largest, so that is where it pays:
 
 | shape | limb arrays | before | after | |
@@ -1353,12 +1353,12 @@ being caught. Both are worth remembering when re-measuring.
   the hardware.
 
 - Carry-save was recorded as a 2.8x GPU win, from a benchmark holding the
-  accumulator in registers and adding a full-width value. Bounding it against
+  accumulation matrix in registers and adding a full-width value. Bounding it against
   the real kernels says the GPU gains nothing at all — it is bandwidth-bound,
   so the arithmetic is free — while the CPU, dismissed here as unmeasured,
   gains 25-52%. The same claim was wrong about the size of the effect *and*
   about which machine it was on. A microbenchmark that changes where the
-  accumulator lives is not measuring the same question.
+  accumulation matrix lives is not measuring the same question.
 - The skew was claimed at 2.8x from a synthetic carry walk. Re-measured
   against the real kernel it is 5-9%, and only when the column is wide and its
   exponents diverge. The walk was bandwidth-bound; the real kernel is
@@ -1374,7 +1374,7 @@ being caught. Both are worth remembering when re-measuring.
   said what to do rather than guessing: thread scaling showed the mechanism
   working (the fold scaled 7.0x across eight cores where sequential managed
   2.4x), and running K=8 over eight distinct buffers against the same buffer
-  eight times -- identical arithmetic, identical accumulator traffic -- gave
+  eight times -- identical arithmetic, identical accumulation matrix traffic -- gave
   1.000 against 2.748 Gelem/s, so most of the remaining loss was the input
   *stream count*, not the fold. A traffic model that counts bytes and not
   streams will mispredict this.
@@ -1393,7 +1393,7 @@ being caught. Both are worth remembering when re-measuring.
   `add_matrix_col_major`, which stages a host copy and runs a full host-side
   survey before it launches anything, so what was divided by the block count
   was mostly host work that has no block in it at all. Re-run on the device
-  path with the accumulator pre-sized, the intercept is **12.7 ns**, and an
+  path with the accumulation matrix pre-sized, the intercept is **12.7 ns**, and an
   independent mimic of just the epilogue agrees at ~12. Then the real answer
   fell out: every shape costs the same per stored element, so the kernel was
   never the problem and the loss is host-side.
@@ -1424,7 +1424,7 @@ Gelem/s, exact accumulations per second, mixed signs.
 The 65536x64 row is the one that moved. It was the DRAM-bound case and the
 worst number in the table; folding eight matrices per pass takes it from 1.11
 to 3.01, past the GPU's host-input rate. Nothing else in the table changed,
-because nothing else was bound by accumulator traffic.
+because nothing else was bound by accumulation matrix traffic.
 
 Pre-sizing does not appear here because it is worth ~1% on the single-matrix
 path. Where it shows is the device's small-batch fixed cost, which it removes

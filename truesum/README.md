@@ -23,7 +23,7 @@ A(i, j) = V · 2^column_exponent(j)
 ```
 
 A column pays only for the dynamic range its own data spans. In the bundled
-demo, a 4×4 accumulator holding values from 10⁻²³ to 10²⁶ occupies 584 bytes
+demo, a 4×4 accumulation matrix holding values from 10⁻²³ to 10²⁶ occupies 584 bytes
 total, with per-column widths of 128–192 bits rather than a flat 2100.
 
 Both column parameters adapt automatically, and only ever in the safe direction:
@@ -49,9 +49,9 @@ wide, instead of immediately sinking to 2⁻⁵².
 ## Usage
 
 ```cpp
-#include "truesum/column_accumulator.hpp"
+#include "truesum/accumulation_matrix.hpp"
 
-truesum::ColumnBlockMatrix acc(rows, cols);
+truesum::AccumulationMatrix acc(rows, cols);
 
 acc.reserve_for(first_batch.data(), n_batches);   // optional: avoids rescaling
 for (const auto& batch : batches) {
@@ -70,9 +70,9 @@ report.
 
 `add_column(j, v)` accumulates a single column from `rows()` contiguous
 doubles, so a caller can stream columns instead of holding a whole input
-matrix. The accumulator only ever touches one column at a time, and this is
+matrix. The accumulation matrix only ever touches one column at a time, and this is
 what lets it be far larger than any input that could be resident alongside it —
-on a 46 GB machine, a square accumulator goes from 42,000 x 42,000 to
+on a 46 GB machine, a square accumulation matrix goes from 42,000 x 42,000 to
 60,000 x 60,000 (verified) simply by feeding it a column at a time.
 
 `reserve_for` is purely an optimization — it pre-sizes each column from a
@@ -96,7 +96,7 @@ terminating decimal expansion, since `V · 2⁻ᵏ = (V · 5ᵏ) / 10ᵏ`.
 - `-0.0` accumulates as an exact zero. The sign of zero is not tracked, so a
   cell that sums to zero reads back as `+0.0`.
 - `set_zero()` clears the values but keeps each column's learned scale, so a
-  reused accumulator does not re-pay for rescaling.
+  reused accumulation matrix does not re-pay for rescaling.
 
 ### Storage layout
 
@@ -113,7 +113,7 @@ memory instead of copying it to the device first — measured at 65536x64,
 copying 33.6 MB and then reading it from device memory takes 1768 us against
 1257 us to read it in place, and 1257 is exactly what the transfer alone costs,
 so the arithmetic hides entirely behind the bus. Allocate input with
-`CudaColumnBlockMatrix::allocate_input` and it is used where it lies; ordinary
+`CudaAccumulationMatrix::allocate_input` and it is used where it lies; ordinary
 host memory still works and is staged through a mapped buffer.
 
 Kernels are flat free functions selected once per column from the running CPU's
@@ -132,7 +132,7 @@ columns strided by `cols` doubles, and a strided vector gather costs more on
 Zen 4 than the decomposition it feeds, so such a column is staged into a
 contiguous buffer once rather than gathered.
 
-Note which layout is which: the *accumulator's* storage always keeps a column
+Note which layout is which: the *accumulation matrix's* storage always keeps a column
 contiguous, since `limbs[k]` holds limb `k` of every row. Only the caller's
 matrix can be strided.
 
@@ -155,7 +155,7 @@ reach only 1.11 Gelem/s because every core is then waiting on the same DRAM.
 Single-core work here is issue-bound — measured at 2.32 IPC with a 1% miss
 rate — which is why it scales at all until it doesn't.
 
-A single accumulator is still not reentrant from the *caller's* threads. Call
+A single accumulation matrix is still not reentrant from the *caller's* threads. Call
 `add_matrix` from one thread and let the pool do the spreading.
 
 ## Build
@@ -198,7 +198,7 @@ Naming conventions the formatter cannot enforce:
 
 - **A trailing underscore marks a private member.** Every private data member
   in the library takes one and every public member goes without, which is why
-  `ColumnBlockMatrix::rows_` has it while `Survey::any` and `Slot::ev_done` do
+  `AccumulationMatrix::rows_` has it while `Survey::any` and `Slot::ev_done` do
   not. The test is the member's own access, not its enclosing type's:
   `Column` and `Slot` are nested inside a `private:` section, but their own
   members are public and so stay bare. The underscore is what says "reaching
@@ -255,7 +255,7 @@ row/column layout survives formatting.
 At size, where indexing and scale bookkeeping are what can break:
 
 - **257 x 9 cross-checked against scalars.** A 257-row column shares one
-  exponent across every row, while a 1x1 accumulator picks the exponent that
+  exponent across every row, while a 1x1 accumulation matrix picks the exponent that
   suits its single cell, so the two hold different integers. Every one of the
   2313 cells must still agree digit-for-digit on its exact decimal — which pins
   down both the row-stride arithmetic and the claim that a column's shared
@@ -283,8 +283,8 @@ large tests.
 | path | contents |
 | --- | --- |
 | [include/truesum/limbs.hpp](include/truesum/limbs.hpp) | low-level two's complement limb arithmetic |
-| [include/truesum/column_accumulator.hpp](include/truesum/column_accumulator.hpp) | the `ColumnBlockMatrix` interface |
+| [include/truesum/accumulation_matrix.hpp](include/truesum/accumulation_matrix.hpp) | the `AccumulationMatrix` interface |
 | [src/limbs.cpp](src/limbs.cpp) | shifts, widening, carry/borrow chains, decimal conversion |
-| [src/column_accumulator.cpp](src/column_accumulator.cpp) | scale tracking, rescaling, rounding |
+| [src/accumulation_matrix.cpp](src/accumulation_matrix.cpp) | scale tracking, rescaling, rounding |
 | [tests/test_truesum.cpp](tests/test_truesum.cpp) | test suite |
 | [examples/demo.cpp](examples/demo.cpp) | exact vs. naive summation comparison |
