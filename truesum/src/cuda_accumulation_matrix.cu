@@ -207,7 +207,7 @@ split_device(double v, unsigned long long &mantissa, int &exponent, int &top,
 // already in registers. One exact pass is both simpler and cheaper.
 __global__ void
 survey_kernel(const double *__restrict__ values,
-              const ColumnShape *__restrict__ shapes,
+              const ColumnShape *__restrict__ shapes, unsigned uniform_rows,
               std::size_t col_stride, Survey *__restrict__ out)
 {
     // Only the extents need a tree. `any` is not reduced at all -- it is
@@ -220,7 +220,12 @@ survey_kernel(const double *__restrict__ values,
 
     const unsigned tid = threadIdx.x;
     const unsigned j = blockIdx.y;
-    const ColumnShape sh = shapes[j];
+    // A null `shapes` means every column has the same shape: `uniform_rows`
+    // tall and starting at row 0, which is what surveying a whole matrix looks
+    // like as opposed to an accumulation matrix's stored triangle. The shape
+    // then rides in the parameter block, so the standalone survey below needs
+    // no device allocation for a table of identical entries.
+    const ColumnShape sh = shapes ? shapes[j] : ColumnShape{uniform_rows, 0};
     const double *col = values + static_cast<std::size_t>(j) * col_stride +
                         sh.first_row;
     const std::size_t rows = sh.rows;
@@ -539,6 +544,29 @@ limbs_for_bits(std::size_t bits)
     return (bits + limbs::kLimbBits - 1) / limbs::kLimbBits;
 }
 
+// Both pointers a caller hands the standalone survey are dereferenced by the
+// kernel and by nothing on the host, so each has to be memory the device can
+// reach. Pageable memory faults inside the launch, away from the mistake;
+// one driver query on a setup path buys a diagnostic that names what to
+// allocate instead. What comes back is the device alias, because a mapped host
+// allocation is not obliged to share its address with the device.
+void *
+device_alias(const void *p, const char *what)
+{
+    cudaPointerAttributes attr{};
+    const cudaError_t st = cudaPointerGetAttributes(&attr, p);
+    if (cudaSuccess != st || nullptr == attr.devicePointer) {
+        cudaGetLastError();  // an unregistered pointer leaves this sticky
+        throw std::invalid_argument(
+            std::string("truesum: ") + what +
+            " from the device, so it must be device memory or page-locked "
+            "mapped host memory -- cudaMalloc, cudaHostAlloc with "
+            "cudaHostAllocMapped, or cudaHostRegister with "
+            "cudaHostRegisterMapped");
+    }
+    return attr.devicePointer;
+}
+
 }  // namespace
 
 InputRead::~InputRead()
@@ -582,49 +610,33 @@ InputRead::ready() const
 void
 survey_matrix_col_major_device(Survey *out, const double *b,
                                std::size_t rows, std::size_t cols,
-                               std::size_t col_stride)
+                               std::size_t col_stride, CUstream_st *stream)
 {
     if (0 == rows || 0 == cols) return;
     const std::size_t stride = col_stride ? col_stride : rows;
 
-    // `out` is written by the kernel, so it has to be somewhere the device can
-    // write. Device memory, or host memory that is page-locked and mapped --
-    // which is how a caller asks for the answer on the host without this
-    // function copying it there and guessing that is what they wanted.
-    cudaPointerAttributes attr{};
-    const cudaError_t st = cudaPointerGetAttributes(&attr, out);
-    if (cudaSuccess != st || nullptr == attr.devicePointer) {
-        cudaGetLastError();  // an unregistered pointer leaves this sticky
-        throw std::invalid_argument(
-            "truesum: survey_matrix_col_major_device writes `out` from the "
-            "device, so it must be device memory or page-locked mapped host "
-            "memory -- cudaMalloc, cudaHostAlloc with cudaHostAllocMapped, or "
-            "cudaHostRegister with cudaHostRegisterMapped");
-    }
-    Survey *dst = static_cast<Survey *>(attr.devicePointer);
+    // The kernel writes `out` and reads `b`, and the host touches neither, so
+    // both are device pointers whatever kind of memory the caller allocated.
+    Survey *dst = static_cast<Survey *>(
+        device_alias(out, "survey_matrix_col_major_device writes `out`"));
+    const double *src = static_cast<const double *>(
+        device_alias(b, "survey_matrix_col_major_device reads `b`"));
 
-    // Every column is the full height: this surveys a matrix, not an
-    // accumulation matrix's stored triangle, so there is no per-column shape to
-    // carry.
-    std::vector<ColumnShape> host_shapes(cols);
-    for (auto &sh : host_shapes) {
-        sh.rows = static_cast<unsigned>(rows);
-        sh.first_row = 0;
-    }
-    ColumnShape *shapes = nullptr;
-    cuda(Malloc(&shapes, cols * sizeof(ColumnShape)));
-    cuda(Memcpy(shapes, host_shapes.data(), cols * sizeof(ColumnShape),
-                cudaMemcpyHostToDevice));
-
+    // Every column is the full height, since this surveys a matrix rather than
+    // an accumulation matrix's stored triangle. That uniform shape goes in the
+    // parameter block, so the survey allocates no device memory at all: a
+    // caller who owns both buffers is entitled to a call that neither allocates
+    // behind their back nor perturbs the allocator between their own launches.
     const unsigned n = static_cast<unsigned>(cols);
     const unsigned init_blocks = (n + kBlock - 1) / kBlock;
-    survey_init_kernel<<<init_blocks, kBlock>>>(dst, n);
-    survey_kernel<<<launch_grid(rows, cols), kBlock>>>(b, shapes, stride, dst);
-    survey_finish_kernel<<<init_blocks, kBlock>>>(dst, n);
-    // Blocking, so the result is readable on return whichever kind of memory
-    // `out` is. The temporary below cannot be freed before that anyway.
-    cuda(DeviceSynchronize());
-    cudaFree(shapes);
+    survey_init_kernel<<<init_blocks, kBlock, 0, stream>>>(dst, n);
+    survey_kernel<<<launch_grid(rows, cols), kBlock, 0, stream>>>(
+        src, nullptr, static_cast<unsigned>(rows), stride, dst);
+    survey_finish_kernel<<<init_blocks, kBlock, 0, stream>>>(dst, n);
+    // No wait. The three launches are ordered against each other by the stream
+    // they share, and when the survey is readable is the caller's business:
+    // they may want it on the device, or beside their own launches on their own
+    // stream, and either way they can synchronize or record an event.
 }
 
 bool
@@ -677,6 +689,8 @@ CudaAccumulationMatrix::CudaAccumulationMatrix(std::size_t rows,
                        cudaHostAllocDefault));
         cuda(EventCreateWithFlags(&ev_desc_, cudaEventDisableTiming));
         cuda(Malloc(&survey_out_, cols_ * sizeof(Survey)));
+        cuda(HostAlloc(&survey_host_, cols_ * sizeof(Survey),
+                       cudaHostAllocDefault));
     }
     init_columns();
 }
@@ -832,6 +846,7 @@ CudaAccumulationMatrix::~CudaAccumulationMatrix()
     cudaFreeHost(desc_host_);
     if (nullptr != ev_desc_) cudaEventDestroy(ev_desc_);
     cudaFree(survey_out_);
+    cudaFreeHost(survey_host_);
     cudaFree(shapes_);
     cudaFree(occupancy_device_);
     cudaFreeHost(occupancy_host_);
@@ -1045,6 +1060,32 @@ CudaAccumulationMatrix::reserve_for(const double *b, std::size_t count,
     reserve_from_extents(low.data(), high.data(), any.data(), count);
 }
 
+// Writing the sentinels with a kernel rather than copying them up. The copy
+// this replaces was pageable and host-to-device, which the driver is allowed to
+// stage through a pinned buffer of its own, and staging one may synchronize the
+// stream it was queued on -- a drain in the middle of an accumulate, to deliver
+// 768 bytes at 64 columns.
+void
+CudaAccumulationMatrix::begin_survey()
+{
+    const unsigned n = static_cast<unsigned>(cols_);
+    const unsigned blocks = (n + kBlock - 1) / kBlock;
+    survey_init_kernel<<<blocks, kBlock, 0, st_compute_>>>(
+        static_cast<Survey *>(survey_out_), n);
+}
+
+// The verdict comes back into pinned memory, so this copy is a real DMA. The
+// synchronize is not: the host cannot size a column until it has read the
+// extents, and that is the one wait on this path that nothing can remove.
+const Survey *
+CudaAccumulationMatrix::end_survey()
+{
+    cuda(MemcpyAsync(survey_host_, survey_out_, cols_ * sizeof(Survey),
+                     cudaMemcpyDeviceToHost, st_compute_));
+    synchronize();
+    return static_cast<const Survey *>(survey_host_);
+}
+
 void
 CudaAccumulationMatrix::reserve_for_device(const double *b, std::size_t count,
                                            std::size_t col_stride)
@@ -1052,16 +1093,11 @@ CudaAccumulationMatrix::reserve_for_device(const double *b, std::size_t count,
     if (0 == cols_ || 0 == rows_) return;
     const std::size_t stride = col_stride ? col_stride : rows_;
 
-    std::vector<Survey> surveys(cols_);
-    for (auto &d : surveys) d = Survey{INT_MAX, INT_MIN, false, false};
-    cuda(MemcpyAsync(survey_out_, surveys.data(), cols_ * sizeof(Survey),
-                     cudaMemcpyHostToDevice, st_compute_));
+    begin_survey();
     survey_kernel<<<launch_grid(rows_, cols_), kBlock, 0, st_compute_>>>(
-        b, static_cast<const ColumnShape *>(shapes_), stride,
+        b, static_cast<const ColumnShape *>(shapes_), 0, stride,
         static_cast<Survey *>(survey_out_));
-    cuda(MemcpyAsync(surveys.data(), survey_out_, cols_ * sizeof(Survey),
-                     cudaMemcpyDeviceToHost, st_compute_));
-    synchronize();
+    const Survey *surveys = end_survey();
 
     std::vector<int> low(cols_, 0), high(cols_, 0);
     std::vector<char> any(cols_, 0);
@@ -1340,18 +1376,13 @@ CudaAccumulationMatrix::survey_device_inputs(const double *const *b,
                                              std::size_t col_stride)
 {
     const dim3 grid = launch_grid(rows_, cols_);
-    std::vector<Survey> surveys(cols_);
-    for (auto &d : surveys) d = Survey{INT_MAX, INT_MIN, false, false};
-    cuda(MemcpyAsync(survey_out_, surveys.data(), cols_ * sizeof(Survey),
-                     cudaMemcpyHostToDevice, st_compute_));
+    begin_survey();
     for (std::size_t k = 0; k < count; ++k) {
         survey_kernel<<<grid, kBlock, 0, st_compute_>>>(
-            b[k], static_cast<const ColumnShape *>(shapes_), col_stride,
+            b[k], static_cast<const ColumnShape *>(shapes_), 0, col_stride,
             static_cast<Survey *>(survey_out_));
     }
-    cuda(MemcpyAsync(surveys.data(), survey_out_, cols_ * sizeof(Survey),
-                     cudaMemcpyDeviceToHost, st_compute_));
-    synchronize();
+    const Survey *surveys = end_survey();
 
     for (std::size_t j = 0; j < cols_; ++j) {
         if (surveys[j].nonfinite) {
@@ -1479,20 +1510,14 @@ CudaAccumulationMatrix::accumulate_device(const double *b,
     // First pass: learn each column's exponent range, and reject anything the
     // reservation cannot hold. The decisions the CPU makes by rescaling and
     // widening are errors here, because neither is possible mid-launch.
-    std::vector<Survey> surveys(cols_);
-    for (auto &d : surveys) d = Survey{INT_MAX, INT_MIN, false, false};
-    cuda(MemcpyAsync(survey_out_, surveys.data(), cols_ * sizeof(Survey),
-                     cudaMemcpyHostToDevice, st_compute_));
-
+    begin_survey();
     survey_kernel<<<grid, kBlock, 0, st_compute_>>>(
-        b, static_cast<const ColumnShape *>(shapes_), col_stride,
+        b, static_cast<const ColumnShape *>(shapes_), 0, col_stride,
         static_cast<Survey *>(survey_out_));
     // This is the drain the host path avoids: with the input already on the
     // device there is nothing to survey on the host, so the verdict has to come
     // back before the accumulate can be allowed to run.
-    cuda(MemcpyAsync(surveys.data(), survey_out_, cols_ * sizeof(Survey),
-                     cudaMemcpyDeviceToHost, st_compute_));
-    synchronize();
+    const Survey *surveys = end_survey();
 
     for (std::size_t j = 0; j < cols_; ++j) {
         if (surveys[j].nonfinite) {

@@ -81,8 +81,8 @@ private:
     CUevent_st *ev_ = nullptr;
 };
 
-// Surveys a column-major matrix that is already resident in device memory,
-// writing `cols` entries. Column j begins at b + j*col_stride and its rows are
+// Surveys a column-major matrix the device can read in place, writing `cols`
+// entries. Column j begins at b + j*col_stride and its rows are
 // contiguous; 0 means tightly packed.
 //
 // The device counterpart of survey_matrix_col_major, and the piece a producer
@@ -92,19 +92,30 @@ private:
 // accumulating while the matrix itself is still in flight: 768 bytes against
 // 33.6 MB at 65536x64.
 //
-// **`out` is written by the device**, so it must be device memory or host
-// memory that is page-locked and mapped -- cudaMalloc, or cudaHostAlloc /
-// cudaHostRegister with the mapped flag. That is checked. A caller wanting the
-// answer on the host passes a mapped pinned pointer and says so, rather than
-// this function copying it there and assuming that is what was wanted; a
-// caller feeding it to something else on the device pays for no copy at all.
+// **Both pointers are dereferenced by the device**, so each must be device
+// memory or host memory that is page-locked and mapped -- cudaMalloc, or
+// cudaHostAlloc / cudaHostRegister with the mapped flag. Both are checked, and
+// pageable memory is rejected rather than staged. That is the same rule the
+// accumulate path follows, and it is what keeps this function free of
+// allocations: it copies nothing, allocates nothing, and leaves the caller's
+// allocator undisturbed between their own launches.
 //
-// Blocking, so the result is readable on return whichever kind of memory `out`
-// is. A setup call rather than something to put in a loop.
+// A caller wanting the answer on the host passes a mapped pinned `out` and says
+// so, rather than this function copying it there and assuming that is what was
+// wanted; a caller feeding it to something else on the device pays for no copy
+// at all.
+//
+// Asynchronous with respect to the host, as every kernel-based call here is.
+// The launches go on `stream`, or on the default stream when that is null, and
+// this returns as soon as they are queued. `out` holds the survey once the
+// caller has synchronized that stream or waited on an event they recorded on
+// it; nothing is allocated and nothing is copied, so no hidden temporary's
+// lifetime forces a wait that the caller did not ask for.
 void
 survey_matrix_col_major_device(Survey *out, const double *b,
                                std::size_t rows, std::size_t cols,
-                               std::size_t col_stride = 0);
+                               std::size_t col_stride = 0,
+                               CUstream_st *stream = nullptr);
 
 class CudaAccumulationMatrix {
 public:
@@ -380,6 +391,13 @@ private:
     InputRead record_input_read();
     void launch_accumulate(const double *const *b, std::size_t count,
                            std::size_t col_stride);
+    // Sentinels onto the device, then the verdict back. Every device-side
+    // survey is bracketed by these two: launch begin_survey(), launch as many
+    // survey kernels as there are matrices, then read what end_survey()
+    // returns. The pointer it hands back is this object's own pinned buffer
+    // and stays valid until the next survey.
+    void begin_survey();
+    const Survey *end_survey();
     void survey_device_inputs(const double *const *b, std::size_t count,
                               std::size_t col_stride);
     void validate_host_survey(const double *b, std::size_t col_stride);
@@ -460,6 +478,11 @@ private:
     bool desc_in_flight_ = false;
     void *survey_out_ =
         nullptr;  // device survey results, for device-side input
+    // Where those results are read back to. Pinned, so the copy out is a DMA
+    // rather than one the driver stages through a buffer of its own; not
+    // mapped, because the kernel reduces into `survey_out_` with atomics and
+    // those belong in device memory.
+    void *survey_host_ = nullptr;  // pinned Survey[]
 
     // Per-column stored length and first row, device-side. Fixed at
     // construction and never rewritten, so both kernels can read it without

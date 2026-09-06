@@ -1507,6 +1507,50 @@ test_device_survey()
         check(threw, "a pageable output pointer is rejected");
     }
 
+    // And so is a pageable input, for the same reason: the kernel reads it on
+    // the device, so pageable memory faults inside the launch rather than
+    // merely running slowly.
+    {
+        truesum::Survey *d2_out = nullptr;
+        cudaMalloc(&d2_out, cols * sizeof(truesum::Survey));
+        bool threw = false;
+        try {
+            truesum::survey_matrix_col_major_device(d2_out, src.data(), rows,
+                                                    cols);
+        } catch (const std::invalid_argument &) {
+            threw = true;
+        }
+        cudaFree(d2_out);
+        check(threw, "a pageable input pointer is rejected");
+    }
+
+    // A caller's own stream, and a non-blocking one so that nothing on the
+    // default stream orders it for us: the survey is asynchronous, so the only
+    // thing that makes the result readable is the caller's wait.
+    {
+        cudaStream_t s = nullptr;
+        cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
+        truesum::Survey *d_out2 = nullptr;
+        cudaMalloc(&d_out2, cols * sizeof(truesum::Survey));
+        std::vector<truesum::Survey> on_stream(cols);
+        truesum::survey_matrix_col_major_device(d_out2, dev, rows, cols, 0, s);
+        cudaStreamSynchronize(s);
+        cudaMemcpy(on_stream.data(), d_out2, cols * sizeof(truesum::Survey),
+                   cudaMemcpyDeviceToHost);
+        std::size_t differ = 0;
+        for (std::size_t j = 0; j < cols; ++j) {
+            if (on_stream[j].min_exponent != host[j].min_exponent ||
+                on_stream[j].max_top != host[j].max_top ||
+                on_stream[j].any != host[j].any ||
+                on_stream[j].nonfinite != host[j].nonfinite) {
+                ++differ;
+            }
+        }
+        cudaFree(d_out2);
+        cudaStreamDestroy(s);
+        check(0 == differ, "a survey run on the caller's own stream agrees");
+    }
+
     // A survey taken on the device must size an accumulation matrix the same
     // way one taken on the host does -- which is the whole point of sending it
     // ahead.
@@ -1537,10 +1581,12 @@ test_device_survey()
         cudaHostAlloc(&mapped, 2 * sizeof(truesum::Survey),
                       cudaHostAllocMapped);
         truesum::survey_matrix_col_major_device(mapped, d2, rows, 2);
+        // The call is asynchronous, so the wait is the caller's to make.
+        cudaStreamSynchronize(0);
         check(!mapped[0].nonfinite && mapped[1].nonfinite,
               "the device survey flags a non-finite column and only that one");
         check(mapped[0].any && 0 == mapped[1].min_exponent,
-              "and a mapped pinned output is readable on return");
+              "and a mapped pinned output is readable once the caller waits");
         cudaFreeHost(mapped);
         cudaFree(d2);
     }

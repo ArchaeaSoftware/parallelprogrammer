@@ -1196,6 +1196,16 @@ at radix 52 came off it by being measured rather than by being done.
    inside a function whose whole point is that 768 bytes need not travel the
    same road as 33.6 MB.
 
+   It takes a stream and returns as soon as its launches are queued, like
+   every other kernel-based call in the library and like cuBLAS or CUB. Both of
+   its pointers are dereferenced by the device and by nothing on the host, so
+   both are checked and pageable memory is rejected; nothing is allocated,
+   nothing is copied, and the uniform column shape rides in the parameter
+   block. Between them those two facts are what make the asynchrony honest:
+   with no internal temporary to free, there is no lifetime that would force a
+   synchronize on the caller's behalf, and when the result becomes readable is
+   left where it belongs.
+
    Writing the caller's buffer directly also removed the internal
    `DeviceSurvey`. It existed because `Survey`'s two bools are not
    atomic-friendly -- but only the two extents need atomics, and they are ints

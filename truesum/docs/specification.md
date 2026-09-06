@@ -126,10 +126,11 @@ void survey_matrix_col_major(Survey *out, const double *b, std::size_t rows,
                              std::size_t cols, std::size_t col_stride = 0);
 void survey_matrix(Survey *out, const double *b, std::size_t rows,
                    std::size_t cols, std::size_t row_stride = 0);
-// device-resident input; `out` must be device or mapped pinned memory
+// both pointers must be device or mapped pinned memory; asynchronous
 void survey_matrix_col_major_device(Survey *out, const double *b,
                                     std::size_t rows, std::size_t cols,
-                                    std::size_t col_stride = 0);
+                                    std::size_t col_stride = 0,
+                                    CUstream_st *stream = nullptr);
 ```
 
 The host and device forms agree field for field. Which side computes a survey
