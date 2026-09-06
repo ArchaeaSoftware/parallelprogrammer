@@ -1272,6 +1272,43 @@ test_device_fold()
         check(threw, "folding more matrices than fit is rejected");
         cudaFree(d);
     }
+
+    // The headroom a fold reserves grows with the number of matrices, not with
+    // the range they span. Surveying the set produces one pair of extents for
+    // the whole fold, so the column has to be fitted for as many addends as
+    // there are matrices; counting the fold as a single addend understates the
+    // width by log2(count) bits, which this column is chosen to expose. Its
+    // values span 2^0 to 2^60, so the shared exponent is 0 and the sum of
+    // sixteen of them needs a second limb the sizing would otherwise skip.
+    {
+        const std::size_t rows = 64, count = 16;
+        std::vector<double> v(rows, 1152921504606846976.0);  // 2^60
+        v[0] = 1.0;
+
+        truesum::AccumulationMatrix cpu(rows, 1);
+        std::vector<const double *> host(count, v.data());
+        cpu.add_matrices_col_major(host.data(), count, rows);
+
+        double *d = nullptr;
+        cudaMalloc(&d, rows * sizeof(double));
+        cudaMemcpy(d, v.data(), rows * sizeof(double), cudaMemcpyHostToDevice);
+        std::vector<const double *> devc(count, d);
+
+        truesum::CudaAccumulationMatrix g(rows, 1);
+        g.reserve_for_device(d, 1, rows);
+        g.add_matrices_col_major_device(devc.data(), count, rows);
+        g.synchronize();
+        check(g.column_limbs(0) == cpu.column_limbs(0),
+              "a fold is sized for as many addends as it has matrices: " +
+                  std::to_string(g.column_limbs(0)) + " limbs against " +
+                  std::to_string(cpu.column_limbs(0)));
+        std::size_t bad = 0;
+        for (std::size_t i = 0; i < rows; ++i) {
+            if (g.entry_limbs(i, 0) != cpu.entry_limbs(i, 0)) ++bad;
+        }
+        check(bad == 0, "and matches the CPU fold limb for limb");
+        cudaFree(d);
+    }
 }
 
 // The pattern the device path exists for: a producer cycling device buffers,

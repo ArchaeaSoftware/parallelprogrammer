@@ -981,7 +981,7 @@ CudaAccumulationMatrix::rescale_column(std::size_t j, int new_exponent)
 // after the survey has established that batch's extent.
 void
 CudaAccumulationMatrix::require_fit(std::size_t j, int min_exponent,
-                                    int max_top)
+                                    int max_top, std::size_t count)
 {
     if (min_exponent < cols_state_[j].exponent) {
         rescale_column(j, static_cast<int>(min_exponent));
@@ -989,7 +989,7 @@ CudaAccumulationMatrix::require_fit(std::size_t j, int min_exponent,
     Column &c = cols_state_[j];
     c.max_addend_bits = std::max(
         c.max_addend_bits, static_cast<std::size_t>(max_top - c.exponent));
-    ++c.add_count;
+    c.add_count += count;
 
     const std::size_t needed_bits =
         c.max_addend_bits + ceil_log2(c.add_count + 1) + 1;
@@ -1359,7 +1359,7 @@ CudaAccumulationMatrix::survey_device_inputs(const double *const *b,
                 "truesum: cannot accumulate a non-finite value");
         }
         if (!surveys[j].any) continue;
-        require_fit(j, surveys[j].min_exponent, surveys[j].max_top);
+        require_fit(j, surveys[j].min_exponent, surveys[j].max_top, count);
     }
 }
 

@@ -388,7 +388,13 @@ private:
     void harvest_occupancy();
     void reserve_from_extents(const int *low, const int *high,
                               const char *any, std::size_t count);
-    void require_fit(std::size_t j, int min_exponent, int max_top);
+    // `count` is how many addends the extents cover, which is one per
+    // matrix. A fold surveys its whole input set into a single pair of extents
+    // and then fits the column once, so it has to say how many matrices that
+    // pair stands for; the headroom term grows with the number of addends and
+    // not with the range they span.
+    void require_fit(std::size_t j, int min_exponent, int max_top,
+                     std::size_t count = 1);
     void grow_column(std::size_t j, std::size_t needed);
     void rescale_column(std::size_t j, int new_exponent);
     void ensure_slots(std::size_t words);
