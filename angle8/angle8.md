@@ -2,7 +2,10 @@
 
 `angle8.h` is a header-only angle type for C99 and C++11. An angle is a
 signed 8-bit integer scaled by pi, so the byte's whole range covers exactly
-one turn:
+one turn. Casey Muratori's
+[Turns are better than radians](https://www.computerenhance.com/p/turns-are-better-than-radians)
+makes the case for the turn as the unit; a binary angle is that idea taken
+to fixed point, where a full turn is the integer's own wrap around.
 
 | raw  | radians      | degrees   |
 |------|--------------|-----------|
@@ -14,10 +17,9 @@ one turn:
 |  127 | 127/128 * pi | 178.59375 |
 
 Resolution is 1/256 of a turn, about 1.4 degrees. That is coarse for a
-compass, but plenty for a heading in a game entity, a sprite rotation, a
-direction packed into a network message, or a phase in a signal table.
+compass, but plenty for certain applications: a heading in a game entity perhaps, or a sprite rotation, a direction packed into a network message, or a phase in a signal table.
 
-## Wrap around is the feature
+## Leveraging Two's Complement Wraparound
 
 Because 256 raw units make one full turn, ordinary two's-complement overflow
 is angular wrap around. Adding 1 to 127, just under +pi, gives -128, which is
@@ -60,7 +62,7 @@ input is accepted; 370 degrees becomes 10 degrees. NaN and infinities map to
 0. `angle8_from_degrees_int` does the same for integer degrees with no
 floating point at all, for targets that have none.
 
-### Two bit tricks
+### Bit Tricks
 
 The header carries two alternative conversion paths, each selected by a macro
 and each always available under its own name.
