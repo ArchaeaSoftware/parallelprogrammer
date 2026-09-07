@@ -5,7 +5,7 @@ allocation and the AVX-512 survey and accumulate kernels have all landed, and
 the measurements below are from the real kernels unless a section says
 otherwise. The radix question is now closed too: carry-save at
 52 was implemented and measured, and 64 stays. Threading, producer-supplied
-surveys on both targets, symmetric storage and multi-batch folding have all
+surveys on both targets, symmetric storage and multi-matrix batching have all
 landed since. This
 header previously read "design, not implemented", which stopped being true at
 `fdc8b75`.
@@ -36,7 +36,7 @@ RTX 3060 (sm_86, CUDA 12.9).
 | Survey supplied by the producer; accumulation matrix pre-sized from it | landed, both targets |
 | Symmetric matrices store one triangle, LAPACK `uplo` | landed, both targets |
 | Readback returns the residual alongside the rounded double | landed |
-| Multi-batch folding, K matrices per pass | landed, CPU |
+| Batching, K matrices per pass | landed, CPU |
 
 Storage width is closed: 32-bit limbs were measured slower than 64-bit on both
 targets, so `uint64_t` is the plan of record everywhere and the limb type does
@@ -446,7 +446,7 @@ produce exactly the leaky abstraction this design is trying to avoid.
 
 ## Templates: only in the kernels, never in the API
 
-Fixing storage at 64 bits removed the case for templating the public class —
+Choosing 64-bit storage everywhere removed the case for templating the public class —
 there is no type left to vary. Templating `AccumulationMatrix` would force
 header-only or explicit instantiation and make the most-read code less flat for
 no benefit.
@@ -521,7 +521,7 @@ A single accumulation pass can widen a column by many limbs at once, because
 `max_addend_bits` is a *range* from the column exponent to the highest bit
 reached rather than an increment. Measured on the CPU container: a fresh column
 given one pass spanning 2^-1074 to 2^1023 goes from 1 limb to 33; a column
-fixed at 1.0 that then sees 2^1000 goes to 16; a single `add(2^900)` goes to
+set at 1.0 that then sees 2^1000 goes to 16; a single `add(2^900)` goes to
 15. So there is no cheap slack to pre-allocate — sizing for the worst case is
 2112 bits an entry against the 128-192 real columns use, which is the flat
 allocation this structure exists to avoid.
@@ -593,7 +593,7 @@ for a borrowed buffer, the survey and the kernel; for a staged one, those plus
 the copy the library itself performs.
 
 3.27 Gelem/s is 26.1 GB/s of doubles against the 26.7 this link achieves, so
-**PCIe is the floor for this path**: eight bytes an element must cross it, and
+**PCIe is the limit for this path**: eight bytes an element must cross it, and
 no kernel change beats ~3.3 Gelem/s while input starts on the host. If that
 ever stops being true it will be through GPUDirect from a network adapter, not
 a faster staging path.
@@ -633,7 +633,7 @@ above shows the same thing as throughput; this is where it comes from.
 
 **The library's survey is cheaper than a standalone one** -- 705 against 1376 --
 because `validate_host_survey` passes the column's current exponent as the
-floor, so the significand pass is skipped once a column has an exponent.
+cutoff, so the significand pass is skipped once a column has an exponent.
 
 **Fusing the copy with the survey was tried properly and does not pay.** The
 staged path walks 33.6 MB twice, to copy and then to survey. A real fusion
@@ -738,7 +738,7 @@ again on return whatever kind of memory it is.
 Both kernels grid-stride, so any smaller grid is correct; it only gives each
 thread more rows. Capping the *total* at 1024 blocks is what makes the survey's
 reduction pay for itself — uncapped, 65536 rows over 64 columns launches 16384
-blocks, each folding one value per thread and then paying a full eight-step
+blocks, each batching one value per thread and then paying a full eight-step
 shared-memory tree to reduce it.
 
 | | survey kernel | device path, end to end |
@@ -904,7 +904,7 @@ the accumulation matrix untouched, and the host discovers it at the next check a
 performs the rescale or widen it needs before resubmitting. That is optimiztic
 execution rather than deferred validation: a rejected batch is skipped, not
 half-applied, so there is no corrupted state to explain. The survey can also be
-folded into the copy where one is happening anyway, so the data lands in device
+batched into the copy where one is happening anyway, so the data lands in device
 memory and its extent is known from the same pass.
 
 ### Measured occupancy in place of a derived width (considered, dropped)
@@ -1034,16 +1034,16 @@ below the pair stays in the limbs. And the pair has to be kept unevaluated —
 `hi + lo` in double arithmetic returned `hi` unchanged in 399 of those 400
 cases, because `|lo| <= ulp(hi)/2` by construction.
 
-## Multi-batch: folding K matrices into one pass
+## Batching: K matrices into one pass
 
 `add_matrices_col_major(b, count)` applies `count` matrices to each column in a
 single pass. Identical results to a loop over `add_matrix_col_major` — exact
 accumulation does not care about order or grouping — but one at a time each
-batch reads and writes every limb it touches, while folded the limbs are read
+batch reads and writes every limb it touches, while batched the limbs are read
 once, all K addends applied in registers, and written once. Traffic per element
 goes from ~40 bytes to `8 + 32/K`.
 
-Column-major only. Folding row-major input would mean staging K columns per
+Column-major only. Batching row-major input would mean staging K columns per
 worker, and writing and re-reading that staging is the traffic this exists to
 avoid.
 
@@ -1058,29 +1058,29 @@ relieve, and K input columns are K concurrent streams instead of one. Inside L3
 on eight threads the run-to-run spread swamps the difference — sequential alone
 varies 1.75 to 2.67 across runs — so nothing is claimed there.
 
-Folding does **not** require pre-sizing, and the folded matrices need not be
-all of them or come first. Without surveys the fold surveys its K columns and
+Batching does **not** require pre-sizing, and the batched matrices need not be
+all of them or come first. Without surveys the batch surveys its K columns and
 fits the column once before adding any of them, so it fits the column itself
-rather than requiring it pre-fitted; folded and single adds interleave in any
-order, including a fold that rescales a column earlier single adds populated.
+rather than requiring it pre-fitted; batched and single adds interleave in any
+order, including a batch that rescales a column earlier single adds populated.
 
 Separating the two levers at 65536x64 on eight threads:
 
 | | adaptive | pre-sized |
 | --- | --- | --- |
 | one matrix at a time | 1.184 | 1.195 |
-| folded, K=8 | 2.148 | 3.068 |
+| batched, K=8 | 2.148 | 3.068 |
 
-Folding alone is 1.81x; **pre-sizing alone is 1.01x**. The uplift is
+Batching alone is 1.81x; **pre-sizing alone is 1.01x**. The uplift is
 accumulation matrix traffic, not allocation — both figures in the headline table were
 already pre-sized, so neither reallocated at all. Pre-sizing then adds 1.43x on
-top of folding, because an adaptive fold still reads its K columns to survey
-them, and once folding has removed the dominant traffic those reads are what is
+top of batching, because an adaptive batch still reads its K columns to survey
+them, and once batching has removed the dominant traffic those reads are what is
 left to remove.
 
-Columns wider than eight limbs fall back to one batch at a time. Not a
+Columns wider than eight limbs fall back to one matrix at a time. Not a
 concession: the single-batch kernel stops at the first dead carry, while the
-fold must write back every limb it loaded, so past that width folding would
+batch must write back every limb it loaded, so past that width batching would
 move *more* memory.
 
 ## Implemented
@@ -1097,7 +1097,7 @@ never made.
 **Peeled tails in the AVX-512 kernels.** Every loop used to compute a tail
 mask per 8-row block and thread it through the body, though it is all-ones for
 every block but the last. Peeling the final partial block out and passing a
-constant mask to the rest folds the masking away entirely: the survey's pass-1
+constant mask to the rest batches the masking away entirely: the survey's pass-1
 went 0.144 to 0.123 ns/elem (**14.7%**) and the accumulate 1.159 to 1.073
 (**7.4%**) at four limbs.
 
@@ -1156,7 +1156,7 @@ it the GPU does, and the ratio at the top is just the bandwidth ratio.
 
 ## Remaining work, in order
 
-Ping-pong input buffers, multi-batch folding on the CPU, and taking the survey
+Ping-pong input buffers, batching on the CPU, and taking the survey
 out of the library have all landed since the last revision of this list, along
 with symmetric storage and readback residuals, which were not on it. Carry-save
 at radix 52 came off it by being measured rather than by being done.
@@ -1247,11 +1247,11 @@ at radix 52 came off it by being measured rather than by being done.
    reduction tree is ~6.3, the `__threadfence` and ticket ~2.8, the elected
    block's copy ~2.0, and the per-column atomics ~0.9.
 
-2. ~~Multi-batch folding on the device.~~ **Landed.**
+2. ~~Batching on the device.~~ **Landed.**
    `add_matrices_col_major_device` takes up to 16 device-resident matrices and
    applies all of them in one pass. Every matrix's addend lands in the same
    limbs of the same row, back to back, so L1 absorbs the repeats and DRAM sees
-   one read and one writeback however many are folded:
+   one read and one writeback however many are batched:
 
    | K | us a batch | ns/elem | bytes/elem | implied GB/s | vs K=1 |
    | --- | --- | --- | --- | --- | --- |
@@ -1279,7 +1279,7 @@ at radix 52 came off it by being measured rather than by being done.
    beginning to cost. The same effect was worth 2.75x on the CPU and is worth
    about 7% here, which is what a machine built to hide memory latency buys.
 
-   **When folding is worth anything, stated plainly, because it usually is
+   **When batching is worth anything, stated plainly, because it usually is
    not.** Sixteen resident matrices is not a workload; cycling two or three
    buffers is. And at PCIe rates the accumulation matrix is not the bottleneck to begin
    with, so making it faster changes nothing:
@@ -1292,7 +1292,7 @@ at radix 52 came off it by being measured rather than by being done.
    | two buffers rotating, producer on the null stream | 1776 |
 
    The accumulation matrix already has 2.4x of headroom under a PCIe-fed producer, and
-   a rotation hides it to within 4% of the fill. Folding would take 516 us to
+   a rotation hides it to within 4% of the fill. Batching would take 516 us to
    166 and the batch would still cost 1256. It earns its keep only where input
    arrives faster than about 65 GB/s -- GPUDirect from a NIC, NVLink, or data
    generated on the device -- which is the same conclusion the GPUDirect item
@@ -1380,20 +1380,20 @@ being caught. Both are worth remembering when re-measuring.
   non-reproducible swings in both directions — the allocator has to be taken
   out of the experiment before the effect is visible at all.
 
-- The multi-batch fold was first written scalar, on the strength of the
+- The batch kernel was first written scalar, on the strength of the
   traffic argument alone, and lost everywhere -- a flat 3x deficit at every
   shape, 0.19 against 0.57 Gelem/s single-threaded. The argument was sound and
   the implementation gave up eight lanes to collect on it. Two measurements
   said what to do rather than guessing: thread scaling showed the mechanism
-  working (the fold scaled 7.0x across eight cores where sequential managed
+  working (the batch scaled 7.0x across eight cores where sequential managed
   2.4x), and running K=8 over eight distinct buffers against the same buffer
   eight times -- identical arithmetic, identical accumulation matrix traffic -- gave
   1.000 against 2.748 Gelem/s, so most of the remaining loss was the input
-  *stream count*, not the fold. A traffic model that counts bytes and not
+  *stream count*, not the batch. A traffic model that counts bytes and not
   streams will mispredict this.
-- The fold's uplift was initially attributed to avoiding reallocation. It is
+- The batch's uplift was initially attributed to avoiding reallocation. It is
   not: both paths in the headline measurement were already pre-sized, so
-  neither reallocated, and separating the levers gives 1.81x for folding alone
+  neither reallocated, and separating the levers gives 1.81x for batching alone
   against 1.01x for pre-sizing alone. When two changes ship together, measure
   the 2x2 before crediting either.
 
@@ -1430,12 +1430,12 @@ Gelem/s, exact accumulations per second, mixed signs.
 | --- | --- | --- | --- |
 | CPU, 1 thread | 0.80 | 0.77 | 0.67 |
 | CPU, 8 threads | 4.31 | 4.65 | 1.11 |
-| CPU, 8 threads, folded K=8 | — | — | **3.01** |
+| CPU, 8 threads, batched K=8 | — | — | **3.01** |
 | GPU, host input | 3.11 | 3.26 | 3.23 |
 | GPU, input resident | 4.40 | 6.07 | 6.65 |
 
 The 65536x64 row is the one that moved. It was the DRAM-bound case and the
-worst number in the table; folding eight matrices per pass takes it from 1.11
+worst number in the table; batching eight matrices per pass takes it from 1.11
 to 3.01, past the GPU's host-input rate. Nothing else in the table changed,
 because nothing else was bound by accumulation matrix traffic.
 

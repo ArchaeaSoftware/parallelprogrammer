@@ -18,7 +18,7 @@ Three properties follow, and they are the reason to use it:
   `to_double` returns the correctly rounded (round-to-nearest, ties-to-even)
   `double` nearest that sum.
 - **Order independence.** Any permutation or regrouping of the same addends
-  gives bit-identical results. Threading, batching and folding cannot change
+  gives bit-identical results. Threading, batching and batching cannot change
   the answer.
 - **Reproducibility.** The CPU and CUDA implementations produce identical
   stored limbs for identical inputs. This is asserted by the test suite, which
@@ -176,22 +176,22 @@ never surveys an incoming batch.
 
 ```cpp
 void add_matrix(b, row_stride = 0);         // row-major
-void add_matrix_col_major(b, col_stride = 0);
+void add_matrix_col_major(b, surveys = nullptr, col_stride = 0);
 void add_matrix_scaled_pow2(b, log2_scale, row_stride = 0);
 void add_matrix_col_major_scaled_pow2(b, log2_scale, col_stride = 0);
-void add_matrices_col_major(b, count, col_stride = 0);   // fold
+void add_matrices_col_major(b, count, surveys = nullptr, col_stride = 0);
 void add_column(j, v);
 void add_column_scaled_pow2(j, v, log2_scale);
 void set_zero();
 ```
 
 `*_scaled_pow2` multiplies by a power of two. This is the only scaling that
-stays exact without widening the mantissa; it is folded into the column
+stays exact without widening the mantissa; it is absorbed into the column
 exponent rather than applied to the values.
 
 `add_matrices_col_major` applies `count` matrices in a single pass over the
 accumulation matrix. Results are identical to a loop; only the traffic differs. It is
-**column-major only** — folding row-major input would require staging `count`
+**column-major only** — batching row-major input would require staging `count`
 columns per worker, which is the traffic it exists to avoid. Columns wider than
 8 limbs fall back to one matrix at a time.
 
@@ -256,6 +256,7 @@ int column_exponent(j) const;
 std::size_t column_limbs(j) const, column_bit_width(j) const;
 void reserve_column(j, exponent, bits);
 void reserve_for(b, count = 1, row_stride = 0);
+void reserve_for_surveys(surveys);   // sizes from metadata, does not pre-size
 std::size_t memory_bytes() const;
 std::string describe() const;
 void set_threads(unsigned n);   unsigned threads() const;
@@ -315,6 +316,7 @@ void reserve_column(j, exponent, bits);
 void reserve_like(const AccumulationMatrix &cpu);
 void reserve_for(b, count = 1, col_stride = 0);          // host input
 void reserve_for_device(b, count = 1, col_stride = 0);   // device input
+void reserve_for_surveys(surveys);                       // from metadata
 ```
 
 Non-copyable and non-movable. A device column may be reserved **once**;
@@ -327,9 +329,10 @@ Every column must be reserved before any accumulation.
 
 ```cpp
 double *acquire_input();
-InputRead add_matrix_col_major(b, col_stride = 0);              // host input
-InputRead add_matrix_col_major_device(b, col_stride = 0);       // device input
-InputRead add_matrices_col_major_device(b, count, col_stride = 0);
+InputRead add_matrix_col_major(b, surveys = nullptr, col_stride = 0);
+InputRead add_matrix_col_major_device(b, surveys = nullptr, col_stride = 0);
+InputRead add_matrices_col_major_device(b, count, surveys = nullptr,
+                                        col_stride = 0);
 void synchronize() const;
 ```
 
@@ -339,7 +342,7 @@ buffer from `acquire_input()`. Pageable memory is rejected, not copied. The
 kernel reads the buffer in place over PCIe; there is no staging copy and no
 device-side copy of the input.
 
-`add_matrices_col_major_device` folds up to **16** device-resident matrices
+`add_matrices_col_major_device` batches up to **16** device-resident matrices
 into one pass over the accumulation matrix.
 
 Accumulation is asynchronous. `synchronize()` blocks until every submission has
@@ -452,7 +455,7 @@ bandwidth-bound and was not measured.
 
 | exception | raised when |
 | --- | --- |
-| `std::invalid_argument` | malformed surveys; pageable memory where pinned is required; more than 16 folded matrices |
+| `std::invalid_argument` | malformed surveys; pageable memory where pinned is required; more than 16 batched matrices |
 | `std::out_of_range` | row or column index out of range |
 | `std::domain_error` | inf or NaN accumulated; `log2_scale` out of range; a mean over a count of zero |
 | `std::runtime_error` | a detected contradiction; unreserved device column; more matrices than declared; any failed CUDA call |
@@ -473,16 +476,16 @@ Gelem/s is exact accumulations per second. **Indicative, not contractual.**
 | --- | --- | --- | --- |
 | CPU, 1 thread | 0.80 | 0.77 | 0.67 |
 | CPU, 8 threads | 4.31 | 4.65 | 1.11 |
-| CPU, 8 threads, folded K=8 | — | — | 3.01 |
+| CPU, 8 threads, batched K=8 | — | — | 3.01 |
 | GPU, host input | 3.11 | 3.26 | 3.32 |
 | GPU, input resident | 4.40 | 6.07 | 8.13 |
-| GPU, resident, folded K=8 | — | — | 25.3 |
+| GPU, resident, batched K=8 | — | — | 25.3 |
 
 Which resource binds, and therefore which lever helps:
 
 - The **CPU is issue-bound** while the working set fits in L3 — 2.32 IPC, 1%
-  miss rate, scaling six-fold across eight cores — and **DRAM-bound** past it,
-  where eight cores scale only 1.7×. Folding is the lever there.
+  miss rate, scaling six-batch across eight cores — and **DRAM-bound** past it,
+  where eight cores scale only 1.7×. Batching is the lever there.
 - The **GPU is bandwidth-bound throughout**, at 97–99% of the card's streaming
   rate. Every gain comes from moving fewer bytes; none from faster arithmetic.
 - **PCIe caps host input** at about 3.3 Gelem/s regardless of kernel quality.

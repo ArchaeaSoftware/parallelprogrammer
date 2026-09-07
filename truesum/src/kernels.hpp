@@ -22,7 +22,7 @@ namespace kernels {
 // The public Survey is what the kernels produce; nothing here needs its own.
 using Survey = ::truesum::Survey;
 
-// `floor_exponent` is the column's current exponent. The survey needs the exact
+// `cutoff_exponent` is the column's current exponent. The survey needs the exact
 // minimum only when the incoming values could drop below it; otherwise a cheap
 // lower bound proves that no rescale is due and the significand is never
 // touched. Pass LLONG_MAX to force the exact value, which is what a column
@@ -57,11 +57,11 @@ inline constexpr unsigned kBadExponent = 2;
 inline constexpr unsigned kBadWidth = 4;
 inline constexpr unsigned kBadOverflow = 8;
 
-// Folds `count` contiguous columns, one per matrix, into a single pass over
+// Batches `count` contiguous columns, one per matrix, into a single pass over
 // the accumulation matrix. Same arithmetic as AccumulateFn applied `count`
-// times; what differs is the traffic. One batch at a time reads and writes
+// times; what differs is the traffic. One matrix at a time reads and writes
 // every limb it touches once per batch, so K batches pay 8 bytes of input and
-// 16*nlimbs of accumulation matrix per element. Folded, the limbs are read
+// 16*nlimbs of accumulation matrix per element. Batched, the limbs are read
 // once, all K addends applied to them in registers, and written once: 8*K +
 // 16*nlimbs for the same work. At two limbs and K=8 that is 96 bytes an element
 // against 320.
@@ -69,20 +69,20 @@ inline constexpr unsigned kBadOverflow = 8;
 // The saving is in accumulation matrix traffic, so it only shows where that
 // traffic is the bound -- past L3, where the CPU is waiting on DRAM rather than
 // issue.
-using AccumulateFoldFn = void (*)(std::uint64_t *const *, std::size_t,
+using AccumulateBatchFn = void (*)(std::uint64_t *const *, std::size_t,
                                   const double *const *, std::size_t,
                                   std::size_t, std::int32_t, unsigned *);
 
-// A row's limbs are held in registers across the fold, so the width has to be
-// bounded. Wider columns fall back to one batch at a time, which is no loss:
-// the single-batch kernel stops as soon as a carry dies, while the fold has to
-// write back every limb it loaded, so past this width folding would move more
+// A row's limbs are held in registers across the batch, so the width has to be
+// bounded. Wider columns fall back to one matrix at a time, which is no loss:
+// the single-batch kernel stops as soon as a carry dies, while the batch has to
+// write back every limb it loaded, so past this width batching would move more
 // memory rather than less.
-inline constexpr std::size_t kMaxFoldLimbs = 8;
+inline constexpr std::size_t kMaxBatchLimbs = 8;
 
 Survey
 survey_column_scalar(const double *values, std::size_t rows,
-                     long long floor_exponent);
+                     long long cutoff_exponent);
 
 void
 accumulate_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
@@ -91,7 +91,7 @@ accumulate_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
                   unsigned *flags);
 
 void
-accumulate_fold_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
+accumulate_batch_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
                        const double *const *columns, std::size_t count,
                        std::size_t rows, std::int32_t column_exponent,
                        unsigned *flags);
@@ -99,7 +99,7 @@ accumulate_fold_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
 #if defined(TRUESUM_HAVE_AVX512)
 Survey
 survey_column_avx512(const double *values, std::size_t rows,
-                     long long floor_exponent);
+                     long long cutoff_exponent);
 
 void
 accumulate_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
@@ -108,7 +108,7 @@ accumulate_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
                   unsigned *flags);
 
 void
-accumulate_fold_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
+accumulate_batch_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
                        const double *const *columns, std::size_t count,
                        std::size_t rows, std::int32_t column_exponent,
                        unsigned *flags);
@@ -119,8 +119,8 @@ SurveyFn
 survey();
 AccumulateFn
 accumulate();
-AccumulateFoldFn
-accumulate_fold();
+AccumulateBatchFn
+accumulate_batch();
 const char *
 accumulate_name();
 

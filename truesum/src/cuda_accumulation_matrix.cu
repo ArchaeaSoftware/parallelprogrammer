@@ -75,9 +75,9 @@ constexpr unsigned kBadOverflow = 8;
 // so any smaller grid stays correct -- it only gives each thread more rows.
 //
 // Capping the total is what makes the survey's reduction pay for itself. Left
-// uncapped, 65536 rows over 64 columns launches 16384 blocks, each folding a
+// uncapped, 65536 rows over 64 columns launches 16384 blocks, each reducing a
 // single value per thread and then paying a full eight-step shared-memory tree
-// to do it. Capped, each thread folds sixteen rows serially first and the tree
+// to do it. Capped, each thread reduces sixteen rows serially first and the tree
 // is amortized across them: measured 195 -> 113 us at that shape, and
 // 746 -> 423 us at 262144 rows.
 constexpr unsigned kMaxBlocks = 1024;
@@ -132,7 +132,7 @@ survey_finish_kernel(Survey *__restrict__ out, unsigned ncols)
     }
 }
 
-// A column's stored length and where it starts. Fixed at construction, so
+// A column's stored length and where it starts. Set at construction, so
 // unlike ColumnDesc this never goes stale and both kernels can read it
 // without being sequenced against a descriptor sync.
 struct ColumnShape {
@@ -140,11 +140,11 @@ struct ColumnShape {
     unsigned first_row;
 };
 
-// The matrices one launch folds together. Passed by value, so it rides in the
+// The matrices one launch batches together. Passed by value, so it rides in the
 // kernel parameter block (constant memory) and needs no allocation or copy.
-constexpr unsigned kMaxFoldInputs = 16;
+constexpr unsigned kMaxBatchInputs = 16;
 struct InputSet {
-    const double *p[kMaxFoldInputs];
+    const double *p[kMaxBatchInputs];
     unsigned n;
 };
 
@@ -202,7 +202,7 @@ split_device(double v, unsigned long long &mantissa, int &exponent, int &top,
 }
 
 // The CPU survey splits into two passes so the significand can be skipped once
-// a column's scale is fixed. That does not pay here: this pass is bound by
+// a column's scale is set. That does not pay here: this pass is bound by
 // reading the column, and the trailing-zero count is a few ALU ops on a value
 // already in registers. One exact pass is both simpler and cheaper.
 __global__ void
@@ -425,7 +425,7 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols, InputSet in,
       }
     }
 
-    // Fold the per-thread maxima, reduce across blocks in device memory with
+    // Batch the per-thread maxima, reduce across blocks in device memory with
     // ordinary atomics, then elect one block to copy the finished array to
     // host memory. Atomics never cross PCIe: measured, that costs 260x.
     if (0 != t_overflow) t_flags |= kBadOverflow;
@@ -659,7 +659,7 @@ CudaAccumulationMatrix::CudaAccumulationMatrix(std::size_t rows,
     // unavailable.
     cudaSetDeviceFlags(cudaDeviceMapHost);
     // Columns become the grid's y dimension, the only launch parameter here
-    // that is not fixed at compile time or clamped. Bounding it once, up front,
+    // that is not constant at compile time or clamped. Bounding it once, up front,
     // is what lets every launch below go unchecked.
     int max_grid_y = 0;
     cuda(DeviceGetAttribute(&max_grid_y, cudaDevAttrMaxGridDimY, 0));
@@ -795,6 +795,23 @@ CudaAccumulationMatrix::reserve_from_surveys(
     presized_ = true;
     declared_matrices_ = surveys.size();
 }
+// The same sizing without the promise, and on this target it is also how a
+// caller reserves columns from metadata rather than from data. Pre-sizing here
+// removes the survey kernel and its round trip, which this does not: the
+// accumulation matrix still surveys what it is handed. What it removes is the
+// rescale, which on the device is not merely expensive but forbidden mid-launch,
+// so a column that starts low enough is a column that cannot be caught out.
+void
+CudaAccumulationMatrix::reserve_for_surveys(
+    const std::vector<std::vector<Survey>> &surveys)
+{
+    const bool was_presized = presized_;
+    const std::size_t declared = declared_matrices_;
+    reserve_from_surveys(surveys);
+    presized_ = was_presized;
+    declared_matrices_ = declared;
+}
+
 
 std::size_t
 CudaAccumulationMatrix::column_rows(std::size_t j) const
@@ -812,7 +829,7 @@ CudaAccumulationMatrix::column_first_row(std::size_t j) const
     return cols_state_[j].first_row;
 }
 
-// The same fold AccumulationMatrix uses: Lower puts (i, j) and (j, i) both in
+// The same batch AccumulationMatrix uses: Lower puts (i, j) and (j, i) both in
 // column min(i, j) at slot |i - j|, Upper in column max(i, j) at slot
 // min(i, j).
 void
@@ -1043,7 +1060,7 @@ CudaAccumulationMatrix::reserve_for(const double *b, std::size_t count,
 
     for (std::size_t j = 0; j < cols_; ++j) {
         // A column with no scale yet needs the exact true-ulp minimum, so the
-        // floor is one nothing can clear.
+        // cutoff is one nothing can clear.
         const Column &cj = cols_state_[j];
         const kernels::Survey sv =
             kernels::survey()(b + j * stride + cj.first_row, cj.rows,
@@ -1264,7 +1281,8 @@ CudaAccumulationMatrix::require_all_reserved() const
 
 void
 CudaAccumulationMatrix::validate_host_survey(const double *b,
-                                             std::size_t col_stride)
+                                             std::size_t col_stride,
+                                             const Survey *supplied)
 {
     require_all_reserved();
 
@@ -1276,8 +1294,11 @@ CudaAccumulationMatrix::validate_host_survey(const double *b,
     // another.
     for (std::size_t j = 0; j < cols_; ++j) {
         const Column &cj = cols_state_[j];
-        const kernels::Survey sv = kernels::survey()(
-            b + j * col_stride + cj.first_row, cj.rows, cj.exponent);
+        const kernels::Survey sv =
+            nullptr != supplied
+                ? supplied[j]
+                : kernels::survey()(b + j * col_stride + cj.first_row, cj.rows,
+                                    cj.exponent);
         if (sv.nonfinite) {
             throw std::domain_error(
                 "truesum: cannot accumulate a non-finite value");
@@ -1310,6 +1331,7 @@ CudaAccumulationMatrix::acquire_input()
 
 InputRead
 CudaAccumulationMatrix::add_matrix_col_major(const double *b,
+                                             const Survey *surveys,
                                              std::size_t col_stride)
 {
     if (0 == rows_ || 0 == cols_) return InputRead();
@@ -1340,7 +1362,7 @@ CudaAccumulationMatrix::add_matrix_col_major(const double *b,
         // Surveyed through the host pointer; launched through the device one,
         // which is the same address under unified addressing but need not be
         // for a registered range.
-        validate_host_survey(b, stride);
+        validate_host_survey(b, stride, surveys);
     }
     { const double *one = static_cast<const double *>(attr.devicePointer);
       launch_accumulate(&one, 1, stride); }
@@ -1369,12 +1391,29 @@ CudaAccumulationMatrix::record_input_read()
 
 // One survey staging, one launch per matrix. The kernel reduces with atomicMin
 // and atomicMax, so successive launches accumulate the union of their extents
-// -- which is exactly the aggregate a fold has to be sized for.
+// -- which is exactly the aggregate a batch has to be sized for.
 void
 CudaAccumulationMatrix::survey_device_inputs(const double *const *b,
                                              std::size_t count,
-                                             std::size_t col_stride)
+                                             std::size_t col_stride,
+                                             const Survey *const *supplied)
 {
+    if (nullptr != supplied) {
+        // Aggregated on the host from what the caller already knows, so no
+        // kernel is launched and nothing is waited for.
+        for (std::size_t j = 0; j < cols_; ++j) {
+            for (std::size_t k = 0; k < count; ++k) {
+                if (supplied[k][j].nonfinite) {
+                    throw std::domain_error(
+                        "truesum: cannot accumulate a non-finite value");
+                }
+                if (!supplied[k][j].any) continue;
+                require_fit(j, supplied[k][j].min_exponent,
+                            supplied[k][j].max_top, 1);
+            }
+        }
+        return;
+    }
     const dim3 grid = launch_grid(rows_, cols_);
     begin_survey();
     for (std::size_t k = 0; k < count; ++k) {
@@ -1397,13 +1436,14 @@ CudaAccumulationMatrix::survey_device_inputs(const double *const *b,
 InputRead
 CudaAccumulationMatrix::add_matrices_col_major_device(const double *const *b,
                                                       std::size_t count,
+                                                      const Survey *const *surveys,
                                                       std::size_t col_stride)
 {
     if (0 == count || 0 == rows_ || 0 == cols_) return InputRead();
-    if (count > kMaxFoldInputs) {
+    if (count > kMaxBatchInputs) {
         std::ostringstream os;
-        os << "truesum: at most " << kMaxFoldInputs
-           << " matrices may be folded into one pass; " << count << " given";
+        os << "truesum: at most " << kMaxBatchInputs
+           << " matrices may be batched into one pass; " << count << " given";
         throw std::invalid_argument(os.str());
     }
     require_all_reserved();
@@ -1418,9 +1458,9 @@ CudaAccumulationMatrix::add_matrices_col_major_device(const double *const *b,
         }
     } else {
         // Every matrix must be surveyed and the column fitted before any of
-        // them is added: a widen partway through the fold would leave earlier
+        // them is added: a widen partway through the batch would leave earlier
         // matrices already written into a column of the wrong shape.
-        survey_device_inputs(b, count, stride);
+        survey_device_inputs(b, count, stride, surveys);
     }
     sync_descriptors();
     launch_accumulate(b, count, stride);
@@ -1429,10 +1469,11 @@ CudaAccumulationMatrix::add_matrices_col_major_device(const double *const *b,
 
 InputRead
 CudaAccumulationMatrix::add_matrix_col_major_device(const double *b,
+                                                    const Survey *surveys,
                                                     std::size_t col_stride)
 {
     if (0 == rows_ || 0 == cols_) return InputRead();
-    accumulate_device(b, col_stride ? col_stride : rows_);
+    accumulate_device(b, col_stride ? col_stride : rows_, surveys);
     return record_input_read();
 }
 
@@ -1480,7 +1521,8 @@ CudaAccumulationMatrix::report_contradictions() const
 
 void
 CudaAccumulationMatrix::accumulate_device(const double *b,
-                                          std::size_t col_stride)
+                                          std::size_t col_stride,
+                                          const Survey *supplied)
 {
     for (std::size_t j = 0; j < cols_; ++j) {
         if (!cols_state_[j].reserved) {
@@ -1510,14 +1552,20 @@ CudaAccumulationMatrix::accumulate_device(const double *b,
     // First pass: learn each column's exponent range, and reject anything the
     // reservation cannot hold. The decisions the CPU makes by rescaling and
     // widening are errors here, because neither is possible mid-launch.
-    begin_survey();
-    survey_kernel<<<grid, kBlock, 0, st_compute_>>>(
-        b, static_cast<const ColumnShape *>(shapes_), 0, col_stride,
-        static_cast<Survey *>(survey_out_));
-    // This is the drain the host path avoids: with the input already on the
-    // device, there is nothing to survey on the host, so the verdict has to come
-    // back before the accumulate can be allowed to run.
-    const Survey *surveys = end_survey();
+    // A supplied survey removes both the kernel and the wait: the extents are
+    // already on the host, so there is nothing to ask the device and nothing to
+    // come back. That drain is this path's fixed cost, 19.9 us a batch.
+    const Survey *surveys = supplied;
+    if (nullptr == surveys) {
+        begin_survey();
+        survey_kernel<<<grid, kBlock, 0, st_compute_>>>(
+            b, static_cast<const ColumnShape *>(shapes_), 0, col_stride,
+            static_cast<Survey *>(survey_out_));
+        // With the input already on the device, there is nothing to survey on
+        // the host, so the verdict has to come back before the accumulate can
+        // be allowed to run.
+        surveys = end_survey();
+    }
 
     for (std::size_t j = 0; j < cols_; ++j) {
         if (surveys[j].nonfinite) {

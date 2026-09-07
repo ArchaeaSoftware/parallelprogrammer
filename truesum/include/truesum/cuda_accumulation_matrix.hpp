@@ -174,7 +174,7 @@ public:
 
     // --- pre-sizing --------------------------------------------------------
 
-    // Fix column j's scale and width, and allocate its limb arrays. `exponent`
+    // Set column j's scale and width, and allocate its limb arrays. `exponent`
     // is the lowest bit weight that will be needed and `bits` the total width.
     // May be called once per column, before anything is accumulated into it.
     void reserve_column(std::size_t j, int exponent, std::size_t bits);
@@ -184,6 +184,13 @@ public:
     // path and what makes the two directly comparable: given the same exponent
     // and width, both must hold bit-identical limbs.
     void reserve_like(const AccumulationMatrix &cpu);
+
+    // Reserve room for matrices described by `surveys`, indexed by matrix and
+    // then by column, without pre-sizing. The accumulation matrix goes on
+    // surveying every matrix it is handed; what this removes is the rescale a
+    // later low value would otherwise force, which on this target is an error
+    // rather than an adjustment once a launch is in flight.
+    void reserve_for_surveys(const std::vector<std::vector<Survey>> &surveys);
 
     // Pre-size every column from a representative batch about to be
     // accumulated `count` times, the same arithmetic as
@@ -241,7 +248,12 @@ public:
     // still reading it when this returns, so do not write to B until the
     // handle says the read has finished. Ignoring the handle is a statement
     // that B will not be written again.
-    InputRead add_matrix_col_major(const double *b, std::size_t col_stride = 0);
+    // `surveys` is optional, one entry per column, describing the same slice
+    // this call reads. Supplied, it replaces the host survey this path would
+    // otherwise take of B.
+    InputRead add_matrix_col_major(const double *b,
+                                   const Survey *surveys = nullptr,
+                                   std::size_t col_stride = 0);
 
     // A += B[0] + ... + B[count-1], all already resident in device memory, in
     // a single pass over the accumulation matrix.
@@ -249,7 +261,7 @@ public:
     // Identical results to submitting them one at a time. What changes is
     // traffic, and on this target that is the whole game: the accumulate is
     // bandwidth-bound at 97-99% of the card's streaming rate, moving ~8 bytes
-    // of input and ~16*nlimbs of accumulation matrix per element. Folding turns
+    // of input and ~16*nlimbs of accumulation matrix per element. Batching turns
     // that into 8*count + 16*nlimbs, because every matrix's addend lands in the
     // same limbs of the same row and L1 absorbs the repeats.
     //
@@ -262,8 +274,14 @@ public:
     //
     // Returns the same completion handle as everything else here, so a
     // producer can keep the buffers it is about to overwrite straight.
+    // `surveys` is optional and shaped like `b`: surveys[k][j] for matrix k's
+    // column j. Supplied, the survey kernel is not launched and its verdict is
+    // not waited for, so this call stops synchronizing -- the 19.9 us drain
+    // that otherwise sits between the submission and the accumulate.
     InputRead add_matrices_col_major_device(const double *const *b,
                                             std::size_t count,
+                                            const Survey *const *surveys
+                                                = nullptr,
                                             std::size_t col_stride = 0);
 
     // A += B, for B already resident in device memory.
@@ -286,7 +304,11 @@ public:
     // Order your fill before submitting (a synchronize on your own stream is
     // enough; it waits for your copy, not for the accumulate), and wait on the
     // handle before refilling that buffer.
+    // `surveys` is optional, one entry per column. Supplied, the survey
+    // kernel is not launched and its verdict is not waited for, so this call
+    // stops synchronizing.
     InputRead add_matrix_col_major_device(const double *b,
+                                          const Survey *surveys = nullptr,
                                           std::size_t col_stride = 0);
 
     // Blocks until every submitted accumulation has finished. Accumulation is
@@ -386,7 +408,8 @@ private:
     void locate(std::size_t &col, std::size_t &slot, std::size_t i,
                 std::size_t j) const;
     void init_columns();
-    void accumulate_device(const double *b, std::size_t col_stride);
+    void accumulate_device(const double *b, std::size_t col_stride,
+                           const Survey *supplied);
     // Creates an event, records it on the compute stream, wraps it.
     InputRead record_input_read();
     void launch_accumulate(const double *const *b, std::size_t count,
@@ -399,15 +422,17 @@ private:
     void begin_survey();
     const Survey *end_survey();
     void survey_device_inputs(const double *const *b, std::size_t count,
-                              std::size_t col_stride);
-    void validate_host_survey(const double *b, std::size_t col_stride);
+                              std::size_t col_stride,
+                              const Survey *const *supplied);
+    void validate_host_survey(const double *b, std::size_t col_stride,
+                              const Survey *supplied);
     void require_all_reserved() const;
     void sync_descriptors();
     void harvest_occupancy();
     void reserve_from_extents(const int *low, const int *high,
                               const char *any, std::size_t count);
     // `count` is how many addends the extents cover, which is one per
-    // matrix. A fold surveys its whole input set into a single pair of extents
+    // matrix. A batch surveys its whole input set into a single pair of extents
     // and then fits the column once, so it has to say how many matrices that
     // pair stands for; the headroom term grows with the number of addends and
     // not with the range they span.
@@ -484,7 +509,7 @@ private:
     // those belong in device memory.
     void *survey_host_ = nullptr;  // pinned Survey[]
 
-    // Per-column stored length and first row, device-side. Fixed at
+    // Per-column stored length and first row, device-side. Set at
     // construction and never rewritten, so both kernels can read it without
     // the staleness the descriptors have to manage.
     void *shapes_ = nullptr;  // device ColumnShape[]

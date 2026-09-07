@@ -46,7 +46,7 @@ void
 submit(truesum::AccumulationMatrix &m, const std::vector<double> &v,
        std::size_t col_stride = 0)
 {
-    m.add_matrix_col_major(v.data(), col_stride);
+    m.add_matrix_col_major(v.data(), nullptr, col_stride);
 }
 
 // The device path takes page-locked input only, so this is the copy a caller
@@ -64,7 +64,7 @@ submit(truesum::CudaAccumulationMatrix &g, const std::vector<double> &v,
     }
     std::memcpy(p, v.data(), v.size() * sizeof(double));
     try {
-        truesum::InputRead h = g.add_matrix_col_major(p, col_stride);
+        truesum::InputRead h = g.add_matrix_col_major(p, nullptr, col_stride);
         h.wait();
     } catch (...) {
         cudaFreeHost(p);
@@ -620,7 +620,7 @@ test_errors()
     }
 
     // A width that is too small is no longer an error -- the column grows.
-    // Only the exponent cannot be fixed after the fact, since that needs every
+    // Only the exponent cannot be set after the fact, since that needs every
     // entry shifted rather than a limb appended.
     {
         truesum::CudaAccumulationMatrix gpu(64, 1);
@@ -1153,11 +1153,11 @@ test_in_place_input()
     cudaFreeHost(pinned);
 }
 
-// Folding several device-resident matrices into one pass changes only the
+// Batching several device-resident matrices into one pass changes only the
 // traffic. Exact accumulation does not care about grouping, so the stored
 // limbs must be identical to submitting them one at a time.
 void
-test_device_fold()
+test_device_batch()
 {
     for (int variant = 0; variant < 3; ++variant) {
         const std::size_t rows = variant == 2 ? 257 : 4096;
@@ -1187,21 +1187,21 @@ test_device_fold()
         }
         seq.synchronize();
 
-        truesum::CudaAccumulationMatrix fold(rows, cols);
-        fold.reserve_like(cpu);
-        fold.add_matrices_col_major_device(devc.data(), count);
-        fold.synchronize();
+        truesum::CudaAccumulationMatrix batch(rows, cols);
+        batch.reserve_like(cpu);
+        batch.add_matrices_col_major_device(devc.data(), count);
+        batch.synchronize();
 
         std::size_t bad = 0;
         for (std::size_t j = 0; j < cols; ++j) {
-            if (fold.column_exponent(j) != seq.column_exponent(j) ||
-                fold.column_limbs(j) != seq.column_limbs(j)) {
+            if (batch.column_exponent(j) != seq.column_exponent(j) ||
+                batch.column_limbs(j) != seq.column_limbs(j)) {
                 ++bad;
                 continue;
             }
-            if (fold.download_column(j) != seq.download_column(j)) ++bad;
+            if (batch.download_column(j) != seq.download_column(j)) ++bad;
         }
-        check(bad == 0, "device fold matches sequential, variant " +
+        check(bad == 0, "device batch matches sequential, variant " +
                             std::to_string(variant) + ": " +
                             std::to_string(bad) + " mismatches");
         for (auto *p : dev) cudaFree(p);
@@ -1229,14 +1229,14 @@ test_device_fold()
                        cudaMemcpyHostToDevice);
             devc[k] = dev[k];
         }
-        // Reserved wide enough only for the first matrix, so the fold must
+        // Reserved wide enough only for the first matrix, so the batch must
         // widen and lower the exponent from the aggregate of all three.
         truesum::CudaAccumulationMatrix g(rows, cols);
         for (std::size_t j = 0; j < cols; ++j) g.reserve_column(j, 0, 64);
         g.add_matrices_col_major_device(devc.data(), count);
         g.synchronize();
         check(g.column_exponent(0) < -60,
-              "an adaptive fold lowers the exponent to the aggregate");
+              "an adaptive batch lowers the exponent to the aggregate");
         std::size_t bad = 0;
         for (std::size_t j = 0; j < cols; ++j) {
             const std::vector<std::uint64_t> d = g.download_column(j);
@@ -1269,14 +1269,14 @@ test_device_fold()
         } catch (const std::invalid_argument &) {
             threw = true;
         }
-        check(threw, "folding more matrices than fit is rejected");
+        check(threw, "batching more matrices than fit is rejected");
         cudaFree(d);
     }
 
-    // The headroom a fold reserves grows with the number of matrices, not with
+    // The headroom a batch reserves grows with the number of matrices, not with
     // the range they span. Surveying the set produces one pair of extents for
-    // the whole fold, so the column has to be fitted for as many addends as
-    // there are matrices; counting the fold as a single addend understates the
+    // the whole batch, so the column has to be fitted for as many addends as
+    // there are matrices; counting the batch as a single addend understates the
     // width by log2(count) bits, which this column is chosen to expose. Its
     // values span 2^0 to 2^60, so the shared exponent is 0 and the sum of
     // sixteen of them needs a second limb the sizing would otherwise skip.
@@ -1287,7 +1287,7 @@ test_device_fold()
 
         truesum::AccumulationMatrix cpu(rows, 1);
         std::vector<const double *> host(count, v.data());
-        cpu.add_matrices_col_major(host.data(), count, rows);
+        cpu.add_matrices_col_major(host.data(), count, nullptr, rows);
 
         double *d = nullptr;
         cudaMalloc(&d, rows * sizeof(double));
@@ -1296,19 +1296,112 @@ test_device_fold()
 
         truesum::CudaAccumulationMatrix g(rows, 1);
         g.reserve_for_device(d, 1, rows);
-        g.add_matrices_col_major_device(devc.data(), count, rows);
+        g.add_matrices_col_major_device(devc.data(), count, nullptr, rows);
         g.synchronize();
         check(g.column_limbs(0) == cpu.column_limbs(0),
-              "a fold is sized for as many addends as it has matrices: " +
+              "a batch is sized for as many addends as it has matrices: " +
                   std::to_string(g.column_limbs(0)) + " limbs against " +
                   std::to_string(cpu.column_limbs(0)));
         std::size_t bad = 0;
         for (std::size_t i = 0; i < rows; ++i) {
             if (g.entry_limbs(i, 0) != cpu.entry_limbs(i, 0)) ++bad;
         }
-        check(bad == 0, "and matches the CPU fold limb for limb");
+        check(bad == 0, "and matches the CPU batch limb for limb");
         cudaFree(d);
     }
+}
+
+// The device paths take a survey the caller already has, which removes the
+// survey kernel and the round trip that waits for its verdict.
+static void
+test_supplied_survey_device()
+{
+    const std::size_t rows = 1024, cols = 4, count = 3;
+    std::mt19937_64 rng(24680);
+    std::vector<std::vector<double>> h(count,
+                                       std::vector<double>(rows * cols));
+    for (auto &m : h) {
+        for (auto &v : m) {
+            const std::uint64_t mant = (rng() | (std::uint64_t{1} << 52)) &
+                                       ((std::uint64_t{1} << 53) - 1);
+            const double x = std::ldexp(static_cast<double>(mant),
+                                        static_cast<int>(rng() % 60) - 30);
+            v = (rng() & 1) ? -x : x;
+        }
+    }
+
+    std::vector<double *> dev(count);
+    std::vector<const double *> devc(count);
+    std::vector<std::vector<truesum::Survey>> sv(
+        count, std::vector<truesum::Survey>(cols));
+    std::vector<const truesum::Survey *> svp(count);
+    for (std::size_t k = 0; k < count; ++k) {
+        cudaMalloc(&dev[k], rows * cols * sizeof(double));
+        cudaMemcpy(dev[k], h[k].data(), rows * cols * sizeof(double),
+                   cudaMemcpyHostToDevice);
+        devc[k] = dev[k];
+        truesum::survey_matrix_col_major(sv[k].data(), h[k].data(), rows, cols);
+        svp[k] = sv[k].data();
+    }
+
+    const auto same = [&](const truesum::CudaAccumulationMatrix &x,
+                          const truesum::CudaAccumulationMatrix &y) {
+        std::size_t bad = 0;
+        for (std::size_t j = 0; j < cols; ++j) {
+            if (x.column_exponent(j) != y.column_exponent(j) ||
+                x.column_limbs(j) != y.column_limbs(j)) {
+                ++bad;
+                continue;
+            }
+            if (x.download_column(j) != y.download_column(j)) ++bad;
+        }
+        return bad;
+    };
+
+    {
+        truesum::CudaAccumulationMatrix a(rows, cols), b(rows, cols);
+        a.reserve_for_device(dev[0], count, rows);
+        b.reserve_for_device(dev[0], count, rows);
+        for (std::size_t k = 0; k < count; ++k) {
+            a.add_matrix_col_major_device(devc[k]);
+            b.add_matrix_col_major_device(devc[k], svp[k]);
+        }
+        a.synchronize();
+        b.synchronize();
+        check(same(a, b) == 0,
+              "a supplied survey matches the device survey kernel");
+    }
+
+    {
+        truesum::CudaAccumulationMatrix a(rows, cols), b(rows, cols);
+        a.reserve_for_device(dev[0], count, rows);
+        b.reserve_for_device(dev[0], count, rows);
+        a.add_matrices_col_major_device(devc.data(), count);
+        b.add_matrices_col_major_device(devc.data(), count, svp.data());
+        a.synchronize();
+        b.synchronize();
+        check(same(a, b) == 0, "and matches it for a batched submission");
+    }
+
+    // The host-input path takes one too, in place of the CPU survey it would
+    // otherwise make of the mapped buffer.
+    {
+        double *pinned = nullptr;
+        cudaHostAlloc(&pinned, rows * cols * sizeof(double),
+                      cudaHostAllocMapped);
+        std::copy(h[0].begin(), h[0].end(), pinned);
+        truesum::CudaAccumulationMatrix a(rows, cols), b(rows, cols);
+        a.reserve_for_device(dev[0], 1, rows);
+        b.reserve_for_device(dev[0], 1, rows);
+        a.add_matrix_col_major(pinned).wait();
+        b.add_matrix_col_major(pinned, svp[0]).wait();
+        a.synchronize();
+        b.synchronize();
+        check(same(a, b) == 0, "and on the host-input path as well");
+        cudaFreeHost(pinned);
+    }
+
+    for (auto *d : dev) cudaFree(d);
 }
 
 // The pattern the device path exists for: a producer cycling device buffers,
@@ -1615,7 +1708,8 @@ main()
     test_presized();
     test_device_detector();
     test_in_place_input();
-    test_device_fold();
+    test_device_batch();
+    test_supplied_survey_device();
     test_device_ping_pong();
     test_deferred_zeroing();
     test_device_survey();

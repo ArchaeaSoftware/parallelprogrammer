@@ -10,7 +10,7 @@ namespace truesum {
 Survey
 survey_column(const double *values, std::size_t rows)
 {
-    // A producer has no column exponent to compare against, so the floor is
+    // A producer has no column exponent to compare against, so the cutoff is
     // one nothing clears and the exact true-ulp minimum is always computed.
     return kernels::survey()(values, rows, LLONG_MAX);
 }

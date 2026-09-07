@@ -291,8 +291,8 @@ row/column layout survives formatting.
   doubles, since IEEE requires that quotient to be correctly rounded; and for
   sums too wide for a double, by the definition of nearest, evaluated exactly
   in a second accumulation matrix — `|X − h·n|·2 ≤ n·ulp(h)`, with equality only when
-  `h` is even — over thirteen counts up to `2⁶⁴ − 1`. Ties at the denormal
-  floor, overflow at the top, and the residual of `1/3` being exactly
+  `h` is even — over thirteen counts up to `2⁶⁴ − 1`. Ties at the smallest
+  denormal, overflow at the top, and the residual of `1/3` being exactly
   `2⁻⁵⁴/3` are pinned individually.
 
 At size, where indexing and scale bookkeeping are what can break:
