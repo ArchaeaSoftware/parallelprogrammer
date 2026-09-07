@@ -337,7 +337,7 @@ AccumulationMatrix::rescale(Column &c, int new_exponent)
     const unsigned shift = static_cast<unsigned>(
         static_cast<long long>(c.exponent) - new_exponent);
 
-    // An all-zero column carries no information, so its scale moves freely.
+    // An all-zero column holds no information, so its scale moves freely.
     if (column_is_zero(c)) {
         c.exponent = new_exponent;
         c.max_addend_bits = 0;
@@ -533,11 +533,11 @@ AccumulationMatrix::fold_column(std::size_t j, const double *const *columns,
 {
     Column &c = cols_state_[j];
 
-    // The exponent and width have to be settled before the fold starts: a
+    // The exponent and width have to be fixed before the fold starts: a
     // rescale partway through would have to re-shift limbs that earlier
-    // matrices in this same fold had already been added to. Pre-sizing settles
+    // matrices in this same fold had already been added to. Pre-sizing fixes
     // them in the constructor; without it, surveying all `count` columns first
-    // and fitting once settles them here, which is the same guarantee arrived
+    // and fitting once fixes them here, which is the same guarantee arrived
     // at later.
     if (!presized_) {
         bool any = false;
@@ -748,7 +748,7 @@ AccumulationMatrix::is_zero(std::size_t i, std::size_t j) const
 namespace {
 
 // A rounded double together with the exact reconstruction of it:
-// `value == m * 2^scale`, with `scale >= exp` always. Carrying m and scale out
+// `value == m * 2^scale`, with `scale >= exp` always. Returning m and scale out
 // of the rounding is what lets the residual be an exact limb subtraction --
 // `m << (scale - exp)` lands back in the same fixed point the entry is stored
 // in, so no second rounding creeps in on the way.
@@ -803,7 +803,7 @@ residual_of(const std::vector<limb_t> &mag, long long exp, const Rounded &r)
     if (!std::isfinite(r.value)) return 0.0;
 
     // Place r.m back at its own weight and subtract, the same 128-bit-at-an-
-    // offset decomposition the accumulate kernel uses. `mag` carries a spare
+    // offset decomposition the accumulate kernel uses. `mag` has a spare
     // top limb from magnitude(), so the difference has room for its sign.
     const std::size_t shift = static_cast<std::size_t>(r.scale - exp);
     const std::size_t off = shift / limbs::kLimbBits;
@@ -832,7 +832,7 @@ residual_of(const std::vector<limb_t> &mag, long long exp, const Rounded &r)
 // round_magnitude where it lies. Instead the magnitude is shifted left by s
 // and divided, which yields floor(magnitude * 2^s / divisor) exactly, and the
 // remainder collapses into one sticky bit appended below the quotient. The
-// result carries every bit the rounding can look at: the quotient's own bits
+// result holds every bit the rounding can look at: the quotient's own bits
 // verbatim, and "something nonzero lies below" as the sticky bit. s is chosen
 // so the quotient has at least 55 bits, which puts the sticky bit below the
 // round bit on both the normal path (53 kept, so at least 3 dropped) and the

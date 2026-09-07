@@ -1,7 +1,7 @@
 # truesum — exact accumulation of `double` matrices
 
 **Specification.** For the reasoning behind these choices, and the
-measurements that settled them, see `simd-design.md`. This document states what
+measurements that decided them, see `simd-design.md`. This document states what
 the library guarantees and what it requires; that one states why.
 
 ---
@@ -33,7 +33,7 @@ precision recovery tool.
 
 ## 2. Representation
 
-A matrix is stored as **column blocks**. Every column carries its own scale.
+A matrix is stored as **column blocks**. Every column has its own scale.
 Entry `(i, j)` is a two's-complement integer `V` of `column_limbs(j)` 64-bit
 limbs, denoting
 
@@ -67,7 +67,7 @@ where `max_addend_bits` spans the lowest bit any addend reaches to the highest
 bit the largest one occupies, `count` is the number of addends, and the final
 `+1` is the sign. This is what lets the carry chain run without an overflow
 test at every limb, which is what lets it vectorize. The top limb alone
-carries a sign test (§7), so a width the bound did not in fact cover is
+includes a sign test (§7), so a width the bound did not in fact cover is
 reported rather than wrapped.
 
 For a caller sizing an accumulation matrix in advance, the same rule reads:
@@ -111,7 +111,7 @@ value's true unit in the last place, not what `frexp` reports. A column of
 integers surveys as exponent 0, not −52.
 
 Both extents are `int`: a `double`'s true-ulp exponent lies in [−1074, 1023]
-and its top in [−1073, 1024], so 32 bits carries six orders of magnitude more
+and its top in [−1073, 1024], so 32 bits covers six orders of magnitude more
 range than the format can produce.
 
 A survey is 12 bytes per column against 8 bytes per matrix element — **one part
@@ -223,7 +223,7 @@ fixed point, never in floating point. Guaranteed properties:
 
 - the returned `double` is unaffected by asking for the residual;
 - `|residual| <= ulp(result) / 2`, negative exactly when the rounding went up,
-  so the pair is a non-overlapping two-term expansion carrying about 106 bits;
+  so the pair is a non-overlapping two-term expansion of about 106 bits;
 - the residual is `+0.0` exactly when `is_exactly_representable` is true;
 - a value outside `double`'s range returns ±inf with a residual of `0.0`.
 
@@ -242,7 +242,7 @@ count and divided once; every property listed above holds for it, with "the
 residual is `+0.0` exactly when the quotient is a double" in place of the
 `is_exactly_representable` clause. One boundary is worth knowing: a quotient
 that falls exactly halfway between two denormals leaves a residual of half
-the smallest denormal, which no double carries, and that residual reads as
+the smallest denormal, which no double can represent, and that residual reads as
 `+0.0`. There is no exact decimal of a mean, because there is none in general.
 
 ### Shape, sizing and tuning
@@ -458,7 +458,7 @@ bandwidth-bound and was not measured.
 | `std::runtime_error` | a detected contradiction; unreserved device column; more matrices than declared; any failed CUDA call |
 | `std::bad_alloc` | allocation failure |
 
-Every checked CUDA call names the function and source location in its message.
+Every checked CUDA call reports the function and source location in its message.
 Destructors do not throw.
 
 ---

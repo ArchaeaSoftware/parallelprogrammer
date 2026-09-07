@@ -417,9 +417,9 @@ private:
     void rescale_column(std::size_t j, int new_exponent);
     void ensure_slots(std::size_t words);
     // Zeroes every limb array reserved since the last flush, in one launch.
-    // Const because it settles deferred work rather than changing what the
+    // Const because it completes deferred work rather than changing what the
     // accumulation matrix holds -- the limbs read as zero either way, and
-    // readback paths are const and must be able to settle it.
+    // readback paths are const and must be able to complete it.
     void flush_pending_zero() const;
 
     std::size_t rows_;
@@ -451,7 +451,7 @@ private:
     int *occupancy_host_ = nullptr;    // mapped, written by the last block
     unsigned *ticket_ = nullptr;       // device, elects that block
 
-    // The same pair for the detector's verdict, carried across by the same
+    // The same pair for the detector's verdict, brought across by the same
     // elected block in the same pass.
     unsigned *flags_device_ = nullptr;
     unsigned *flags_host_ = nullptr;

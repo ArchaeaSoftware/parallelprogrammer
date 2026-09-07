@@ -1,7 +1,7 @@
 // Exact accumulation of double-valued matrices into a column-blocked
 // arbitrary-precision fixed-point matrix.
 //
-// Every column carries its own scale. Entry (i, j) is stored as a two's
+// Every column has its own scale. Entry (i, j) is stored as a two's
 // complement integer V of `column_limbs(j)` 64-bit limbs and denotes the exact
 // rational value
 //
@@ -40,7 +40,7 @@ public:
 
     // Symmetric n x n, storing one triangle. A(i, j) and A(j, i) are the same
     // stored entry rather than two that happen to agree, which matters here
-    // beyond halving the memory: every column carries its own exponent and
+    // beyond halving the memory: every column has its own exponent and
     // width, so in full storage the two halves would hold equal values in
     // different limbs, and symmetry would be a property the data had to keep
     // earning. Stored once, it cannot drift.
@@ -207,7 +207,7 @@ public:
     //   - the returned double is unaffected by asking for the residual;
     //   - |residual| <= half an ulp of the returned double, and the residual
     //     is negative exactly when the rounding went up, so the two together
-    //     are a non-overlapping two-term expansion carrying about 106 bits;
+    //     are a non-overlapping two-term expansion of about 106 bits;
     //   - the residual is +0.0 when the value is exactly representable, which
     //     is_exactly_representable() reports independently;
     //   - a value outside double's range returns +/-inf with a residual of
@@ -408,7 +408,7 @@ private:
 
 // Decomposes a finite double into an exact odd mantissa and exponent:
 // v == mantissa * 2^exponent, with mantissa odd (or zero, when v is +/-0).
-// For +/-0 the mantissa is 0 and the exponent carries no meaning; `negative`
+// For +/-0 the mantissa is 0 and the exponent has no meaning; `negative`
 // still reflects the sign bit, so -0.0 reports negative.
 struct DoubleParts {
     std::uint64_t mantissa;  // magnitude, at most 53 significant bits, odd

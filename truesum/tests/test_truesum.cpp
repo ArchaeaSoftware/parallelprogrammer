@@ -97,7 +97,7 @@ test_decompose()
     CHECK(p.mantissa == 1 && p.exponent == 3 && p.negative);
 
     // Both zeros give a zero mantissa; the sign bit still comes through, but
-    // carries no meaning because accumulate() returns early on a zero mantissa.
+    // has no meaning because accumulate() returns early on a zero mantissa.
     p = truesum::decompose(0.0);
     CHECK(p.mantissa == 0 && !p.negative);
 
@@ -1042,7 +1042,7 @@ test_zero_crossing_preserves_value()
     a.add_matrix(mid.data());
 
     // Order B: the same values, but the rescale happens while the column
-    // still holds data, so the bound is carried across it instead.
+    // still holds data, so the bound is extended across it instead.
     truesum::AccumulationMatrix b(rows, cols);
     b.add_matrix(big.data());
     b.add_matrix(tiny.data());
@@ -1328,7 +1328,7 @@ test_symmetric_matches_full_storage()
 
     // Stored once, so the two halves are the same limbs and not merely the
     // same value -- which is what full storage cannot promise, since columns
-    // i and j carry their own exponents.
+    // i and j have their own exponents.
     for (std::size_t i = 0; i < n; ++i) {
         for (std::size_t j = 0; j < n; ++j) {
             CHECK(lo.entry_limbs(i, j) == lo.entry_limbs(j, i));
@@ -2030,7 +2030,7 @@ test_mean_matches_double_division()
 }
 
 // Sums too wide for a double, so no double division can be the reference.
-// The check is the definition of correct rounding, carried out exactly in a
+// The check is the definition of correct rounding, performed exactly in a
 // second accumulation matrix: with X the stored sum, h the returned mean, n the
 // count and u the ulp of h,
 //
@@ -2234,7 +2234,7 @@ test_mean_edge_cases()
     add_at(a, 0, 0, tiny);
     CHECK_DOUBLE(a.to_double_mean(&lo, 0, 0, 2), 4 * tiny);
     // What that rounding dropped is half the smallest denormal, which no
-    // double can carry: the residual is itself a tie, and goes to +0.0.
+    // double can represent: the residual is itself a tie, and goes to +0.0.
     CHECK_DOUBLE(lo, 0.0);
 
     // Top of the range: four DBL_MAX over four is DBL_MAX exactly, over

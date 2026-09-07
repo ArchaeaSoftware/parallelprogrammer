@@ -410,7 +410,7 @@ test_accumulated_bound()
                                " limb mismatches)");
 }
 
-// Compares one entry by value across two containers that may have settled on
+// Compares one entry by value across two containers that may have arrived at
 // different exponents and widths: the device holds V * 2^egpu, the CPU
 // V * 2^ecpu, so the CPU's limbs shifted left by the difference must match.
 bool
@@ -1097,7 +1097,7 @@ test_in_place_input()
         truesum::InputRead c;
         c = std::move(b);
         c.wait();
-        check(c.ready(), "move assignment carries the event");
+        check(c.ready(), "move assignment transfers the event");
     }
 
     // Pageable memory is refused rather than left to fault in the kernel.
@@ -1394,7 +1394,7 @@ test_deferred_zeroing()
     const std::size_t rows = 300, cols = 5;
 
     // Read back before anything is accumulated -- the readback path has to
-    // settle the pending zeroing itself.
+    // complete the pending zeroing itself.
     {
         truesum::CudaAccumulationMatrix g(rows, cols);
         for (std::size_t j = 0; j < cols; ++j) g.reserve_column(j, 0, 256);

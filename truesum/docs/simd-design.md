@@ -24,13 +24,13 @@ RTX 3060 (sm_86, CUDA 12.9).
 
 | decision | status |
 | --- | --- |
-| **64-bit limb storage (`uint64_t`) on every target** | **settled** |
-| Limb-major layout: one array per limb position | settled |
-| 64-byte aligned allocation, skewed per limb array | settled |
-| `LimbColumn` as the type name | settled, naming may be revisited |
+| **64-bit limb storage (`uint64_t`) on every target** | **closed** |
+| Limb-major layout: one array per limb position | closed |
+| 64-byte aligned allocation, skewed per limb array | closed |
+| `LimbColumn` as the type name | closed, naming may be revisited |
 | Bit-manipulation `decompose` | landed (`8565474`) |
-| Flat free-function kernels; runtime dispatch via target attributes | settled |
-| No templates in the public API; radix templated in kernels only | settled |
+| Flat free-function kernels; runtime dispatch via target attributes | closed |
+| No templates in the public API; radix templated in kernels only | closed |
 | Radix: 52-bit carry-save vs 64-bit canonical | **closed: stays at 64** |
 | Whether limb arrays get separate allocations on CUDA | measured neutral, kept separate |
 | Survey supplied by the producer; accumulation matrix pre-sized from it | landed, both targets |
@@ -117,7 +117,7 @@ most once the accumulation matrix outgrows L3: 1.69x collapses to 1.18x.
 Where it pays is the middle, 2-4 limbs, at 1.33-1.55x, and that holds up past
 L3. So the useful form of this is not a global radix but a **per-column**
 choice on width, which the container is already shaped for since every column
-carries its own exponent and limb count. That doubles the kernel surface and
+has its own exponent and limb count. That doubles the kernel surface and
 every readback path, which is the cost to weigh against 1.3-1.5x on some
 columns and a loss on others.
 
@@ -154,7 +154,7 @@ struct Column {
 Each `LimbColumn` is a slice at **fixed significance spanning all rows**: row
 `i`'s word in `limbs[k]` covers value bits `2^(exponent + 64k)` through
 `2^(exponent + 64k + 63)`. They are ordered least-significant first, and the
-topmost one is special — it carries the two's-complement sign bit.
+topmost one is special — it holds the two's-complement sign bit.
 
 Naming caveat: `LimbColumn` sits next to `Column` in `AccumulationMatrix` and a
 `LimbColumn` is *not* a column of the matrix. Worth a comment at the
@@ -243,7 +243,7 @@ real kernel, which is issue-bound at ~2.3 IPC rather than waiting on L1. The
 skew is worth keeping at 448 bytes on a 512KB array (0.09%); it is not worth
 2.8x.
 
-## Limb width: 64-bit storage everywhere (settled)
+## Limb width: 64-bit storage everywhere (closed)
 
 **Measured conclusion: limb width is not the lever; deferring carries is.**
 Storage is `uint64_t` on both targets — the plan of record — and the only
@@ -266,7 +266,7 @@ Two results, both against the direction this document previously took:
   64-bit canonically and 40% slower under carry-save. The 32-bit ALU implements
   a 64-bit limb at exactly proportional cost, so there is nothing to reclaim by
   matching the hardware width.
-- **A reduced radix beats a narrow one.** 52-in-64 wins because it carries more
+- **A reduced radix beats a narrow one.** 52-in-64 wins because it holds more
   usable bits per register and per byte moved (81% density against 50%), while
   2^11 deferred additions is ample for a batch. Normalizing every few thousand
   accumulations is cheap amortized.
@@ -446,7 +446,7 @@ produce exactly the leaky abstraction this design is trying to avoid.
 
 ## Templates: only in the kernels, never in the API
 
-Settling storage at 64 bits removed the case for templating the public class —
+Fixing storage at 64 bits removed the case for templating the public class —
 there is no type left to vary. Templating `AccumulationMatrix` would force
 header-only or explicit instantiation and make the most-read code less flat for
 no benefit.
@@ -474,7 +474,7 @@ single test binary.
 
 - Dynamic growth mid-kernel is impractical, and two ways around it are closed
   on this toolkit rather than merely inadvisable — see "The CUDA path" below,
-  which also carries the plan for growing a column *between* launches.
+  which also holds the plan for growing a column *between* launches.
 - Many small `cudaMalloc`s are expensive, which pushed against one allocation
   per limb position. **Resolved: the stream-ordered pool is the compromise.**
   `cudaMallocAsync` makes per-limb-position allocation affordable, so the
@@ -491,7 +491,7 @@ single test binary.
   column, so the load is a broadcast of one value, and the whole pointer array
   is `nlimbs * 8` bytes — 128 for a 16-limb column — hence L1-resident for the
   life of the kernel.
-- **The skew does not carry over, and the device path deliberately omits it.**
+- **The skew does not apply here, and the device path deliberately omits it.**
   An earlier draft assumed the concern maps to partition camping and that the
   medicine was the same. It does not: the CPU needs the skew because eight
   lanes touch `nlimbs` arrays at the same row offset in succession and collide
@@ -521,7 +521,7 @@ A single accumulation pass can widen a column by many limbs at once, because
 `max_addend_bits` is a *range* from the column exponent to the highest bit
 reached rather than an increment. Measured on the CPU container: a fresh column
 given one pass spanning 2^-1074 to 2^1023 goes from 1 limb to 33; a column
-settled at 1.0 that then sees 2^1000 goes to 16; a single `add(2^900)` goes to
+fixed at 1.0 that then sees 2^1000 goes to 16; a single `add(2^900)` goes to
 15. So there is no cheap slack to pre-allocate — sizing for the worst case is
 2112 bits an entry against the 128-192 real columns use, which is the flat
 allocation this structure exists to avoid.
@@ -620,7 +620,7 @@ in it too:
 Three things follow, and the first corrects the framing above.
 
 **There is no transfer for the survey to hide behind.** Read-in-place removed
-it; the only `cudaMemcpyAsync` left on this path carries the 1 KB of
+it; the only `cudaMemcpyAsync` left on this path moves the 1 KB of
 `DeviceSurvey`. What hides the survey is the *previous batch's kernel*, via the
 two slots -- ~705 us of survey against ~1760 us of kernel, so it is free with
 room to spare. The conclusion in this section survives; the mechanism it gives
@@ -633,7 +633,7 @@ above shows the same thing as throughput; this is where it comes from.
 
 **The library's survey is cheaper than a standalone one** -- 705 against 1376 --
 because `validate_host_survey` passes the column's current exponent as the
-floor, so the significand pass is skipped once a column is settled.
+floor, so the significand pass is skipped once a column has an exponent.
 
 **Fusing the copy with the survey was tried properly and does not pay.** The
 staged path walks 33.6 MB twice, to copy and then to survey. A real fusion
@@ -680,7 +680,7 @@ total on a different path. Measured directly at the same shape:
 | library kernel, pre-sized | 1261.4 |
 | library adaptive, total 1917.7 less host survey 658.4 | 1259.2 |
 
-Within 0.4%. The per-column descriptor handling named as the candidate costs
+Within 0.4%. The per-column descriptor handling singled out as the candidate costs
 nothing measurable. The lesson is the same one the per-block cost taught: a
 figure obtained by subtracting two measurements is only as good as their having
 been taken under the same conditions, and it is not a measurement.
@@ -801,10 +801,10 @@ minuscule beside the payload it describes:
 were `long long` at first, which made the struct 24 bytes rather than the 16 a
 count of its fields suggests -- alignment padding, and two of the four fields
 being one byte each. A double's true-ulp exponent lives in [-1074, 1023] and
-its top in [-1073, 1024], so `int` carries six orders of magnitude more range
+its top in [-1073, 1024], so `int` covers six orders of magnitude more range
 than the format can produce, and a `static_assert` now pins the size.
 
-So it can simply be carried alongside the matrix. What that buys is out of
+So it can simply be sent alongside the matrix. What that buys is out of
 proportion to its size:
 
 - **No survey, on either path.** The read disappears rather than being
@@ -881,7 +881,7 @@ Three consequences beyond the survey disappearing:
   `add_count` solely to derive a width that is now given, so the whole path
   shortens rather than merely speeding up.
 - **The device path stops asking the host anything mid-batch**, which is what
-  its 19.9 us of fixed cost is: a survey kernel and the round-trip carrying its
+  its 19.9 us of fixed cost is: a survey kernel and the round-trip bringing its
   verdict. That is 79% of a 1024-row batch, so small matrices gain most.
 
 Two constraints the interface has to state rather than imply. Submissions must
@@ -960,7 +960,7 @@ The memory halves, exactly: 268.4 to 134.3 MB of device allocation at
 n = 4096. But the reason to store one copy rather than mirror two is not the
 memory.
 
-**Every column carries its own exponent and width.** In full storage `A(i,j)`
+**Every column has its own exponent and width.** In full storage `A(i,j)`
 and `A(j,i)` therefore hold equal values in *different limbs*, and symmetry is
 a property the data has to keep earning rather than one the structure
 guarantees. Stored once it cannot drift, and the tests assert
@@ -1026,7 +1026,7 @@ double and requires what remains to equal the reported residual exactly; and
 400 random multi-term sums were compared against exact rational arithmetic
 outside this codebase, matching bit for bit including the sign of zero.
 
-What it is worth, and what it is not. The pair carries ~106 bits against the
+What it is worth, and what it is not. The pair holds ~106 bits against the
 double's ~53 — measured worst relative error 2^-107 against 2^-53 over those
 400 sums. But `lo` is a `double`, so it is a fixed +53 bits and *not* "the rest
 of the value": columns here are routinely 128-192 bits wide, and everything
@@ -1060,8 +1060,8 @@ varies 1.75 to 2.67 across runs — so nothing is claimed there.
 
 Folding does **not** require pre-sizing, and the folded matrices need not be
 all of them or come first. Without surveys the fold surveys its K columns and
-fits the column once before adding any of them, so it settles the column itself
-rather than requiring it settled; folded and single adds interleave in any
+fits the column once before adding any of them, so it fits the column itself
+rather than requiring it pre-fitted; folded and single adds interleave in any
 order, including a fold that rescales a column earlier single adds populated.
 
 Separating the two levers at 65536x64 on eight threads:
@@ -1270,7 +1270,7 @@ at radix 52 came off it by being measured rather than by being done.
    decision worth getting right. A register array has to be indexed at compile
    time or it spills to local memory, so registers would mean templating the
    kernel on the limb count -- which columns of one matrix do not share, since
-   each carries its own width, so a single launch could not serve them. Letting
+   each has its own width, so a single launch could not serve them. Letting
    L1 do the reuse sidesteps the question: the working set is 256 threads x
    nlimbs x 8 bytes, 4 KB at two limbs against 128 KB of L1. Measure the cheap
    version before paying for the templated one.
@@ -1298,7 +1298,7 @@ at radix 52 came off it by being measured rather than by being done.
    generated on the device -- which is the same conclusion the GPUDirect item
    above reaches from the other direction.
 
-   **The null-stream result is a usage trap worth naming.** This accumulation matrix's
+   **The null-stream result is a usage trap worth calling out.** This accumulation matrix's
    stream is a blocking stream, so it implicitly synchronizes with the legacy
    null stream. A producer using plain `cudaMemcpy` serializes against the
    accumulate and gets none of the overlap -- 1776 against 1301, which is the

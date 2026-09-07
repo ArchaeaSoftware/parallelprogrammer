@@ -44,7 +44,7 @@ cuda_check(cudaError_t status, const char *call, const char *file, int line)
 // Every checked runtime call reads exactly like the call it makes, with one
 // extra parenthesis: cuda(Malloc(&p, bytes)) is cudaMalloc(&p, bytes). The
 // macro pastes the prefix back on for the call and stringizes it for the
-// diagnostic, so a failure names the function rather than an opaque
+// diagnostic, so a failure reports the function rather than an opaque
 // expression. A blocking wait is cuda(StreamSynchronize(s)), which pastes the
 // same way, so there is one mechanism rather than several.
 //
@@ -202,7 +202,7 @@ split_device(double v, unsigned long long &mantissa, int &exponent, int &top,
 }
 
 // The CPU survey splits into two passes so the significand can be skipped once
-// a column's scale is settled. That does not pay here: this pass is bound by
+// a column's scale is fixed. That does not pay here: this pass is bound by
 // reading the column, and the trailing-zero count is a few ALU ops on a value
 // already in registers. One exact pass is both simpler and cheaper.
 __global__ void
@@ -341,7 +341,7 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols, InputSet in,
         // the last write reach DRAM. Traffic an element goes from 8 + 16*nlimbs
         // to 8*n + 16*nlimbs, and it needs no register array -- so the limb
         // count does not have to be a compile-time constant, which it could not
-        // be: columns of one matrix carry their own widths.
+        // be: columns of one matrix have their own widths.
         for (unsigned bi = 0; bi < in.n; ++bi) {
             const double *col = in.p[bi] + col_off;
             unsigned long long m;
@@ -353,7 +353,7 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols, InputSet in,
 
             // A negative shift converts to an `off` far above nlimbs, so the
             // loop below does not run and the value is silently dropped. That
-            // is the failure the flags exist to name.
+            // is the failure the flags exist to report.
             const int shift = e - c.exponent;
             const unsigned off = static_cast<unsigned>(shift) / kRadix;
             if (shift < 0) t_flags |= kBadExponent;
@@ -426,7 +426,7 @@ accumulate_kernel(const ColumnDesc *__restrict__ cols, InputSet in,
     }
 
     // Fold the per-thread maxima, reduce across blocks in device memory with
-    // ordinary atomics, then elect one block to carry the finished array to
+    // ordinary atomics, then elect one block to copy the finished array to
     // host memory. Atomics never cross PCIe: measured, that costs 260x.
     if (0 != t_overflow) t_flags |= kBadOverflow;
     if (0 != t_flags) atomicOr(&flags_device[j], t_flags);
@@ -547,7 +547,7 @@ limbs_for_bits(std::size_t bits)
 // Both pointers a caller hands the standalone survey are dereferenced by the
 // kernel and by nothing on the host, so each has to be memory the device can
 // reach. Pageable memory faults inside the launch, away from the mistake;
-// one driver query on a setup path buys a diagnostic that names what to
+// one driver query on a setup path buys a diagnostic that says what to
 // allocate instead. What comes back is the device alias, because a mapped host
 // allocation is not obliged to share its address with the device.
 void *
@@ -659,7 +659,7 @@ CudaAccumulationMatrix::CudaAccumulationMatrix(std::size_t rows,
     // unavailable.
     cudaSetDeviceFlags(cudaDeviceMapHost);
     // Columns become the grid's y dimension, the only launch parameter here
-    // that is not fixed at compile time or clamped. Bounding it once, by name,
+    // that is not fixed at compile time or clamped. Bounding it once, up front,
     // is what lets every launch below go unchecked.
     int max_grid_y = 0;
     cuda(DeviceGetAttribute(&max_grid_y, cudaDevAttrMaxGridDimY, 0));
@@ -1515,7 +1515,7 @@ CudaAccumulationMatrix::accumulate_device(const double *b,
         b, static_cast<const ColumnShape *>(shapes_), 0, col_stride,
         static_cast<Survey *>(survey_out_));
     // This is the drain the host path avoids: with the input already on the
-    // device there is nothing to survey on the host, so the verdict has to come
+    // device, there is nothing to survey on the host, so the verdict has to come
     // back before the accumulate can be allowed to run.
     const Survey *surveys = end_survey();
 

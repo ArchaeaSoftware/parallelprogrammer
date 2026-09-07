@@ -24,7 +24,7 @@ using Survey = ::truesum::Survey;
 
 // `floor_exponent` is the column's current exponent. The survey needs the exact
 // minimum only when the incoming values could drop below it; otherwise a cheap
-// lower bound settles that no rescale is due and the significand is never
+// lower bound proves that no rescale is due and the significand is never
 // touched. Pass LLONG_MAX to force the exact value, which is what a column
 // with no scale yet requires, since it adopts whatever the survey returns.
 using SurveyFn = Survey (*)(const double *, std::size_t, long long);

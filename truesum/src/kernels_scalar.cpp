@@ -212,7 +212,7 @@ accumulate_fold_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
 // The sign test is applied after the chain, to the last limb it touched, and
 // only when that limb was the top one. Testing inside the loop body cost the
 // two-limb case 45% when measured, and peeling the top limb out of the loop
-// still cost the three-limb case 27%; carrying the last iteration's operands
+// still cost the three-limb case 27%; hoisting the last iteration's operands
 // out of the loop leaves the loop as it was.
 bool
 accumulate_one(std::uint64_t *const *limbs, std::size_t nlimbs, std::size_t row,

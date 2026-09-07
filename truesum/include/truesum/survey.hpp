@@ -17,7 +17,7 @@
 namespace truesum {
 
 // Both exponents are int rather than long long. A double's true-ulp exponent
-// lives in [-1074, 1023] and its top in [-1073, 1024], so 32 bits carries six
+// lives in [-1074, 1023] and its top in [-1073, 1024], so 32 bits covers six
 // orders of magnitude more range than the format can produce. Narrowing halves
 // the struct, from 24 bytes to 12, and matches the width the CUDA path already
 // stages these in.
