@@ -114,7 +114,36 @@ public:
     // its rows are contiguous (0 means tightly packed, i.e. rows()). This is
     // the layout the accumulation matrix itself wants, so it avoids the staging
     // copy that a row-major input needs.
-    void add_matrix_col_major(const double *b, std::size_t col_stride = 0);
+    // A += B, for B in column-major order. Column j begins at b + j*col_stride
+    // and its rows are contiguous; 0 means tightly packed.
+    //
+    // `surveys` is optional. Left null, the library surveys B itself, one
+    // column at a time, and sizes each column from what it finds. Supplied, it
+    // must hold one entry per column, describing the column_rows(j) values of
+    // column j beginning at row column_first_row(j) -- exactly the slice this
+    // call reads -- and the survey pass is skipped.
+    //
+    // A supplied survey is the pre-sizing constructor's contract applied to one
+    // submission: the extents drive the rescale and the widen, and the
+    // accumulate kernel then checks every addend against the column they sized,
+    // so a survey that understates either extent is reported rather than
+    // believed. What it saves is the pass that would have computed the survey,
+    // which a producer holding the values in registers has already paid for
+    // once.
+    //
+    // The survey comes before the stride so that either can be given without
+    // the other: a caller with a tightly packed matrix and a survey in hand
+    // writes add_matrix_col_major(b, surveys), and one with a strided matrix
+    // and no survey writes add_matrix_col_major(b, nullptr, col_stride).
+    //
+    // A supplied survey does not set the kernel's first-limb hint. That hint
+    // skips limb positions outright, and a position the kernel skips is one no
+    // check can fire at, so deriving it from data the caller was trusted for
+    // would turn an overstated minimum into silent loss. The hint is worth far
+    // less than the survey pass it rides along with.
+    void add_matrix_col_major(const double *b,
+                              const Survey *surveys = nullptr,
+                              std::size_t col_stride = 0);
 
     void add_matrix_col_major_scaled_pow2(const double *b, int log2_scale,
                                           std::size_t col_stride = 0);
@@ -126,34 +155,41 @@ public:
     // Identical results to calling add_matrix_col_major once per matrix --
     // exact accumulation does not care about order or grouping. What changes
     // is traffic. One at a time, each batch reads and writes every limb it
-    // touches; folded, the limbs are read once, all `count` addends applied in
+    // touches; batched, the limbs are read once, all `count` addends applied in
     // registers, and written once. That is a saving in accumulation matrix
     // traffic only, so it shows up where accumulation matrix traffic is the
     // bound.
     //
     // Which `count` to pass is not obvious, because two costs pull the other
     // way: `count` input columns are `count` concurrent streams rather than
-    // one, and a row's limbs have to stay live across the whole fold. Measured
+    // one, and a row's limbs have to stay live across the whole batch. Measured
     // at 64 columns, Gelem/s, medians of three:
     //
     //                        seq   K=2   K=4   K=8
     //   65536 rows, 8 thr   1.14  1.84  2.65  3.01   <- DRAM-bound
     //   any shape, 1 thr    0.57  0.69  0.59  0.49
     //
-    // So: past L3 and threaded, fold as much as you have -- 2.6x at K=8, and
+    // So: past L3 and threaded, batch as much as you have -- 2.6x at K=8, and
     // still rising. Single-threaded, K=2 is worth 1.2x and beyond that the
     // extra streams cost more than the traffic saved. Inside L3 on many
     // threads the run-to-run spread swamps the difference, and the ordinary
     // entry point is the simpler one.
     //
-    // Column-major only, and deliberately: folding a row-major batch would
+    // Column-major only, and deliberately: batching a row-major batch would
     // mean staging `count` columns at once per worker, and writing and
     // re-reading that staging is the traffic this exists to avoid.
     //
-    // Columns wider than the fold's register budget fall back to one batch at
+    // Columns wider than the batch's register budget fall back to one batch at
     // a time, which costs nothing: the single-batch kernel stops as soon as a
-    // carry dies, while the fold must write back every limb it loaded.
+    // carry dies, while the batch must write back every limb it loaded.
+    // `surveys` is optional and shaped like `b`: surveys[k][j] describes
+    // matrix k's column j, the same indexing the pre-sizing constructor takes.
+    // Supplied, it skips a survey of every matrix in the set rather than of one,
+    // since a batch has to know the aggregate extents before it may add any of
+    // them. The extents are checked by the accumulate exactly as a submitted
+    // survey is on the single-matrix path.
     void add_matrices_col_major(const double *const *b, std::size_t count,
+                                const Survey *const *surveys = nullptr,
                                 std::size_t col_stride = 0);
 
     // A(., j) += v, where v is column_rows(j) contiguous doubles. Lets a caller
@@ -297,6 +333,18 @@ public:
     // total width. Widening/lowering only; never discards precision.
     void reserve_column(std::size_t j, int exponent, std::size_t bits);
 
+    // Reserve room for matrices described by `surveys`, indexed by matrix and
+    // then by column, without pre-sizing. Unlike the constructor that takes the
+    // same argument, this makes no promise about what will arrive: the
+    // accumulation matrix goes on surveying every matrix it is handed, and a
+    // later one outside these extents rescales or widens as it always would.
+    //
+    // For a caller who knows some of the incoming matrices and not others, which
+    // the constructor cannot express. It reserves storage only, so the sums are
+    // identical either way; what it avoids is the rescale that a low value
+    // arriving later would force, and a rescale rewrites the whole column.
+    void reserve_for_surveys(const std::vector<std::vector<Survey>> &surveys);
+
     // Pre-size every column from a matrix that is about to be accumulated
     // `count` times, so the accumulation itself never rescales. Purely an
     // optimization; results are identical without it.
@@ -311,7 +359,7 @@ public:
 private:
     struct Column {
         int exponent = 0;
-        bool initialized = false;  // false until the first add fixes the scale
+        bool initialized = false;  // false until the first add sets the scale
 
         // Width is derived rather than measured: no entry can exceed
         // `count * 2^max_addend_bits`, so that bound plus a sign bit says how
@@ -333,7 +381,7 @@ private:
 
     // Logical (i, j) to the entry that actually holds it: `col` is the storing
     // column and `slot` the index within it. The identity unless symmetric,
-    // where the triangle folds one index onto the other.
+    // where the triangle maps one index onto the other.
     void locate(std::size_t &col, std::size_t &slot, std::size_t i,
                 std::size_t j) const;
 
@@ -350,24 +398,29 @@ private:
     // Column j starts at b + j*column_step, with element i at + i*row_step.
     // Row-major is (1, row_stride); column-major is (col_stride, 1).
     void accumulate_columns(const double *b, std::size_t column_step,
-                            std::size_t row_step, int log2_scale);
+                            std::size_t row_step, int log2_scale,
+                            const Survey *supplied = nullptr);
 
     // The columns in [begin, end) of one such matrix, staged through the
     // buffer belonging to worker `slot`.
     void accumulate_column_range(const double *b, std::size_t column_step,
                                  std::size_t row_step, int log2_scale,
                                  std::size_t begin, std::size_t end,
-                                 unsigned slot);
+                                 unsigned slot,
+                                 const Survey *supplied = nullptr);
 
     // Accumulates one column that is already contiguous.
-    void accumulate_column(std::size_t j, const double *column, int log2_scale);
+    void accumulate_column(std::size_t j, const double *column, int log2_scale,
+                           const Survey *supplied = nullptr);
 
-    // The fold's counterparts: one column of every matrix at once.
-    void fold_column_range(const double *const *b, std::size_t count,
+    // The batch's counterparts: one column of every matrix at once.
+    void batch_column_range(const double *const *b, std::size_t count,
                            std::size_t col_stride, std::size_t begin,
-                           std::size_t end);
-    void fold_column(std::size_t j, const double *const *columns,
-                     std::size_t count);
+                           std::size_t end,
+                           const Survey *const *surveys = nullptr);
+    void batch_column(std::size_t j, const double *const *columns,
+                     std::size_t count,
+                     const Survey *const *surveys = nullptr);
 
     void check_index(std::size_t i, std::size_t j) const;
     void report_contradiction(std::size_t j, unsigned flags) const;

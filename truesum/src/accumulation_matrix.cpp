@@ -257,6 +257,28 @@ AccumulationMatrix::reserve_from_surveys(
     declared_matrices_ = surveys.size();
 }
 
+// The same sizing without the promise. Surveys given here grow the columns to
+// cover what they describe, and the accumulation matrix keeps surveying every
+// matrix it is handed, so a caller who knows some of what is coming can pay for
+// those rescales and widens up front and let the rest be discovered.
+//
+// This costs nothing in correctness, because it only reserves storage: it
+// leaves `max_addend_bits` and `add_count` alone, and each accumulate still
+// fits the column from its own extents afterwards. What it buys is the
+// expensive half of adaptation. A widen appends limb-columns and leaves the
+// existing ones untouched, but a rescale allocates a fresh set and shifts every
+// stored value into them, so a column that starts low enough never pays for one.
+void
+AccumulationMatrix::reserve_for_surveys(
+    const std::vector<std::vector<Survey>> &surveys)
+{
+    const bool was_presized = presized_;
+    const std::size_t declared = declared_matrices_;
+    reserve_from_surveys(surveys);
+    presized_ = was_presized;
+    declared_matrices_ = declared;
+}
+
 // A batch reached outside what its column was sized for. With surveys supplied
 // by a producer that means the metadata was wrong; with surveys computed here
 // it means the survey and the accumulate disagree, which is a bug. Either way
@@ -381,9 +403,28 @@ AccumulationMatrix::add_matrix_scaled_pow2(const double *b, int log2_scale,
 
 void
 AccumulationMatrix::add_matrix_col_major(const double *b,
+                                         const Survey *surveys,
                                          std::size_t col_stride)
 {
-    add_matrix_col_major_scaled_pow2(b, 0, col_stride);
+    if (nullptr == surveys) {
+        add_matrix_col_major_scaled_pow2(b, 0, col_stride);
+        return;
+    }
+    // The extents are taken on trust, but a survey that contradicts itself is
+    // rejected before it can be believed. `max_top` is one past the highest bit
+    // any value occupies and `min_exponent` the lowest, so a live column has
+    // the first strictly above the second. A survey claiming otherwise would
+    // make max_top - exponent negative, and that subtraction is unsigned.
+    for (std::size_t j = 0; j < cols_; ++j) {
+        if (surveys[j].any && surveys[j].max_top <= surveys[j].min_exponent) {
+            std::ostringstream os;
+            os << "truesum: the survey for column " << j << " puts its top ("
+               << surveys[j].max_top << ") at or below its minimum ("
+               << surveys[j].min_exponent << "), which no column of values can";
+            throw std::invalid_argument(os.str());
+        }
+    }
+    accumulate_columns(b, col_stride ? col_stride : rows_, 1, 0, surveys);
 }
 
 void
@@ -399,7 +440,8 @@ AccumulationMatrix::accumulate_column_range(const double *b,
                                             std::size_t column_step,
                                             std::size_t row_step,
                                             int log2_scale, std::size_t begin,
-                                            std::size_t end, unsigned slot)
+                                            std::size_t end, unsigned slot,
+                                            const Survey *supplied)
 {
     std::vector<double> &staging = column_buffers_[slot];
     for (std::size_t j = begin; j < end; ++j) {
@@ -414,7 +456,8 @@ AccumulationMatrix::accumulate_column_range(const double *b,
             }
             column = staging.data();
         }
-        accumulate_column(j, column, log2_scale);
+        accumulate_column(j, column, log2_scale,
+                          nullptr != supplied ? &supplied[j] : nullptr);
     }
 }
 
@@ -456,7 +499,8 @@ AccumulationMatrix::partition_columns(std::size_t &begin, std::size_t &end,
 
 void
 AccumulationMatrix::accumulate_columns(const double *b, std::size_t column_step,
-                                       std::size_t row_step, int log2_scale)
+                                       std::size_t row_step, int log2_scale,
+                                       const Survey *supplied)
 {
     if (0 == rows_ || 0 == cols_) return;
     if (presized_ && ++submitted_matrices_ > declared_matrices_) {
@@ -468,7 +512,7 @@ AccumulationMatrix::accumulate_columns(const double *b, std::size_t column_step,
     const unsigned n = threads();
     if (1 == n || cols_ < 2) {
         accumulate_column_range(b, column_step, row_step, log2_scale, 0, cols_,
-                                0);
+                                0, supplied);
         return;
     }
     // A contiguous block each, so a worker's columns stay near one another in
@@ -477,17 +521,34 @@ AccumulationMatrix::accumulate_columns(const double *b, std::size_t column_step,
         std::size_t begin = 0, end = 0;
         partition_columns(begin, end, slot);
         accumulate_column_range(b, column_step, row_step, log2_scale, begin,
-                                end, slot);
+                                end, slot, supplied);
     });
 }
 
 void
 AccumulationMatrix::add_matrices_col_major(const double *const *b,
                                            std::size_t count,
+                                           const Survey *const *surveys,
                                            std::size_t col_stride)
 {
     if (0 == count) return;
     if (0 == rows_ || 0 == cols_) return;
+    if (nullptr != surveys) {
+        for (std::size_t k = 0; k < count; ++k) {
+            for (std::size_t j = 0; j < cols_; ++j) {
+                if (surveys[k][j].any &&
+                    surveys[k][j].max_top <= surveys[k][j].min_exponent) {
+                    std::ostringstream os;
+                    os << "truesum: the survey for column " << j
+                       << " of matrix " << k << " puts its top ("
+                       << surveys[k][j].max_top << ") at or below its minimum ("
+                       << surveys[k][j].min_exponent
+                       << "), which no column of values can";
+                    throw std::invalid_argument(os.str());
+                }
+            }
+        }
+    }
     if (presized_) {
         submitted_matrices_ += count;
         if (submitted_matrices_ > declared_matrices_) {
@@ -500,20 +561,21 @@ AccumulationMatrix::add_matrices_col_major(const double *const *b,
 
     const unsigned n = threads();
     if (1 == n || cols_ < 2) {
-        fold_column_range(b, count, stride, 0, cols_);
+        batch_column_range(b, count, stride, 0, cols_, surveys);
         return;
     }
     pool_->run([&](unsigned slot) {
         std::size_t begin = 0, end = 0;
         partition_columns(begin, end, slot);
-        fold_column_range(b, count, stride, begin, end);
+        batch_column_range(b, count, stride, begin, end, surveys);
     });
 }
 
 void
-AccumulationMatrix::fold_column_range(const double *const *b, std::size_t count,
+AccumulationMatrix::batch_column_range(const double *const *b, std::size_t count,
                                       std::size_t col_stride, std::size_t begin,
-                                      std::size_t end)
+                                      std::size_t end,
+                                      const Survey *const *surveys)
 {
     // One pointer per matrix, rebuilt per column. Small and on the stack of
     // whichever worker is running, so the columns share nothing.
@@ -523,28 +585,36 @@ AccumulationMatrix::fold_column_range(const double *const *b, std::size_t count,
         for (std::size_t k = 0; k < count; ++k) {
             columns[k] = b[k] + j * col_stride + c.first_row;
         }
-        fold_column(j, columns.data(), count);
+        batch_column(j, columns.data(), count, surveys);
     }
 }
 
 void
-AccumulationMatrix::fold_column(std::size_t j, const double *const *columns,
-                                std::size_t count)
+AccumulationMatrix::batch_column(std::size_t j, const double *const *columns,
+                                std::size_t count,
+                                const Survey *const *surveys)
 {
     Column &c = cols_state_[j];
 
-    // The exponent and width have to be fixed before the fold starts: a
+    // The exponent and width have to be set before the batch starts: a
     // rescale partway through would have to re-shift limbs that earlier
-    // matrices in this same fold had already been added to. Pre-sizing fixes
+    // matrices in this same batch had already been added to. Pre-sizing sets
     // them in the constructor; without it, surveying all `count` columns first
-    // and fitting once fixes them here, which is the same guarantee arrived
+    // and fitting once sets them here, which is the same guarantee arrived
     // at later.
     if (!presized_) {
         bool any = false;
         long long low = 0, high = 0;
         for (std::size_t k = 0; k < count; ++k) {
-            const kernels::Survey sv = kernels::survey()(
-                columns[k], c.rows, std::numeric_limits<long long>::max());
+            // A supplied survey replaces the pass that would have computed
+            // it. The aggregate below, and the checks the accumulate makes
+            // against it, are the same either way.
+            const kernels::Survey sv =
+                nullptr != surveys
+                    ? surveys[k][j]
+                    : kernels::survey()(
+                          columns[k], c.rows,
+                          std::numeric_limits<long long>::max());
             if (sv.nonfinite) {
                 throw std::domain_error(
                     "truesum: cannot accumulate a non-finite value");
@@ -573,13 +643,13 @@ AccumulationMatrix::fold_column(std::size_t j, const double *const *columns,
     }
 
     unsigned flags = 0;
-    if (c.limbs.size() <= kernels::kMaxFoldLimbs) {
-        kernels::accumulate_fold()(c.bases.data(), c.limbs.size(), columns,
+    if (c.limbs.size() <= kernels::kMaxBatchLimbs) {
+        kernels::accumulate_batch()(c.bases.data(), c.limbs.size(), columns,
                                    count, c.rows,
                                    static_cast<std::int32_t>(c.exponent),
                                    &flags);
     } else {
-        // Too wide to hold a row in registers. One batch at a time is not a
+        // Too wide to hold a row in registers. One matrix at a time is not a
         // fallback so much as the better shape here, since that kernel stops
         // at the first dead carry instead of writing every limb back.
         for (std::size_t k = 0; k < count; ++k) {
@@ -610,7 +680,7 @@ AccumulationMatrix::add_column_scaled_pow2(std::size_t j, const double *v,
 
 void
 AccumulationMatrix::accumulate_column(std::size_t j, const double *column,
-                                      int log2_scale)
+                                      int log2_scale, const Survey *supplied)
 {
     // First pass learns only the exponent range, because the rescale and widen
     // decisions have to be made before any value can be added.
@@ -630,13 +700,18 @@ AccumulationMatrix::accumulate_column(std::size_t j, const double *column,
         return;
     }
     // A column with no scale yet takes whatever the survey returns as its
-    // exponent, so there the exact value is always required -- a floor nothing
+    // exponent, so there the exact value is always required -- a cutoff nothing
     // can clear.
-    const long long floor_exponent =
+    const long long cutoff_exponent =
         c.initialized ? static_cast<long long>(c.exponent) - log2_scale
                       : std::numeric_limits<long long>::max();
+    // A caller who already surveyed these values supplies the answer and the
+    // pass is skipped. What the survey is used for does not change: the
+    // extents still drive the rescale and the widen below, and the accumulate
+    // still checks every addend against the column they sized.
     const kernels::Survey sc =
-        kernels::survey()(column, c.rows, floor_exponent);
+        nullptr != supplied ? *supplied
+                            : kernels::survey()(column, c.rows, cutoff_exponent);
     if (sc.nonfinite) {
         throw std::domain_error(
             "truesum: cannot accumulate a non-finite value");
@@ -666,14 +741,21 @@ AccumulationMatrix::accumulate_column(std::size_t j, const double *column,
     fit_column(c);
 
     // Second pass fuses decomposition into the add, so no decomposed form is
-    // ever written to memory. Folding the scale into the column exponent keeps
+    // ever written to memory. Batching the scale into the column exponent keeps
     // the kernel free of it.
+    // The first-limb hint comes from the survey, so it is only taken when the
+    // survey is this column's own. A supplied minimum that overstates the truth
+    // would send the kernel past the limbs an addend belongs in, and a limb
+    // position the kernel skips is one no check can fire at -- the single way
+    // a bad survey could lose a value without saying so.
+    const std::size_t first_limb =
+        nullptr != supplied
+            ? 0
+            : static_cast<std::size_t>(min_exponent - c.exponent) / kLimbBits;
     unsigned flags = 0;
     kernels::accumulate()(
         c.bases.data(), c.limbs.size(), column, c.rows,
-        static_cast<std::int32_t>(c.exponent - log2_scale),
-        static_cast<std::size_t>(min_exponent - c.exponent) / kLimbBits,
-        &flags);
+        static_cast<std::int32_t>(c.exponent - log2_scale), first_limb, &flags);
     // Sized from its own survey, this column cannot contradict itself; the
     // check is free and asserts the survey and the accumulate agree.
     if (0 != flags) report_contradiction(j, flags);
@@ -793,7 +875,7 @@ round_magnitude(const limb_t *mag, std::size_t n, long long exp)
 
 // (magnitude - r) at weight 2^exp, rounded to a double. Signed: negative when
 // the rounding went up, which is why the caller applies the entry's own sign
-// afterwards rather than folding it in here.
+// afterwards rather than absorbing it here.
 double
 residual_of(const std::vector<limb_t> &mag, long long exp, const Rounded &r)
 {

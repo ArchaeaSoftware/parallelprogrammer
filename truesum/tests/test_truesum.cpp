@@ -64,9 +64,9 @@ check_eq_str(const std::string &got, const std::string &want, const char *what,
 void
 add_at(truesum::AccumulationMatrix &m, std::size_t i, std::size_t j, double v)
 {
-    // Symmetric storage folds one index onto the other, exactly as the
+    // Symmetric storage maps one index onto the other, exactly as the
     // accumulation matrix does internally; a caller of add_column has to do
-    // that fold itself.
+    // that batch itself.
     std::size_t col = j, slot = i;
     if (m.symmetric()) {
         if (truesum::Uplo::Lower == m.uplo()) {
@@ -758,7 +758,7 @@ test_column_major_input()
     }
     truesum::AccumulationMatrix e(rows, cols);
     for (int n = 0; n < batches; ++n)
-        e.add_matrix_col_major(padded.data(), pad);
+        e.add_matrix_col_major(padded.data(), nullptr, pad);
     for (std::size_t i = 0; i < rows; ++i) {
         for (std::size_t j = 0; j < cols; ++j) {
             CHECK_STR(e.to_exact_decimal(i, j), a.to_exact_decimal(i, j));
@@ -1523,17 +1523,17 @@ test_symmetric_keeps_exactness()
     }
 }
 
-// Folding several matrices into one pass changes only the traffic. Exact
+// Batching several matrices into one pass changes only the traffic. Exact
 // accumulation does not care about order or grouping, so the answer has to be
 // identical to adding them one at a time.
 static void
-test_fold_matches_sequential()
+test_batch_matches_sequential()
 {
     const std::size_t rows = 137, cols = 7;
     std::mt19937_64 rng(60613);
 
     // Three spreads: narrow enough for one limb, wide enough for several, and
-    // wide enough to exceed the fold's register budget and fall back.
+    // wide enough to exceed the batch's register budget and fall back.
     for (int spread : {6, 90, 900}) {
         const int nbatches = 5;
         std::vector<std::vector<double>> batches(
@@ -1554,8 +1554,8 @@ test_fold_matches_sequential()
         truesum::AccumulationMatrix seq(rows, cols);
         for (auto &b : batches) seq.add_matrix_col_major(b.data());
 
-        truesum::AccumulationMatrix fold(rows, cols);
-        fold.add_matrices_col_major(ptrs.data(), ptrs.size());
+        truesum::AccumulationMatrix batch(rows, cols);
+        batch.add_matrices_col_major(ptrs.data(), ptrs.size());
 
         // Exact decimal rather than limbs: an adaptive container that rescaled
         // partway through can end up allocated wider than one told the extents
@@ -1563,15 +1563,15 @@ test_fold_matches_sequential()
         std::size_t bad = 0;
         for (std::size_t j = 0; j < cols; ++j) {
             for (std::size_t i = 0; i < rows; ++i) {
-                if (seq.to_exact_decimal(i, j) != fold.to_exact_decimal(i, j)) {
+                if (seq.to_exact_decimal(i, j) != batch.to_exact_decimal(i, j)) {
                     ++bad;
                 }
             }
         }
         CHECK(0 == bad);
         // The widest spread must actually have exercised the fallback.
-        if (900 == spread) CHECK(fold.column_limbs(0) > 8);
-        if (6 == spread) CHECK(fold.column_limbs(0) <= 8);
+        if (900 == spread) CHECK(batch.column_limbs(0) > 8);
+        if (6 == spread) CHECK(batch.column_limbs(0) <= 8);
     }
 
     // Pre-sized on both sides, where the reservation is identical, so the
@@ -1604,27 +1604,27 @@ test_fold_matches_sequential()
         truesum::AccumulationMatrix seq(rows, cols, surveys);
         for (auto &b : batches) seq.add_matrix_col_major(b.data());
 
-        truesum::AccumulationMatrix fold(rows, cols, surveys);
-        fold.add_matrices_col_major(ptrs.data(), ptrs.size());
+        truesum::AccumulationMatrix batch(rows, cols, surveys);
+        batch.add_matrices_col_major(ptrs.data(), ptrs.size());
 
         std::size_t bad = 0;
         for (std::size_t j = 0; j < cols; ++j) {
-            if (seq.column_exponent(j) != fold.column_exponent(j) ||
-                seq.column_limbs(j) != fold.column_limbs(j)) {
+            if (seq.column_exponent(j) != batch.column_exponent(j) ||
+                seq.column_limbs(j) != batch.column_limbs(j)) {
                 ++bad;
                 continue;
             }
             for (std::size_t i = 0; i < rows; ++i) {
-                if (seq.entry_limbs(i, j) != fold.entry_limbs(i, j)) ++bad;
+                if (seq.entry_limbs(i, j) != batch.entry_limbs(i, j)) ++bad;
             }
         }
         CHECK(0 == bad);
 
-        // And the declared count is spent by the fold, not by the call.
+        // And the declared count is spent by the batch, not by the call.
         std::vector<const double *> one{ptrs[0]};
         bool threw = false;
         try {
-            fold.add_matrices_col_major(one.data(), 1);
+            batch.add_matrices_col_major(one.data(), 1);
         } catch (const std::runtime_error &) {
             threw = true;
         }
@@ -1653,14 +1653,14 @@ test_fold_matches_sequential()
         truesum::AccumulationMatrix seq(n, truesum::Uplo::Lower);
         for (auto &b : batches) seq.add_matrix_col_major(b.data());
 
-        truesum::AccumulationMatrix fold(n, truesum::Uplo::Lower);
-        fold.set_threads(4);
-        fold.add_matrices_col_major(ptrs.data(), ptrs.size());
+        truesum::AccumulationMatrix batch(n, truesum::Uplo::Lower);
+        batch.set_threads(4);
+        batch.add_matrices_col_major(ptrs.data(), ptrs.size());
 
         std::size_t bad = 0;
         for (std::size_t i = 0; i < n; ++i) {
             for (std::size_t j = 0; j < n; ++j) {
-                if (seq.to_exact_decimal(i, j) != fold.to_exact_decimal(i, j)) {
+                if (seq.to_exact_decimal(i, j) != batch.to_exact_decimal(i, j)) {
                     ++bad;
                 }
             }
@@ -1680,10 +1680,10 @@ test_fold_matches_sequential()
         CHECK(0 == bad);
     }
 
-    // A fold is not a mode the accumulation matrix is put into: folded and
-    // one-at-a- time calls interleave freely, and a fold may rescale or widen a
+    // A batch is not a mode the accumulation matrix is put into: batched and
+    // one-at-a- time calls interleave freely, and a batch may rescale or widen a
     // column that earlier calls had already put values in. Nothing requires the
-    // folded matrices to be all of them, or to come first.
+    // batched matrices to be all of them, or to come first.
     {
         const std::size_t r2 = 71, c2 = 5;
         std::vector<std::vector<double>> batches(4,
@@ -1692,7 +1692,7 @@ test_fold_matches_sequential()
             for (auto &x : batches[bi]) {
                 const std::uint64_t m = (rng() | (std::uint64_t{1} << 52)) &
                                         ((std::uint64_t{1} << 53) - 1);
-                // Later batches reach lower, so a fold has to rescale a column
+                // Later batches reach lower, so a batch has to rescale a column
                 // that single adds already populated.
                 x = std::ldexp(static_cast<double>(m),
                                -static_cast<int>(bi) * 40);
@@ -1702,26 +1702,26 @@ test_fold_matches_sequential()
         truesum::AccumulationMatrix all(r2, c2);
         for (auto &b : batches) all.add_matrix_col_major(b.data());
 
-        // one, then a fold of two, then one.
+        // one, then a batch of two, then one.
         truesum::AccumulationMatrix mixed(r2, c2);
         const double *mid[2] = {batches[1].data(), batches[2].data()};
         mixed.add_matrix_col_major(batches[0].data());
         mixed.add_matrices_col_major(mid, 2);
         mixed.add_matrix_col_major(batches[3].data());
 
-        // a fold first, then singles.
-        truesum::AccumulationMatrix fold_first(r2, c2);
+        // a batch first, then singles.
+        truesum::AccumulationMatrix batch_first(r2, c2);
         const double *head[2] = {batches[0].data(), batches[1].data()};
-        fold_first.add_matrices_col_major(head, 2);
-        fold_first.add_matrix_col_major(batches[2].data());
-        fold_first.add_matrix_col_major(batches[3].data());
+        batch_first.add_matrices_col_major(head, 2);
+        batch_first.add_matrix_col_major(batches[2].data());
+        batch_first.add_matrix_col_major(batches[3].data());
 
         std::size_t bad = 0;
         for (std::size_t j = 0; j < c2; ++j) {
             for (std::size_t i = 0; i < r2; ++i) {
                 const std::string want = all.to_exact_decimal(i, j);
                 if (mixed.to_exact_decimal(i, j) != want) ++bad;
-                if (fold_first.to_exact_decimal(i, j) != want) ++bad;
+                if (batch_first.to_exact_decimal(i, j) != want) ++bad;
             }
         }
         CHECK(0 == bad);
@@ -1729,7 +1729,7 @@ test_fold_matches_sequential()
         CHECK(all.column_exponent(0) < -100);
     }
 
-    // A fold that contradicts its metadata still reports.
+    // A batch that contradicts its metadata still reports.
     {
         std::vector<double> v(64, 0.5);  // exponent -1
         const double *p[1] = {v.data()};
@@ -1801,6 +1801,197 @@ test_public_survey()
         bad[rows / 2] = std::numeric_limits<double>::infinity();
         const truesum::Survey s = truesum::survey_column(bad.data(), rows);
         CHECK(s.nonfinite);
+    }
+}
+
+// Reserving from surveys without pre-sizing: the columns start wide enough for
+// what the caller knows about, and the accumulation matrix still adapts to what
+// it does not. The sums must match a matrix that was told nothing.
+static void
+test_partial_reservation()
+{
+    const std::size_t rows = 64, cols = 3, known = 2, total = 5;
+    std::mt19937_64 rng(13579);
+    std::vector<std::vector<double>> b(total, std::vector<double>(rows * cols));
+    for (auto &m : b) {
+        for (auto &v : m) {
+            const std::uint64_t mant = (rng() | (std::uint64_t{1} << 52)) &
+                                       ((std::uint64_t{1} << 53) - 1);
+            const double x = std::ldexp(static_cast<double>(mant),
+                                        static_cast<int>(rng() % 120) - 60);
+            v = (rng() & 1) ? -x : x;
+        }
+    }
+
+    std::vector<std::vector<truesum::Survey>> sv(
+        known, std::vector<truesum::Survey>(cols));
+    for (std::size_t k = 0; k < known; ++k) {
+        truesum::survey_matrix_col_major(sv[k].data(), b[k].data(), rows, cols);
+    }
+
+    truesum::AccumulationMatrix told_nothing(rows, cols);
+    truesum::AccumulationMatrix told_some(rows, cols);
+    told_some.reserve_for_surveys(sv);
+    for (const auto &m : b) {
+        told_nothing.add_matrix_col_major(m.data());
+        told_some.add_matrix_col_major(m.data());
+    }
+
+    std::size_t bad = 0;
+    for (std::size_t j = 0; j < cols; ++j) {
+        if (told_nothing.column_exponent(j) != told_some.column_exponent(j)) {
+            ++bad;
+            continue;
+        }
+        for (std::size_t i = 0; i < rows; ++i) {
+            if (told_nothing.to_double(i, j) != told_some.to_double(i, j)) ++bad;
+        }
+    }
+    CHECK(bad == 0);
+
+    // Reserving is not pre-sizing: matrices beyond the ones described still
+    // arrive without complaint, where a pre-sized matrix would refuse them.
+    {
+        truesum::AccumulationMatrix presized(rows, cols, sv);
+        bool threw = false;
+        try {
+            for (const auto &m : b) presized.add_matrix_col_major(m.data());
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        CHECK(threw);  // more matrices than were declared
+    }
+}
+
+// A survey the caller already has can be handed to the accumulate instead of
+// being recomputed. The sizing is then taken on trust and checked by the
+// kernel, exactly as a pre-sized accumulation matrix is.
+static void
+test_supplied_survey()
+{
+    const std::size_t rows = 97, cols = 4, batches = 3;
+    std::mt19937_64 rng(90210);
+    std::vector<std::vector<double>> b(batches,
+                                       std::vector<double>(rows * cols));
+    for (auto &m : b) {
+        for (std::size_t k = 0; k < m.size(); ++k) {
+            const std::uint64_t mant = (rng() | (std::uint64_t{1} << 52)) &
+                                       ((std::uint64_t{1} << 53) - 1);
+            const double v = std::ldexp(static_cast<double>(mant),
+                                        static_cast<int>(rng() % 160) - 80);
+            m[k] = (rng() & 1) ? -v : v;
+        }
+    }
+
+    truesum::AccumulationMatrix computed(rows, cols);
+    truesum::AccumulationMatrix supplied(rows, cols);
+    for (const auto &m : b) {
+        computed.add_matrix_col_major(m.data());
+        std::vector<truesum::Survey> sv(cols);
+        truesum::survey_matrix_col_major(sv.data(), m.data(), rows, cols);
+        supplied.add_matrix_col_major(m.data(), sv.data());
+    }
+
+    std::size_t bad = 0;
+    for (std::size_t j = 0; j < cols; ++j) {
+        if (computed.column_exponent(j) != supplied.column_exponent(j) ||
+            computed.column_limbs(j) != supplied.column_limbs(j)) {
+            ++bad;
+            continue;
+        }
+        for (std::size_t i = 0; i < rows; ++i) {
+            if (computed.entry_limbs(i, j) != supplied.entry_limbs(i, j)) ++bad;
+        }
+    }
+    CHECK(bad == 0);
+
+    // An overstated minimum is the one that could lose a value quietly: it sizes
+    // the column above where the data actually reaches, and the kernel's
+    // first-limb hint would skip the limbs those addends belong in. The hint is
+    // not taken from a supplied survey, so the addend lands where it belongs
+    // and the exponent check reports it.
+    {
+        std::vector<double> m(rows * cols, 1.0);
+        m[rows] = std::ldexp(1.0, -60);  // column 1 reaches far below 2^0
+        std::vector<truesum::Survey> sv(cols);
+        truesum::survey_matrix_col_major(sv.data(), m.data(), rows, cols);
+        sv[1].min_exponent = 0;  // a lie: the true minimum is -60
+        truesum::AccumulationMatrix a(rows, cols);
+        bool threw = false;
+        try {
+            a.add_matrix_col_major(m.data(), sv.data());
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        CHECK(threw);  // an overstated minimum is reported
+    }
+
+    // An understated ceiling is the other half: the column is sized too narrow
+    // for what arrives, which the width and overflow checks catch.
+    {
+        std::vector<double> m(rows * cols, 0.0);
+        for (std::size_t i = 0; i < rows; ++i) m[rows + i] = 1.0;
+        m[rows] = std::ldexp(1.0, 200);  // column 1 spans 2^0 to 2^200
+        std::vector<truesum::Survey> sv(cols);
+        truesum::survey_matrix_col_major(sv.data(), m.data(), rows, cols);
+        sv[1].max_top = 1;  // a lie: the true top is 201
+        truesum::AccumulationMatrix a(rows, cols);
+        bool threw = false;
+        try {
+            a.add_matrix_col_major(m.data(), sv.data());
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        CHECK(threw);  // an understated ceiling is reported
+    }
+
+    // The batch takes them too, shaped like its input: surveys[k][j] for
+    // matrix k's column j. It skips a survey of every matrix in the set, since
+    // a batch must know the aggregate before it adds any of them.
+    {
+        truesum::AccumulationMatrix c2(rows, cols), s2(rows, cols);
+        std::vector<const double *> ptrs(batches);
+        std::vector<std::vector<truesum::Survey>> sv(
+            batches, std::vector<truesum::Survey>(cols));
+        std::vector<const truesum::Survey *> svp(batches);
+        for (std::size_t k = 0; k < batches; ++k) {
+            ptrs[k] = b[k].data();
+            truesum::survey_matrix_col_major(sv[k].data(), b[k].data(), rows,
+                                             cols);
+            svp[k] = sv[k].data();
+        }
+        c2.add_matrices_col_major(ptrs.data(), batches);
+        s2.add_matrices_col_major(ptrs.data(), batches, svp.data());
+        std::size_t differ = 0;
+        for (std::size_t j = 0; j < cols; ++j) {
+            if (c2.column_exponent(j) != s2.column_exponent(j) ||
+                c2.column_limbs(j) != s2.column_limbs(j)) {
+                ++differ;
+                continue;
+            }
+            for (std::size_t i = 0; i < rows; ++i) {
+                if (c2.entry_limbs(i, j) != s2.entry_limbs(i, j)) ++differ;
+            }
+        }
+        CHECK(differ == 0);  // a batched submission agrees too
+    }
+
+    // A survey whose top is at or below its own minimum describes no column of
+    // values at all. It is refused rather than trusted, because the width it
+    // implies is a negative number computed in unsigned arithmetic.
+    {
+        std::vector<double> m(rows * cols, 1.0);
+        std::vector<truesum::Survey> sv(cols);
+        truesum::survey_matrix_col_major(sv.data(), m.data(), rows, cols);
+        sv[1].max_top = sv[1].min_exponent;
+        truesum::AccumulationMatrix a(rows, cols);
+        bool threw = false;
+        try {
+            a.add_matrix_col_major(m.data(), sv.data());
+        } catch (const std::invalid_argument &) {
+            threw = true;
+        }
+        CHECK(threw);  // a self-contradictory survey is refused
     }
 }
 
@@ -1946,7 +2137,7 @@ test_presized_matches_adaptive()
         }
         CHECK(threw);
 
-        // The fold applies its addends in registers and must notice too.
+        // The batch applies its addends in registers and must notice too.
         const double *pair[2] = {big.data(), big.data()};
         truesum::AccumulationMatrix wf(rows, 1, three);
         threw = false;
@@ -2299,7 +2490,8 @@ test_mean_matrix_entry_points()
         }
     }
 
-    // Symmetric storage reaches the mean through the same fold as to_double.
+    // Symmetric storage reaches the mean through the same index mapping as
+    // to_double.
     truesum::AccumulationMatrix s(4, truesum::Uplo::Lower);
     add_at(s, 2, 1, 1.0);
     add_at(s, 2, 1, 1.0);
@@ -2337,13 +2529,15 @@ main()
     test_zero_crossing_preserves_value();
     test_threaded_matches_serial();
     test_public_survey();
+    test_supplied_survey();
+    test_partial_reservation();
     test_presized_matches_adaptive();
     test_readback_residual();
     test_residual_recovers_cancellation();
     test_symmetric_matches_full_storage();
     test_symmetric_entry_points_agree();
     test_symmetric_keeps_exactness();
-    test_fold_matches_sequential();
+    test_batch_matches_sequential();
     test_mean_matches_double_division();
     test_mean_is_nearest();
     test_mean_by_power_of_two_is_scaling();

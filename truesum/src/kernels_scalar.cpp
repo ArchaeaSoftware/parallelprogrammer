@@ -51,10 +51,10 @@ split(double v)
 
 Survey
 survey_column_scalar(const double *values, std::size_t rows,
-                     long long floor_exponent)
+                     long long cutoff_exponent)
 {
     // First pass reads only the exponent field. The raw exponent is a lower
-    // bound on the true ulp, so if it clears the floor no rescale is due and
+    // bound on the true ulp, so if it clears the cutoff no rescale is due and
     // the significand never has to be examined.
     Survey out{0, 0, false, false};
     long long min_raw = 0;
@@ -88,7 +88,7 @@ survey_column_scalar(const double *values, std::size_t rows,
     out.max_top = 0 != max_biased ? static_cast<int>(max_biased) - 1022
                                   : -1074 + (64 - __builtin_clzll(max_abs));
 
-    if (min_raw >= floor_exponent) {
+    if (min_raw >= cutoff_exponent) {
         out.min_exponent = static_cast<int>(min_raw);
         return out;
     }
@@ -132,18 +132,18 @@ sub_limb(std::uint64_t x, std::uint64_t a, std::uint64_t &borrow)
     return d2;
 }
 
-// One row's limbs are loaded once, every batch's addend applied to them in
+// One row's limbs are loaded once, every matrix's addend applied to them in
 // registers, and the result written once. The inner loop is the same carry
 // chain accumulate_one runs, with `v` standing in for the limb arrays.
 void
-accumulate_fold_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
+accumulate_batch_scalar(std::uint64_t *const *limbs, std::size_t nlimbs,
                        const double *const *columns, std::size_t count,
                        std::size_t rows, std::int32_t column_exponent,
                        unsigned *flags)
 {
     unsigned bad = 0;
     std::uint64_t overflow = 0;
-    std::uint64_t v[kMaxFoldLimbs];
+    std::uint64_t v[kMaxBatchLimbs];
 
     for (std::size_t i = 0; i < rows; ++i) {
         for (std::size_t k = 0; k < nlimbs; ++k) v[k] = limbs[k][i];

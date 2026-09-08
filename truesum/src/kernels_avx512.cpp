@@ -94,7 +94,7 @@ tail_mask(std::size_t row, std::size_t rows)
 
 Survey
 survey_column_avx512(const double *values, std::size_t rows,
-                     long long floor_exponent)
+                     long long cutoff_exponent)
 {
     // First pass touches only the exponent field.
     //
@@ -107,7 +107,7 @@ survey_column_avx512(const double *values, std::size_t rows,
     //
     // The minimum is a lower bound only -- the raw exponent, not the true ulp,
     // which sits above it by the significand's trailing zero count. That bound
-    // is enough whenever it clears the caller's floor, because then no rescale
+    // is enough whenever it clears the caller's cutoff, because then no rescale
     // is due and the exact value would change nothing.
     __m512i v_min = _mm512_set1_epi64(std::numeric_limits<long long>::max());
     __m512i v_max_abs = _mm512_setzero_si512();
@@ -119,7 +119,7 @@ survey_column_avx512(const double *values, std::size_t rows,
     const __m512i kOne = _mm512_set1_epi64(1);
 
     // `m_k` is all-ones for every block but the last, so it is passed as a
-    // constant here and the whole body folds down to the unmasked form.
+    // constant here and the whole body collapses to the unmasked form.
     const auto exponent_step = [&](__m512i v_bits, __mmask8 m_k) {
         const __m512i v_abs_bits = _mm512_and_si512(v_bits, kAbs);
         const __m512i v_biased = _mm512_srli_epi64(v_abs_bits, 52);
@@ -156,7 +156,7 @@ survey_column_avx512(const double *values, std::size_t rows,
     out.max_top = 0 != max_biased ? static_cast<int>(max_biased) - 1022
                                   : -1074 + (64 - __builtin_clzll(max_abs));
 
-    if (min_raw >= floor_exponent) {
+    if (min_raw >= cutoff_exponent) {
         out.min_exponent = static_cast<int>(min_raw);
         return out;
     }
@@ -233,13 +233,13 @@ struct Addend8 {
 
 }  // namespace
 
-// The fold: one row block's limbs are loaded once, every matrix's addend
+// The batch: one row block's limbs are loaded once, every matrix's addend
 // applied to them, and the result stored once. Same arithmetic as
 // accumulate_avx512's apply, with `v` standing in for the limb arrays -- so
 // the carry chain, the two-limb split and the early termination are unchanged
 // and only the traffic differs.
 void
-accumulate_fold_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
+accumulate_batch_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
                        const double *const *columns, std::size_t count,
                        std::size_t rows, std::int32_t column_exponent,
                        unsigned *flags)
@@ -280,7 +280,7 @@ accumulate_fold_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
     };
 
     // The one difference from accumulate_avx512: the accumulation matrix lives
-    // in `v` for the whole fold rather than being loaded and stored per addend.
+    // in `v` for the whole batch rather than being loaded and stored per addend.
     const auto apply_reg = [&](const Addend8 &q, __m512i *v) {
         if (0 == q.m_live) return;
         __m512i v_carry = _mm512_setzero_si512();
@@ -331,7 +331,7 @@ accumulate_fold_avx512(std::uint64_t *const *limbs, std::size_t nlimbs,
     };
 
     const auto block = [&](std::size_t row, __mmask8 m_k) {
-        __m512i v[kMaxFoldLimbs];
+        __m512i v[kMaxBatchLimbs];
         for (std::size_t p = 0; p < nlimbs; ++p) {
             v[p] = _mm512_loadu_si512(limbs[p] + row);
         }
