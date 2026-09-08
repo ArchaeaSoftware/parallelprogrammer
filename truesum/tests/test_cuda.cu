@@ -64,8 +64,16 @@ submit(truesum::CudaAccumulationMatrix &g, const std::vector<double> &v,
     }
     std::memcpy(p, v.data(), v.size() * sizeof(double));
     try {
-        truesum::InputRead h = g.add_matrix_col_major(p, nullptr, col_stride);
-        h.wait();
+        // The kernel is still reading `p` when the call returns, and the
+        // buffer is freed below, so wait for it -- on an event rather than
+        // synchronize(), which would also raise any accumulated contradiction
+        // and rob the caller of the chance to inspect it.
+        g.add_matrix_col_major(p, nullptr, col_stride);
+        cudaEvent_t done = nullptr;
+        cudaEventCreateWithFlags(&done, cudaEventDisableTiming);
+        cudaEventRecord(done, g.stream());
+        cudaEventSynchronize(done);
+        cudaEventDestroy(done);
     } catch (...) {
         cudaFreeHost(p);
         throw;
@@ -1057,14 +1065,21 @@ test_in_place_input()
 
     truesum::CudaAccumulationMatrix in_place(rows, cols);
     in_place.reserve_like(cpu);
-    truesum::InputRead r1 = in_place.add_matrix_col_major(pinned);
-    // The buffer must not be rewritten until the handle clears; wait, then
-    // resubmit the same contents so the two accumulation matrices see the same
-    // batches.
-    r1.wait();
-    check(r1.ready(), "the handle reports ready once waited on");
-    truesum::InputRead r2 = in_place.add_matrix_col_major(pinned);
-    r2.wait();
+    // The kernel is still reading `pinned` when the call returns, so the
+    // caller records an event on the accumulation matrix's stream and waits on
+    // that -- the ordering the stream provides, spelled with CUDA's own API.
+    cudaEvent_t done = nullptr;
+    cudaEventCreateWithFlags(&done, cudaEventDisableTiming);
+    in_place.add_matrix_col_major(pinned);
+    cudaEventRecord(done, in_place.stream());
+    check(cudaSuccess == cudaEventSynchronize(done),
+          "an event recorded on the stream waits for the submission");
+    check(cudaSuccess == cudaEventQuery(done),
+          "and reads as complete afterwards");
+    in_place.add_matrix_col_major(pinned);
+    cudaEventRecord(done, in_place.stream());
+    cudaEventSynchronize(done);
+    cudaEventDestroy(done);
 
     std::size_t mismatches = 0;
     for (std::size_t j = 0; j < cols; ++j) {
@@ -1079,26 +1094,6 @@ test_in_place_input()
     }
     check(mismatches == 0, "in-place matches the staged path: " +
                                std::to_string(mismatches) + " mismatches");
-
-    // A default-constructed handle is already clear, and so is one from an
-    // empty accumulation matrix.
-    {
-        truesum::InputRead none;
-        check(none.ready(), "a default handle is ready");
-        none.wait();
-    }
-
-    // Move semantics: the moved-from handle must not double-destroy its event.
-    {
-        truesum::InputRead a = in_place.add_matrix_col_major(pinned);
-        truesum::InputRead b = std::move(a);
-        check(a.ready(), "a moved-from handle is inert");
-        b.wait();
-        truesum::InputRead c;
-        c = std::move(b);
-        c.wait();
-        check(c.ready(), "move assignment transfers the event");
-    }
 
     // Pageable memory is refused rather than left to fault in the kernel.
     {
@@ -1133,8 +1128,12 @@ test_in_place_input()
             submit(c2, own);
             truesum::CudaAccumulationMatrix g(rows, cols);
             g.reserve_like(c2);
-            truesum::InputRead r = g.add_matrix_col_major(own.data());
-            r.wait();
+            g.add_matrix_col_major(own.data());
+            cudaEvent_t e = nullptr;
+            cudaEventCreateWithFlags(&e, cudaEventDisableTiming);
+            cudaEventRecord(e, g.stream());
+            cudaEventSynchronize(e);
+            cudaEventDestroy(e);
             std::size_t bad = 0;
             for (std::size_t j = 0; j < cols; ++j) {
                 const std::vector<std::uint64_t> dev = g.download_column(j);
@@ -1178,13 +1177,22 @@ test_device_batch()
 
         std::vector<double *> dev(count);
         std::vector<const double *> devc(count);
+        // Staged through pinned memory, so the copy is complete when it
+        // returns. The accumulation matrix's stream is non-blocking, so a
+        // cudaMemcpy from a pageable source would leave its DMA in flight on
+        // the null stream with nothing ordering it against the accumulate.
+        double *staging = nullptr;
+        cudaHostAlloc(&staging, rows * cols * sizeof(double),
+                      cudaHostAllocDefault);
         for (std::size_t k = 0; k < count; ++k) {
             cudaMalloc(&dev[k], rows * cols * sizeof(double));
-            cudaMemcpy(dev[k], batches[k].data(), rows * cols * sizeof(double),
+            std::copy(batches[k].begin(), batches[k].end(), staging);
+            cudaMemcpy(dev[k], staging, rows * cols * sizeof(double),
                        cudaMemcpyHostToDevice);
             devc[k] = dev[k];
             seq.add_matrix_col_major_device(dev[k]);
         }
+        cudaFreeHost(staging);
         seq.synchronize();
 
         truesum::CudaAccumulationMatrix batch(rows, cols);
@@ -1311,6 +1319,72 @@ test_device_batch()
     }
 }
 
+// A producer that queues its fills on the accumulation matrix's own stream
+// needs neither an InputRead nor a stream of its own: the stream orders the
+// copy before the kernel that reads it, and the next copy after that kernel
+// retires. One buffer suffices, refilled in place between submissions.
+static cudaStream_t
+test_producer_on_our_stream()
+{
+    const std::size_t rows = 2048, cols = 8, count = 4;
+    std::mt19937_64 rng(11235);
+    std::vector<std::vector<double>> b(count,
+                                       std::vector<double>(rows * cols));
+    for (auto &m : b)
+        for (auto &x : m) x = random_value(40);
+
+    truesum::AccumulationMatrix cpu(rows, cols);
+    for (auto &m : b) submit(cpu, m);
+
+    // One pinned source per matrix. The copies are asynchronous, so a single
+    // staging buffer refilled in the loop would be overwritten by the host
+    // while the previous copy was still reading it -- the stream orders the
+    // copies against the kernels, not against the host.
+    std::vector<double *> pin(count, nullptr);
+    for (std::size_t k = 0; k < count; ++k) {
+        cudaHostAlloc(&pin[k], rows * cols * sizeof(double),
+                      cudaHostAllocDefault);
+        std::copy(b[k].begin(), b[k].end(), pin[k]);
+    }
+    double *dev = nullptr;
+    cudaMalloc(&dev, rows * cols * sizeof(double));
+
+    // The caller's own stream, non-blocking because this producer wants the
+    // overlap and is taking on the ordering to get it.
+    cudaStream_t caller = nullptr;
+    cudaStreamCreateWithFlags(&caller, cudaStreamNonBlocking);
+    truesum::CudaAccumulationMatrix g(rows, cols, caller);
+    g.reserve_like(cpu);
+    for (std::size_t k = 0; k < count; ++k) {
+        // Refilling the same device buffer every time, with nothing but the
+        // stream keeping the copy and the previous accumulate apart.
+        cudaMemcpyAsync(dev, pin[k], rows * cols * sizeof(double),
+                        cudaMemcpyHostToDevice, g.stream());
+        g.add_matrix_col_major_device(dev);
+    }
+    g.synchronize();
+
+    std::size_t bad = 0;
+    for (std::size_t j = 0; j < cols; ++j) {
+        const std::vector<std::uint64_t> d = g.download_column(j);
+        for (std::size_t i = 0; i < rows; ++i) {
+            const std::vector<std::uint64_t> h = cpu.entry_limbs(i, j);
+            if (g.column_exponent(j) != cpu.column_exponent(j) ||
+                g.column_limbs(j) != h.size()) { ++bad; break; }
+            for (std::size_t k = 0; k < h.size(); ++k)
+                if (h[k] != d[k * rows + i]) ++bad;
+        }
+    }
+    check(bad == 0, "a producer on the accumulation matrix's own stream needs "
+                    "no handshake: " + std::to_string(bad) + " mismatches");
+
+    check(g.stream() == caller, "the accumulation matrix uses the stream it "
+                               "was given");
+    cudaFree(dev);
+    for (double *q : pin) cudaFreeHost(q);
+    return caller;  // destroyed by the caller, not by the accumulation matrix
+}
+
 // The device paths take a survey the caller already has, which removes the
 // survey kernel and the round trip that waits for its verdict.
 static void
@@ -1393,8 +1467,8 @@ test_supplied_survey_device()
         truesum::CudaAccumulationMatrix a(rows, cols), b(rows, cols);
         a.reserve_for_device(dev[0], 1, rows);
         b.reserve_for_device(dev[0], 1, rows);
-        a.add_matrix_col_major(pinned).wait();
-        b.add_matrix_col_major(pinned, svp[0]).wait();
+        a.add_matrix_col_major(pinned);
+        b.add_matrix_col_major(pinned, svp[0]);
         a.synchronize();
         b.synchronize();
         check(same(a, b) == 0, "and on the host-input path as well");
@@ -1405,9 +1479,10 @@ test_supplied_survey_device()
 }
 
 // The pattern the device path exists for: a producer cycling device buffers,
-// filling one while the accumulation matrix reads another. The handle is what
-// makes it possible to wait for the one buffer about to be overwritten instead
-// of draining the whole stream.
+// filling one while the accumulation matrix reads another. An event recorded on
+// the accumulation matrix's stream after each submission is what makes it
+// possible to wait for the one buffer about to be overwritten instead of
+// draining the whole stream.
 void
 test_device_ping_pong()
 {
@@ -1421,26 +1496,35 @@ test_device_ping_pong()
     truesum::AccumulationMatrix cpu(rows, cols);
     for (auto &v : host) submit(cpu, v);
 
-    // Two device buffers in rotation, which is all a real producer would keep.
+    // Two device buffers in rotation, which is all a real producer would keep,
+    // filled through pinned staging so each copy is complete when it returns.
     double *buf[2] = {nullptr, nullptr};
     for (int i = 0; i < 2; ++i) cudaMalloc(&buf[i], n * sizeof(double));
+    double *staging = nullptr;
+    cudaHostAlloc(&staging, n * sizeof(double), cudaHostAllocDefault);
 
     truesum::CudaAccumulationMatrix g(rows, cols);
     g.reserve_like(cpu);
-    truesum::InputRead h[2];
+    // One event per buffer, recorded on the accumulation matrix's stream after
+    // each submission, so a round waits only for the buffer it is about to
+    // refill and never for the stream as a whole.
+    cudaEvent_t done[2] = {nullptr, nullptr};
+    for (int i = 0; i < 2; ++i) {
+        cudaEventCreateWithFlags(&done[i], cudaEventDisableTiming);
+        cudaEventRecord(done[i], g.stream());  // clear on the first two rounds
+    }
     for (int r = 0; r < batches; ++r) {
         const int slot = r & 1;
-        // Wait only for the buffer about to be refilled -- never for the
-        // stream. On the first two rounds the handles are empty and this is a
-        // no-op, which is what a default-constructed handle is for.
-        h[slot].wait();
-        cudaMemcpy(buf[slot], host[r].data(), n * sizeof(double),
+        cudaEventSynchronize(done[slot]);
+        std::copy(host[r].begin(), host[r].end(), staging);
+        cudaMemcpy(buf[slot], staging, n * sizeof(double),
                    cudaMemcpyHostToDevice);
-        h[slot] = g.add_matrix_col_major_device(buf[slot]);
+        g.add_matrix_col_major_device(buf[slot]);
+        cudaEventRecord(done[slot], g.stream());
     }
-    h[0].wait();
-    h[1].wait();
     g.synchronize();
+    for (int i = 0; i < 2; ++i) cudaEventDestroy(done[i]);
+    cudaFreeHost(staging);
 
     std::size_t bad = 0;
     for (std::size_t j = 0; j < cols; ++j) {
@@ -1459,12 +1543,10 @@ test_device_ping_pong()
     check(bad == 0, "two device buffers in rotation match sequential: " +
                         std::to_string(bad) + " mismatches");
 
-    // The handle really does gate the read: a buffer whose handle has cleared
-    // may be overwritten, and doing so must not disturb what was accumulated.
+    // The event really does gate the read: a buffer whose event has cleared may
+    // be overwritten, and doing so must not disturb what was accumulated.
     {
         const std::vector<std::uint64_t> before = g.download_column(0);
-        h[0].wait();
-        h[1].wait();
         cudaMemset(buf[0], 0xFF, n * sizeof(double));
         cudaMemset(buf[1], 0xFF, n * sizeof(double));
         cudaDeviceSynchronize();
@@ -1710,6 +1792,14 @@ main()
     test_in_place_input();
     test_device_batch();
     test_supplied_survey_device();
+    {
+        // The stream outlives the accumulation matrix that used it, which is
+        // what "the caller keeps ownership" has to mean.
+        cudaStream_t s = test_producer_on_our_stream();
+        check(cudaSuccess == cudaStreamSynchronize(s),
+              "a caller's stream survives the accumulation matrix");
+        cudaStreamDestroy(s);
+    }
     test_device_ping_pong();
     test_deferred_zeroing();
     test_device_survey();

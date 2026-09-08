@@ -46,41 +46,6 @@ class AccumulationMatrix;
 bool
 cuda_available();
 
-// Signals when the device has finished reading an input buffer that was
-// submitted to be read in place, which is what tells a caller its buffer is
-// writable again.
-//
-// The hazard this exists for is real and was measured: the kernel streams the
-// buffer over PCIe and is still reading it after the submitting call returns,
-// so a caller refilling it corrupts about 63% of entries. An earlier design
-// tried to infer safety from the pointer's memory type, which gave one
-// function two lifetime contracts and nothing in the signature to tell them
-// apart. Handing back a handle puts the obligation where the caller can see it.
-//
-// Move-only, and owns a CUDA event. Destroying one without waiting is not an
-// error -- it is a statement that the buffer will not be written again.
-class InputRead {
-public:
-    InputRead() = default;
-    ~InputRead();
-    InputRead(InputRead &&other) noexcept;
-    InputRead &operator=(InputRead &&other) noexcept;
-    InputRead(const InputRead &) = delete;
-    InputRead &operator=(const InputRead &) = delete;
-
-    // Blocks until the device has finished reading. A default-constructed
-    // handle, or one whose submission was empty, returns at once.
-    void wait();
-
-    // The same question without blocking.
-    bool ready() const;
-
-private:
-    friend class CudaAccumulationMatrix;
-    explicit InputRead(CUevent_st *ev) : ev_(ev) {}
-    CUevent_st *ev_ = nullptr;
-};
-
 // Surveys a column-major matrix the device can read in place, writing `cols`
 // entries. Column j begins at b + j*col_stride and its rows are
 // contiguous; 0 means tightly packed.
@@ -119,7 +84,20 @@ survey_matrix_col_major_device(Survey *out, const double *b,
 
 class CudaAccumulationMatrix {
 public:
-    CudaAccumulationMatrix(std::size_t rows, std::size_t cols);
+    // `stream` is optional. Left null, the accumulation matrix creates a
+    // stream of its own and destroys it in the destructor; that one is a
+    // blocking stream, so a caller who queues work on the legacy null stream is
+    // implicitly ordered against the accumulates and cannot be caught out by
+    // it.
+    //
+    // Supplied, every launch goes on the caller's stream instead, and the
+    // caller keeps ownership: it is not destroyed with the accumulation matrix,
+    // and its flags are the caller's choice. This is how to get the overlap the
+    // default gives up. A producer that queues its fills on the same stream is
+    // ordered against the accumulates in both directions, needs no events, and
+    // never touches the null stream -- see stream().
+    CudaAccumulationMatrix(std::size_t rows, std::size_t cols,
+                           CUstream_st *stream = nullptr);
 
     // Symmetric n x n, storing one triangle, exactly as AccumulationMatrix
     // does. Column j holds n-j entries (Lower) or j+1 (Upper), and each
@@ -129,7 +107,8 @@ public:
     // The kernels read only the stored slice of an input matrix, so the
     // bytes crossing PCIe halve along with the device memory. The input is
     // taken to be symmetric and that is not checked.
-    CudaAccumulationMatrix(std::size_t n, Uplo uplo);
+    CudaAccumulationMatrix(std::size_t n, Uplo uplo,
+                           CUstream_st *stream = nullptr);
 
     // Pre-sized from the surveys of every matrix that will be accumulated,
     // exactly as AccumulationMatrix is: `surveys` is indexed by matrix and
@@ -146,10 +125,12 @@ public:
     // detected by the accumulate kernel rather than prevented, and reported
     // at the next synchronization -- see column_contradictions().
     CudaAccumulationMatrix(std::size_t rows, std::size_t cols,
-                           const std::vector<std::vector<Survey>> &surveys);
+                           const std::vector<std::vector<Survey>> &surveys,
+                           CUstream_st *stream = nullptr);
 
     CudaAccumulationMatrix(std::size_t n, Uplo uplo,
-                           const std::vector<std::vector<Survey>> &surveys);
+                           const std::vector<std::vector<Survey>> &surveys,
+                           CUstream_st *stream = nullptr);
 
     // Declared, not implicit: the worker pool is held by unique_ptr to an
     // incomplete type, so the destructor must be defined where that is.
@@ -251,7 +232,7 @@ public:
     // `surveys` is optional, one entry per column, describing the same slice
     // this call reads. Supplied, it replaces the host survey this path would
     // otherwise take of B.
-    InputRead add_matrix_col_major(const double *b,
+    void add_matrix_col_major(const double *b,
                                    const Survey *surveys = nullptr,
                                    std::size_t col_stride = 0);
 
@@ -278,7 +259,7 @@ public:
     // column j. Supplied, the survey kernel is not launched and its verdict is
     // not waited for, so this call stops synchronizing -- the 19.9 us drain
     // that otherwise sits between the submission and the accumulate.
-    InputRead add_matrices_col_major_device(const double *const *b,
+    void add_matrices_col_major_device(const double *const *b,
                                             std::size_t count,
                                             const Survey *const *surveys
                                                 = nullptr,
@@ -292,22 +273,23 @@ public:
     // Without it a caller's only recourse is synchronize(), which drains
     // everything and gives up exactly the overlap a rotation exists for.
     //
-    // **Fill on your own stream, not the default one.** This accumulation
-    // matrix's stream is a blocking stream, so it implicitly synchronizes with
-    // the legacy null stream: a producer using cudaMemcpy (or anything else on
-    // the null stream) serializes against the accumulate and gets no overlap at
-    // all. Measured at 65536x64, a two-buffer rotation costs 1776 us a batch
-    // that way and 1301 us with the producer on its own stream, against 1256
-    // for the fill alone -- so the accumulate is 96% hidden when the streams
-    // are kept apart and not hidden whatsoever when they are not.
+    // **Order your fill yourself.** This accumulation matrix's stream is
+    // non-blocking, so nothing queued on the legacy null stream is implicitly
+    // ordered against it -- including a cudaMemcpy from pageable host memory,
+    // which returns before its DMA has landed. Two ways to be sure:
     //
-    // Order your fill before submitting (a synchronize on your own stream is
-    // enough; it waits for your copy, not for the accumulate), and wait on the
-    // handle before refilling that buffer.
+    // Queue the fill on stream(), where the stream orders it against the
+    // accumulate in both directions, and neither the handle nor a second
+    // buffer is needed.
+    //
+    // Or use a stream of your own, synchronize it before submitting (that waits
+    // for your copy, not for the accumulate), and wait on the returned handle
+    // before refilling that buffer. Measured at 65536x64, a two-buffer rotation
+    // costs 1301 us a batch that way against 1256 for the fill alone.
     // `surveys` is optional, one entry per column. Supplied, the survey
     // kernel is not launched and its verdict is not waited for, so this call
     // stops synchronizing.
-    InputRead add_matrix_col_major_device(const double *b,
+    void add_matrix_col_major_device(const double *b,
                                           const Survey *surveys = nullptr,
                                           std::size_t col_stride = 0);
 
@@ -317,6 +299,40 @@ public:
     // Readback synchronizes implicitly, so this is only needed for timing or
     // before reusing a caller-owned device buffer.
     void synchronize() const;
+
+    // The stream this accumulation matrix launches on, for a producer that
+    // would rather queue its own work there than coordinate two streams.
+    // `CUstream_st *` is `cudaStream_t` spelled without the toolkit header,
+    // so the result goes straight to any CUDA call that takes one.
+    //
+    // A submission is a kernel launch on this stream, so anything queued here
+    // is ordered against it. That settles both halves of the buffer problem at
+    // once: a fill queued before a submission is complete before the kernel
+    // reads it, and a refill queued after one cannot begin until that kernel
+    // retires. Neither needs a handshake, and neither touches the legacy null
+    // stream, so a producer working this way never meets the serialization a
+    // plain cudaMemcpy runs into.
+    //
+    // It is also how a caller learns when the device is done with a buffer it
+    // submitted, which matters because the kernel is still reading that buffer
+    // when the call returns -- a producer refilling it immediately corrupts
+    // about 63% of entries, measured. Record an event here after submitting and
+    // the ordering is the stream's:
+    //
+    //     acc.add_matrix_col_major_device(buf);
+    //     cudaEventRecord(done, acc.stream());
+    //     ...
+    //     cudaEventSynchronize(done);   // or cudaEventQuery, to poll
+    //
+    // The library used to hand back a move-only handle that owned such an
+    // event. It was removed once this accessor existed: the handle wrapped
+    // three CUDA calls a caller can make directly, and made every submission
+    // pay for an event whether or not anyone wanted one.
+    //
+    // The stream belongs to the accumulation matrix and is destroyed with it,
+    // so do not destroy it, and remember that work queued here delays the
+    // accumulates behind it as surely as they delay it.
+    CUstream_st *stream() const;
 
     // What the accumulate kernel found that contradicted a column's sizing,
     // as kernels.hpp's kBad* bits, or 0. Accumulated across every batch, the
@@ -410,8 +426,6 @@ private:
     void init_columns();
     void accumulate_device(const double *b, std::size_t col_stride,
                            const Survey *supplied);
-    // Creates an event, records it on the compute stream, wraps it.
-    InputRead record_input_read();
     void launch_accumulate(const double *const *b, std::size_t count,
                            std::size_t col_stride);
     // Sentinels onto the device, then the verdict back. Every device-side
@@ -464,6 +478,7 @@ private:
     // One stream. There is no longer a transfer to overlap with compute --
     // the kernel does the transfer, by reading host memory as it goes.
     CUstream_st *st_compute_ = nullptr;
+    bool owns_stream_ = true;  // false when the caller supplied it
     // These two stay void*: they point at types defined inside the .cu, which
     // is where they belong -- the descriptor layout is not this header's
     // business.

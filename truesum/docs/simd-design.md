@@ -1298,12 +1298,23 @@ at radix 52 came off it by being measured rather than by being done.
    generated on the device -- which is the same conclusion the GPUDirect item
    above reaches from the other direction.
 
-   **The null-stream result is a usage trap worth calling out.** This accumulation matrix's
-   stream is a blocking stream, so it implicitly synchronizes with the legacy
-   null stream. A producer using plain `cudaMemcpy` serializes against the
-   accumulate and gets none of the overlap -- 1776 against 1301, which is the
-   whole difference between a pipeline and a queue. The header says so at the
-   entry point.
+   **The stream is now the caller's to choose.** `cudaStreamCreate` makes a
+   blocking stream, which is implicitly ordered against the legacy null stream,
+   so a producer using plain `cudaMemcpy` serialized against the accumulate:
+   1776 against 1301, the whole difference between a pipeline and a queue.
+
+   Making it non-blocking was tried and reverted. The implicit edge turns out to
+   be load-bearing for an ordinary pattern -- `cudaMemcpy` from *pageable* host
+   memory into a device buffer, then submit -- because that copy returns once
+   the source is staged, with the DMA still in flight. Without the edge the
+   suite failed 3 runs in 40 on exactly that shape, and chasing it through the
+   tests one at a time did not close it.
+
+   So the default stays blocking and safe, and the constructors take an optional
+   stream instead. A caller who wants the overlap supplies their own, creates it
+   non-blocking if they like, and takes on the ordering; `stream()` hands it
+   back either way, so a producer can queue fills where the accumulates run and
+   be ordered in both directions without events.
 
 ~~`reserve_column` issues a `cudaMemsetAsync` per limb position.~~ **Done.**
 The zeroing is deferred and then done in one launch, which is 14x cheaper than

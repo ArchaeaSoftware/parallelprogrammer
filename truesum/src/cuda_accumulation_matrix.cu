@@ -569,44 +569,6 @@ device_alias(const void *p, const char *what)
 
 }  // namespace
 
-InputRead::~InputRead()
-{
-    // Deliberately unchecked, as destructors must not throw.
-    if (nullptr != ev_) cudaEventDestroy(ev_);
-}
-
-InputRead::InputRead(InputRead &&other) noexcept : ev_(other.ev_)
-{
-    other.ev_ = nullptr;
-}
-
-InputRead &
-InputRead::operator=(InputRead &&other) noexcept
-{
-    if (this != &other) {
-        if (nullptr != ev_) cudaEventDestroy(ev_);
-        ev_ = other.ev_;
-        other.ev_ = nullptr;
-    }
-    return *this;
-}
-
-void
-InputRead::wait()
-{
-    if (nullptr != ev_) cuda(EventSynchronize(ev_));
-}
-
-bool
-InputRead::ready() const
-{
-    if (nullptr == ev_) return true;
-    const cudaError_t st = cudaEventQuery(ev_);
-    if (cudaSuccess == st) return true;
-    if (cudaErrorNotReady == st) return false;
-    cuda_fail(st, "cudaEventQuery", __FILE__, __LINE__);
-}
-
 void
 survey_matrix_col_major_device(Survey *out, const double *b,
                                std::size_t rows, std::size_t cols,
@@ -647,7 +609,8 @@ cuda_available()
 }
 
 CudaAccumulationMatrix::CudaAccumulationMatrix(std::size_t rows,
-                                               std::size_t cols)
+                                               std::size_t cols,
+                                               CUstream_st *stream)
     : rows_(rows), cols_(cols), cols_state_(cols)
 {
     if (!cuda_available()) {
@@ -669,7 +632,26 @@ CudaAccumulationMatrix::CudaAccumulationMatrix(std::size_t rows,
            << "limit of " << max_grid_y;
         throw std::runtime_error(os.str());
     }
-    cuda(StreamCreate(&st_compute_));
+    // The caller's stream if there is one, and it stays theirs: not destroyed
+    // here, and carrying whatever flags they gave it.
+    //
+    // Ours is blocking, which cudaStreamCreate gives by default and which is
+    // the safe choice rather than the fast one. A blocking stream is implicitly
+    // ordered against the legacy null stream, so a caller who fills a device
+    // buffer with cudaMemcpy and submits it cannot be caught out -- and that is
+    // worth protecting, because a cudaMemcpy from *pageable* host memory
+    // returns once the source is staged, with the DMA still in flight. Made
+    // non-blocking, this suite failed 3 runs in 40 on exactly that shape.
+    //
+    // The cost is the overlap: a producer sharing the null stream waits for the
+    // accumulate, 1776 us a batch against 1301 at 65536x64. A caller who wants
+    // that back supplies a stream of their own and takes on the ordering.
+    if (nullptr != stream) {
+        st_compute_ = stream;
+        owns_stream_ = false;
+    } else {
+        cuda(StreamCreate(&st_compute_));
+    }
 
     if (0 != cols_) {
         cuda(Malloc(&occupancy_device_, cols_ * sizeof(int)));
@@ -695,8 +677,9 @@ CudaAccumulationMatrix::CudaAccumulationMatrix(std::size_t rows,
     init_columns();
 }
 
-CudaAccumulationMatrix::CudaAccumulationMatrix(std::size_t n, Uplo uplo)
-    : CudaAccumulationMatrix(n, n)
+CudaAccumulationMatrix::CudaAccumulationMatrix(std::size_t n, Uplo uplo,
+                                               CUstream_st *stream)
+    : CudaAccumulationMatrix(n, n, stream)
 {
     symmetric_ = true;
     uplo_ = uplo;
@@ -732,15 +715,16 @@ CudaAccumulationMatrix::init_columns()
 
 CudaAccumulationMatrix::CudaAccumulationMatrix(
     std::size_t rows, std::size_t cols,
-    const std::vector<std::vector<Survey>> &surveys)
-    : CudaAccumulationMatrix(rows, cols)
+    const std::vector<std::vector<Survey>> &surveys, CUstream_st *stream)
+    : CudaAccumulationMatrix(rows, cols, stream)
 {
     reserve_from_surveys(surveys);
 }
 
 CudaAccumulationMatrix::CudaAccumulationMatrix(
-    std::size_t n, Uplo uplo, const std::vector<std::vector<Survey>> &surveys)
-    : CudaAccumulationMatrix(n, uplo)
+    std::size_t n, Uplo uplo, const std::vector<std::vector<Survey>> &surveys,
+    CUstream_st *stream)
+    : CudaAccumulationMatrix(n, uplo, stream)
 {
     reserve_from_surveys(surveys);
 }
@@ -854,14 +838,20 @@ CudaAccumulationMatrix::~CudaAccumulationMatrix()
 {
     // Deliberately unchecked: a destructor must not throw, and there is
     // nothing useful to do about a failed free during teardown.
+    //
+    // Drained first. The limb arrays are released stream-ordered, and a kernel
+    // still reading them has to have retired before that release can recycle
+    // the memory. The blocking default would have covered this; a caller's
+    // stream does not have to be blocking.
+    if (nullptr != st_compute_) (void)cudaStreamSynchronize(st_compute_);
     for (auto &c : cols_state_) {
-        for (limb_t *p : c.bases) cudaFreeAsync(p, 0);
+        for (limb_t *p : c.bases) (void)cudaFreeAsync(p, st_compute_);
         cudaFree(c.dev_bases);
     }
     cudaFree(descriptors_);
     cudaFree(zero_targets_);
     cudaFreeHost(desc_host_);
-    if (nullptr != ev_desc_) cudaEventDestroy(ev_desc_);
+    if (nullptr != ev_desc_) (void)cudaEventDestroy(ev_desc_);
     cudaFree(survey_out_);
     cudaFreeHost(survey_host_);
     cudaFree(shapes_);
@@ -872,10 +862,10 @@ CudaAccumulationMatrix::~CudaAccumulationMatrix()
     cudaFree(ticket_);
     for (Slot &s : slots_) {
         if (s.mapped) cudaFreeHost(s.mapped);
-        if (s.ev_done) cudaEventDestroy(s.ev_done);
+        if (s.ev_done) (void)cudaEventDestroy(s.ev_done);
     }
     if (st_compute_) {
-        cudaStreamDestroy(st_compute_);
+        if (owns_stream_) (void)cudaStreamDestroy(st_compute_);
     }
 }
 
@@ -927,7 +917,11 @@ CudaAccumulationMatrix::reserve_column(std::size_t j, int exponent,
         const std::size_t bytes = c.rows * sizeof(limb_t);
         c.bases.resize(c.nlimbs);
         for (std::size_t k = 0; k < c.nlimbs; ++k) {
-            cuda(MallocAsync(&c.bases[k], bytes, 0));
+            // On this accumulation matrix's stream, not the null stream:
+            // stream-ordered memory is valid for work ordered after the
+            // allocation *in that stream*, and with a caller-supplied
+            // non-blocking stream nothing orders the null stream against it.
+            cuda(MallocAsync(&c.bases[k], bytes, st_compute_));
             // Zeroed later, all of them together -- see flush_pending_zero.
             zero_ptr_.push_back(c.bases[k]);
             zero_rows_.push_back(c.rows);
@@ -1205,6 +1199,12 @@ CudaAccumulationMatrix::flush_pending_zero() const
         host[i].rows = static_cast<unsigned>(zero_rows_[i]);
         if (zero_rows_[i] > widest) widest = zero_rows_[i];
     }
+    // Synchronous, and on the null stream rather than st_compute_, which is
+    // deliberate on all three counts. The host array is pageable, so an async
+    // copy could stall the stream to stage it; being synchronous, this one is
+    // complete before the launch below reads it, which is the ordering that
+    // matters; and the cudaFree/cudaMalloc a few lines above synchronize far
+    // harder anyway. Nothing here runs unless zeroing is actually pending.
     cuda(Memcpy(zero_targets_, host.data(), n * sizeof(ZeroTarget),
                 cudaMemcpyHostToDevice));
 
@@ -1329,12 +1329,12 @@ CudaAccumulationMatrix::acquire_input()
     return s.mapped;
 }
 
-InputRead
+void
 CudaAccumulationMatrix::add_matrix_col_major(const double *b,
                                              const Survey *surveys,
                                              std::size_t col_stride)
 {
-    if (0 == rows_ || 0 == cols_) return InputRead();
+    if (0 == rows_ || 0 == cols_) return;
     const std::size_t stride = col_stride ? col_stride : rows_;
 
     // The kernel dereferences this on the device, so pageable memory faults
@@ -1377,17 +1377,8 @@ CudaAccumulationMatrix::add_matrix_col_major(const double *b,
         slot_ ^= 1;
     }
 
-    return record_input_read();
 }
 
-InputRead
-CudaAccumulationMatrix::record_input_read()
-{
-    CUevent_st *ev = nullptr;
-    cuda(EventCreateWithFlags(&ev, cudaEventDisableTiming));
-    cuda(EventRecord(ev, st_compute_));
-    return InputRead(ev);
-}
 
 // One survey staging, one launch per matrix. The kernel reduces with atomicMin
 // and atomicMax, so successive launches accumulate the union of their extents
@@ -1433,13 +1424,13 @@ CudaAccumulationMatrix::survey_device_inputs(const double *const *b,
     }
 }
 
-InputRead
+void
 CudaAccumulationMatrix::add_matrices_col_major_device(const double *const *b,
                                                       std::size_t count,
                                                       const Survey *const *surveys,
                                                       std::size_t col_stride)
 {
-    if (0 == count || 0 == rows_ || 0 == cols_) return InputRead();
+    if (0 == count || 0 == rows_ || 0 == cols_) return;
     if (count > kMaxBatchInputs) {
         std::ostringstream os;
         os << "truesum: at most " << kMaxBatchInputs
@@ -1464,17 +1455,21 @@ CudaAccumulationMatrix::add_matrices_col_major_device(const double *const *b,
     }
     sync_descriptors();
     launch_accumulate(b, count, stride);
-    return record_input_read();
 }
 
-InputRead
+void
 CudaAccumulationMatrix::add_matrix_col_major_device(const double *b,
                                                     const Survey *surveys,
                                                     std::size_t col_stride)
 {
-    if (0 == rows_ || 0 == cols_) return InputRead();
+    if (0 == rows_ || 0 == cols_) return;
     accumulate_device(b, col_stride ? col_stride : rows_, surveys);
-    return record_input_read();
+}
+
+CUstream_st *
+CudaAccumulationMatrix::stream() const
+{
+    return st_compute_;
 }
 
 void

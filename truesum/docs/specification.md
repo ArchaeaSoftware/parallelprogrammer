@@ -334,6 +334,7 @@ InputRead add_matrix_col_major_device(b, surveys = nullptr, col_stride = 0);
 InputRead add_matrices_col_major_device(b, count, surveys = nullptr,
                                         col_stride = 0);
 void synchronize() const;
+CUstream_st *stream() const;   // the stream it launches on, caller's or its own
 ```
 
 **Host input must be page-locked and device-mapped** — `cudaHostAlloc` with
@@ -392,10 +393,13 @@ device is still reading it, so two in rotation let the host fill one while the
 device streams the other. That buffer stays valid until the next
 `acquire_input()`.
 
-**Fill on your own CUDA stream, not the default one.** The accumulation matrix's stream
-is a blocking stream and therefore synchronizes with the legacy null stream: a
-producer using plain `cudaMemcpy` serializes against the accumulate and gets no
-overlap at all.
+**The stream is the caller's if they want it.** Each constructor takes an optional
+`CUstream_st *`. Left null the accumulation matrix creates a blocking stream and
+destroys it with itself, so a producer on the legacy null stream is implicitly
+ordered against the accumulates. Supplied, every launch goes on the caller's
+stream, which the caller still owns and may create non-blocking; queuing fills
+there orders them against the accumulates in both directions, with no events and
+no second buffer.
 
 ### Trust in supplied surveys
 
