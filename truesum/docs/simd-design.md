@@ -1154,6 +1154,109 @@ streams in a plain copy loop. With input on the host it is PCIe-bound at 97%.
 So the crossover is cache capacity, not compute: below it the CPU wins, above
 it the GPU does, and the ratio at the top is just the bandwidth ratio.
 
+## Scalar against AVX-512, and a per-block dispatch that was rejected
+
+`bench/bench_kernels.cpp` times the two CPU kernels against each other. Run it
+once plain and once with `TRUESUM_KERNEL=scalar`. Single-threaded, pre-sized so
+only the accumulate is timed, 4096x16, ns/elem:
+
+| limbs | spread (binades) | AVX-512 | scalar | AVX-512 advantage |
+| --- | --- | --- | --- | --- |
+| 1 | 0 | 0.69 | 3.63 | 5.3x |
+| 2 | 40 | 1.05 | 4.34 | 4.1x |
+| 4 | 150 | 1.85 | 4.79 | 2.6x |
+| 8 | 400 | 3.32 | 4.44 | 1.3x |
+| 8 | 16, one outlier a column | 1.20 | 4.42 | 3.7x |
+| 12 | 650 | 5.51 | 4.44 | **0.81x** |
+| 16 | 950 | 8.60 | 4.72 | **0.55x** |
+| 31 | 1900 | 16.19 | 5.22 | **0.32x** |
+
+Also 4.3x on the survey, and 1.3x at 65536x64 on six threads, where both
+kernels are approaching DRAM and the choice stops mattering.
+
+**Scalar is flat in the width; the vector kernel is linear in it.** A row's
+carry stops as soon as it dies, so scalar touches only that row's two limbs
+plus a short chain whatever the column's width. The vector kernel pays the
+*span* of its lanes rather than the sum of their needs: the carry loop runs
+from the lowest lane's first limb to the highest lane's last, and a masked-off
+lane still occupies its slot on every iteration. Masks suppress a lane's
+write, not its execution. Past about ten limbs of divergent exponents the
+vector kernel loses, and at the full `double` range it loses 3.1x.
+
+The fifth row is the control, and the one that matters: the same 8-limb width
+as the row above it, but the width is set by one outlier a column while the
+rest cluster, so blocks span ~2 limbs and the vector kernel is back to 3.7x.
+**What costs is the spread within an 8-row block, not the column's width.**
+
+### The dispatch, and why it is not here
+
+`accumulate_avx512` was given a per-block test: read the block's span off
+`v_off` with two masked reductions, and past a threshold hand the block's live
+lanes to `accumulate_one` one row at a time. Templated on a `kWide` flag so a
+column no wider than the threshold takes an instantiation with no test in it.
+It worked, on the rows above:
+
+| limbs | before | span threshold 12 | pure scalar |
+| --- | --- | --- | --- |
+| 12 | 5.51 | 5.53 | 4.44 |
+| 16 | 8.60 | 7.47 | 4.72 |
+| 31 | 16.19 | 7.11 | 5.22 |
+
+Then the same measurement on blocks of *mixed* density -- a fraction of rows
+far above the rest, which is how a column gets wide when the data is not
+synthetic. 4096x16, outliers at 2^900, the rest within 16 binades, ns/elem:
+
+| outlier rate | no dispatch | span 12 | pure scalar |
+| --- | --- | --- | --- |
+| 1 in 512 rows | **1.41** | 2.63 | 4.29 |
+| 1 in 64 | 2.07 | 2.78 | 4.39 |
+| 1 in 16 | 3.80 | 3.94 | 4.53 |
+| 1 in 8 | 5.37 | 5.60 | 4.79 |
+| 1 in 4 | 6.76 | 7.04 | 5.24 |
+| 1 in 2 | 7.19 | 8.07 | 5.76 |
+
+**A regression at every rate, 1.9x at the top.** The span test reads one
+outlier lane as divergence and condemns seven clustered ones with it, and it
+charges two reduce trees per block -- about 45 cycles -- to reach that wrong
+conclusion, on every block, whether or not anything is routed. The earlier
+table missed this because its one clustered case was an 8-limb column, which
+the `kWide` gate kept away from the test entirely.
+
+**Rejected, because the trade runs backwards.** The rows it improves are
+columns whose exponents diverge over hundreds of binades, which is the
+assumption this container is built on being abandoned: the demo accumulates a
+matrix spanning 10^-23 to 10^26 and every column comes out two or three limbs,
+because the values *within* a column are similarly scaled. The rows it
+regresses are the realistic way a column gets wide. Paying a measurable cost
+on plausible data to fix implausible data is not a trade worth making, and
+`TRUESUM_KERNEL=scalar` already exists for a workload that knows its columns
+diverge.
+
+**A density test instead of a span test** was considered and not built. Bail
+when the count of lanes with work outstanding drops below a threshold, using
+`m_more` and `m_pending`, which the carry loop already computes -- a popcount
+rather than two reductions, so the cost objection goes away, and it is precise
+where the span test is not, since it would run the clustered lanes vectorized
+and finish the straggler scalar. But on uniformly divergent blocks every lane
+has work outstanding until late in the loop, so it bails near the end and
+recovers little of the 16.19; and on clustered blocks the vector kernel was
+already fine. It fixes the case that does not need fixing and not the one that
+does.
+
+**Two implementation results worth keeping**, both measured on the prototype.
+A runtime flag tested inside one kernel, with the mantissa and shift carried
+in the block struct for the fallback, slowed narrow columns 1.6-1.8x *with the
+dispatch never taken* -- first from the reductions on every block, then, once
+those were gated, from two more zmm per block with two blocks live. A template
+whose narrow instantiation is the original kernel is the only form that costs
+the common path nothing. And calling `accumulate_one` across translation units
+from the AVX-512 TU measured 1.5x slower than the scalar kernel it duplicates;
+any such fallback needs the carry helpers in a header both kernels inline.
+
+**Reopening this should mean evidence about real column widths and the spread
+within them**, not a fresh look at these numbers. The batch kernel is out of
+scope regardless: its register array caps it at 8 limbs, below the crossover.
+
 ## Remaining work, in order
 
 Ping-pong input buffers, batching on the CPU, and taking the survey
