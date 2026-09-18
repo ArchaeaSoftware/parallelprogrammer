@@ -129,17 +129,15 @@ Payload = materialization instructions only (excludes the `endbr64` CET prologue
 and `ret`). Full = including them.
 
 ```
-+----------------------------------------+---------+---------+------+--------+--------------------+
-| Variant                                | ISA     | Payload | Full | Instrs | Memory             |
-+----------------------------------------+---------+---------+------+--------+--------------------+
-| get_indices1  (compiler default)       | AVX2    |    10 B | 15 B |      3 | reads 32 B .rodata |
-| get_indices11 (movabs+vmovq+vpmovzxbd) | AVX2    |    20 B | 25 B |      5 | none               |
-| 512_intrin    (compiler default)       | AVX-512 |    10 B | 15 B |      3 | reads 16 B .rodata |
-| 512_asm       (two movabs + vpinsrq)   | AVX-512 |    37 B | 42 B |      7 | none               |
-| 512_addb      (vpaddb derive)          | AVX-512 |    40 B | 45 B |      9 | none               |
-| 512_halves    (vinserti32x8)           | AVX-512 |    48 B | 53 B |     10 | none               |
-| 512_bcastadd  (masked +8)              | AVX-512 |    52 B | 57 B |     11 | none               |
-+----------------------------------------+---------+---------+------+--------+--------------------+
+Variant                                 ISA      Payload  Full  Instrs  Memory
+--------------------------------------  -------  -------  ----  ------  ------------------
+get_indices1  (compiler default)        AVX2        10 B  15 B       3  reads 32 B .rodata
+get_indices11 (movabs+vmovq+vpmovzxbd)  AVX2        20 B  25 B       5  none
+512_intrin    (compiler default)        AVX-512     10 B  15 B       3  reads 16 B .rodata
+512_asm       (two movabs + vpinsrq)    AVX-512     37 B  42 B       7  none
+512_addb      (vpaddb derive)           AVX-512     40 B  45 B       9  none
+512_halves    (vinserti32x8)            AVX-512     48 B  53 B      10  none
+512_bcastadd  (masked +8)               AVX-512     52 B  57 B      11  none
 ```
 
 - **Smallest immediate-only, per ISA:** `get_indices11` (20 B) and `512_asm` (37 B).
@@ -165,16 +163,14 @@ Each function called through a pointer in a tight loop; dominated by call +
 pathological." Clocks/iteration:
 
 ```
-+-----------------------------------------+-------------+
-| Variant                                 | clocks/iter |
-+-----------------------------------------+-------------+
-| AVX2    get_indices1  (memory)          |        6.55 |
-| AVX2    get_indices11 (immediate)       |        6.55 |
-| AVX2    unpack-ladder variants 2-7      |        ~7.4 |
-| AVX-512 512_intrin (memory)             |        4.13 |
-| AVX-512 512_asm / 512_addb / 512_halves |        6.55 |
-| AVX-512 512_bcastadd                    |        7.37 |
-+-----------------------------------------+-------------+
+Variant                                  clocks/iter
+---------------------------------------  -----------
+AVX2    get_indices1  (memory)                  6.55
+AVX2    get_indices11 (immediate)               6.55
+AVX2    unpack-ladder variants 2-7              ~7.4
+AVX-512 512_intrin (memory)                     4.13
+AVX-512 512_asm / 512_addb / 512_halves         6.55
+AVX-512 512_bcastadd                            7.37
 ```
 
 The memory-load `512_intrin` looks best here — **because the constant sits in
@@ -197,38 +193,35 @@ already busy. This benchmark models that:
 
 The only difference between columns is how the identity vector is produced. The
 sweep runs at both vector widths: AVX2 (256-bit, 8-lane, 32-byte constant) and
-AVX-512 (512-bit, 16-lane, a full 64-byte cache line).
+AVX-512 (512-bit, 16-lane, a full 64-byte cache line). The tables below are from
+the Zen 4 Ryzen; the next section repeats the sweep on three more machines.
 
 ### AVX2 (256-bit, 8-lane `[0..7]`, 32-byte constant)
 
 ```
-+---------------+-------+----------+-----------+------------+-----------+
-| Working set   |  none | mem-load | immediate | imm vs mem | winner    |
-+---------------+-------+----------+-----------+------------+-----------+
-| L1 (16 KB)    |  6.55 |     6.96 |      7.37 |      -5.8% | mem-load  |
-| L1 (32 KB)    |  6.56 |     6.99 |      7.39 |      -5.6% | mem-load  |
-| L2 (256 KB)   |  6.66 |     7.09 |      7.54 |      -6.4% | mem-load  |
-| L2 (1 MB)     |  8.57 |     8.79 |      8.84 |      -0.5% | noise †   |
-| L3 (8 MB)     |  7.92 |     9.09 |      7.74 |     +14.9% | immediate |
-| L3 (32 MB)    | 13.90 |    13.94 |     13.83 |      +0.8% | noise †   |
-| DRAM (128 MB) | 20.16 |    19.50 |     20.02 |      -2.6% | noise †   |
-+---------------+-------+----------+-----------+------------+-----------+
+Working set     none  mem-load  immediate  imm vs mem  winner
+-------------  -----  --------  ---------  ----------  ---------
+L1 (16 KB)      6.55      6.96       7.37       -5.8%  mem-load
+L1 (32 KB)      6.56      6.99       7.39       -5.6%  mem-load
+L2 (256 KB)     6.66      7.09       7.54       -6.4%  mem-load
+L2 (1 MB)       8.57      8.79       8.84       -0.5%  noise †
+L3 (8 MB)       7.92      9.09       7.74      +14.9%  immediate
+L3 (32 MB)     13.90     13.94      13.83       +0.8%  noise †
+DRAM (128 MB)  20.16     19.50      20.02       -2.6%  noise †
 ```
 
 ### AVX-512 (512-bit, 16-lane `[0..15]`, 64-byte constant)
 
 ```
-+---------------+-------+----------+-----------+------------+---------+
-| Working set   |  none | mem-load | immediate | imm vs mem | winner  |
-+---------------+-------+----------+-----------+------------+---------+
-| L1 (16 KB)    |  9.93 |     9.92 |      9.92 |      -0.1% | noise † |
-| L1 (32 KB)    |  9.91 |     9.95 |      9.98 |      -0.3% | noise † |
-| L2 (256 KB)   | 13.28 |    13.31 |     13.30 |      +0.1% | noise † |
-| L2 (1 MB)     | 16.11 |    16.14 |     16.13 |      +0.1% | noise † |
-| L3 (8 MB)     | 15.97 |    16.09 |     16.19 |      -0.6% | noise † |
-| L3 (32 MB)    | 29.21 |    29.28 |     27.96 |      +4.5% | noise † |
-| DRAM (128 MB) | 44.62 |    44.45 |     44.49 |      -0.1% | noise † |
-+---------------+-------+----------+-----------+------------+---------+
+Working set     none  mem-load  immediate  imm vs mem  winner
+-------------  -----  --------  ---------  ----------  -------
+L1 (16 KB)      9.93      9.92       9.92       -0.1%  noise †
+L1 (32 KB)      9.91      9.95       9.98       -0.3%  noise †
+L2 (256 KB)    13.28     13.31      13.30       +0.1%  noise †
+L2 (1 MB)      16.11     16.14      16.13       +0.1%  noise †
+L3 (8 MB)      15.97     16.09      16.19       -0.6%  noise †
+L3 (32 MB)     29.21     29.28      27.96       +4.5%  noise †
+DRAM (128 MB)  44.62     44.45      44.49       -0.1%  noise †
 ```
 
 † `imm vs mem` is within run-to-run noise here — the sign flips across
@@ -250,16 +243,54 @@ and the AVX2 L3 8 MB row (immediate) reproduce.
   costs ~2 load cycles and the loop saturates load throughput at a high absolute
   cost (baseline ~10–45 clocks/iter vs ~6.6 at 256-bit). The identity's one extra
   load — or its immediate uops — is a small marginal fraction either way, so the
-  effect visible at 256-bit is swamped. A machine with a *native* 512-bit datapath
-  (recent Intel Xeon, Zen 5) may well behave differently.
+  effect visible at 256-bit is swamped. Whether the AVX2 L3 crossover is a Zen 4
+  quirk or a general rule is exactly what the next section tests.
 
-So the "fastest" way to load an identity vector depends on what the rest of the
-code is doing to the memory system *and* on how wide the datapath is. At 256-bit,
-when the cache has better things to do, immediates win; at 512-bit on this Zen 4
-the question is moot — load and immediate cost the same.
+On this Zen 4 Ryzen, then, the "fastest" way to load an identity vector depends on
+what the rest of the code is doing to the memory system: in L1/L2 the memory load
+wins, at an L3-resident working set the immediate wins by ~15 %, and beyond that
+they tie. The obvious next question is whether that crossover generalizes.
 
-Note that results were gathered on a rather old AMD Ryzen CPU (their first AVX-512
-implementation), so YMMV on more recent microarchitectures.
+## Across four machines
+
+It does not. Running the same experiment (`bench_remote.cpp` — identical harness,
+cache-level labels auto-detected per machine, single-thread and pinned, the
+reproducible sign across three reps) on four x86 parts, `imm vs mem` is the
+immediate's advantage and a **negative number means the memory load is faster**:
+
+```
+Machine              uarch           L3  512-bit  AVX2 L1/L2  AVX2 L3(8M)     AVX512 L1/L2  AVX512 L3
+-------------------  ----------  ------  -------  ----------  --------------  ------------  ---------
+Ryzen 7700X          Zen 4        32 MB  2x256    mem 5-6%    immediate +14%  flat          flat
+EPYC 9R45 (1 core)   Zen 5         4 MB  native   mem ~7%     (no L3 regime)  mem 7-17%     tie
+EPYC 9R45 (96 core)  Zen 5        32 MB  native   mem 6-8%    tie             mem 7-19%     tie
+Xeon 6975P-C         Granite R.  480 MB  native   mem 2-5%    tie             mem 3-6%      tie
+```
+
+(Absolute clocks/iter are TSC ticks and are *not* comparable across machines — the
+TSC runs at each part's nominal frequency, not its boost clock. Only the
+`imm vs mem` percentage *within* a machine is meaningful.)
+
+The one place the immediate ever wins is Zen 4's L3-resident regime. Give Zen 5 the
+*same* 32 MB L3 (the 96-core EPYC) and that row becomes a tie; Intel Granite Rapids,
+with a native 512-bit datapath and a 480 MB L3, ties there too. So the crossover is
+a **Zen 4 microarchitectural quirk** — not cache size (controlled at 32 MB) and not
+datapath width (Zen 5 and Granite Rapids are both native-512 and show nothing). On
+every modern core tested the compiler's memory load is **as fast or faster in every
+regime**: it wins outright in L1/L2 — those cores have enough load throughput that
+the free load beats the immediate's extra uops — and ties once the working set
+spills L2 and the loop is memory-latency bound.
+
+### The takeaway
+
+The *performance* case for materializing an identity vector from immediates does
+not survive contact with current hardware. What survives is the **footprint** case:
+the immediate sequence emits no `.rodata`, touches no cache line, and occupies no
+load-port slot. On Zen 4 that footprint also happened to buy ~15 % at an L3-resident
+working set; on Zen 5 and Granite Rapids it buys cleanliness, not speed. Reach for
+it when you want the constant *out of the data stream* — for code size, for I-cache
+locality, to keep a hot loop's load ports free for real work — not because it will
+clock faster, because on modern cores it will not.
 
 ---
 
@@ -269,6 +300,10 @@ implementation), so YMMV on more recent microarchitectures.
 # Microbenchmark + correctness (needs asmjit for the JIT variant)
 g++ -O2 -march=native -I<asmjit>/src loadidx.cpp -lasmjit -o a.out && ./a.out
 
-# Contention benchmark
+# Contention benchmark (fixed Zen 4 cache labels)
 g++ -O2 -march=native contention.cpp -o contention && ./contention [iterations]
+
+# Portable contention benchmark (auto-detects cache sizes; used for the
+# cross-machine runs above)
+g++ -O2 -march=native bench_remote.cpp -o bench_remote && ./bench_remote [iterations]
 ```
