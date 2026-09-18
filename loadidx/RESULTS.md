@@ -64,8 +64,7 @@ a single GPR with `0x0706050403020100`. But AVX2 doesn't have ergonomic ways to
 promote the lanes in that half-register to 16- and then 32-bit precision. In particular,
 `vpunpck*` instructions operate within each 128-bit lane of the 256-bit AVX2 registers!
 
-For whatever reason, I tabled the question for a good long time, but [this tweet](https://x.com/pskocik/status/2100607837198053884?s=20) inspired 
-me to resurrect the code base and sic Claude on it.
+For whatever reason, I tabled the question for a good long time, but [this tweet](https://x.com/pskocik/status/2100607837198053884?s=20) inspired me to resurrect the code base and sic Claude on it.
 
 And, though I feel like I have almost an encyclopedic memory of the
 AVX2 instructions (though it often feels like writing a legal brief - constantly
@@ -196,38 +195,68 @@ already busy. This benchmark models that:
 - **Sweeps the working-set size** so the background traffic escalates from
   L1-resident to DRAM.
 
-Only difference between columns: how the identity vector is produced.
+The only difference between columns is how the identity vector is produced. The
+sweep runs at both vector widths: AVX2 (256-bit, 8-lane, 32-byte constant) and
+AVX-512 (512-bit, 16-lane, a full 64-byte cache line).
+
+### AVX2 (256-bit, 8-lane `[0..7]`, 32-byte constant)
 
 ```
 +---------------+-------+----------+-----------+------------+-----------+
 | Working set   |  none | mem-load | immediate | imm vs mem | winner    |
 +---------------+-------+----------+-----------+------------+-----------+
-| L1 (16 KB)    |  7.05 |     7.51 |      7.92 |      -5.4% | mem-load  |
-| L1 (32 KB)    |  7.09 |     7.51 |      7.92 |      -5.5% | mem-load  |
-| L2 (256 KB)   |  7.15 |     7.57 |      8.00 |      -5.7% | mem-load  |
-| L2 (1 MB)     |  8.56 |     8.91 |      8.98 |      -0.7% | mem-load  |
-| L3 (8 MB)     |  8.25 |     9.29 |      8.23 |     +11.4% | immediate |
-| L3 (32 MB)    | 17.79 |    14.73 |     13.86 |      +5.8% | immediate |
-| DRAM (128 MB) | 21.99 |    21.81 |     21.81 |      +0.0% | tie       |
+| L1 (16 KB)    |  6.55 |     6.96 |      7.37 |      -5.8% | mem-load  |
+| L1 (32 KB)    |  6.56 |     6.99 |      7.39 |      -5.6% | mem-load  |
+| L2 (256 KB)   |  6.66 |     7.09 |      7.54 |      -6.4% | mem-load  |
+| L2 (1 MB)     |  8.57 |     8.79 |      8.84 |      -0.5% | noise †   |
+| L3 (8 MB)     |  7.92 |     9.09 |      7.74 |     +14.9% | immediate |
+| L3 (32 MB)    | 13.90 |    13.94 |     13.83 |      +0.8% | noise †   |
+| DRAM (128 MB) | 20.16 |    19.50 |     20.02 |      -2.6% | noise †   |
 +---------------+-------+----------+-----------+------------+-----------+
 ```
 
-Crossover is stable across runs.
+### AVX-512 (512-bit, 16-lane `[0..15]`, 64-byte constant)
+
+```
++---------------+-------+----------+-----------+------------+---------+
+| Working set   |  none | mem-load | immediate | imm vs mem | winner  |
++---------------+-------+----------+-----------+------------+---------+
+| L1 (16 KB)    |  9.93 |     9.92 |      9.92 |      -0.1% | noise † |
+| L1 (32 KB)    |  9.91 |     9.95 |      9.98 |      -0.3% | noise † |
+| L2 (256 KB)   | 13.28 |    13.31 |     13.30 |      +0.1% | noise † |
+| L2 (1 MB)     | 16.11 |    16.14 |     16.13 |      +0.1% | noise † |
+| L3 (8 MB)     | 15.97 |    16.09 |     16.19 |      -0.6% | noise † |
+| L3 (32 MB)    | 29.21 |    29.28 |     27.96 |      +4.5% | noise † |
+| DRAM (128 MB) | 44.62 |    44.45 |     44.49 |      -0.1% | noise † |
++---------------+-------+----------+-----------+------------+---------+
+```
+
+† `imm vs mem` is within run-to-run noise here — the sign flips across
+repetitions, so it is not a real difference. Only the AVX2 L1/L2 rows (mem-load)
+and the AVX2 L3 8 MB row (immediate) reproduce.
 
 ### Reading the result
 
-- **Working set ≤ L2:** the constant load hits warm L1 and the load ports have
-  slack, so the 1-uop load beats the immediate's 3 uops by ~5 %.
-- **Working set L3-resident:** the background traffic now contends for L1 fill
+- **AVX2, working set ≤ L2:** the constant load hits warm L1 and the load ports
+  have slack, so the 1-uop load beats the immediate's 3 uops by ~5–6 %.
+- **AVX2, L3-resident (8 MB):** the background traffic now contends for L1 fill
   bandwidth and cache capacity. The memory load's extra cache line and load slot
-  become a real cost; the immediate sequence touches neither and **wins by up to
-  11 %.**
-- **Pure DRAM footprint:** both are memory-latency bound; the identity's cost
-  disappears into the stalls.
+  become a real cost; the immediate sequence touches neither and **wins by ~15 %.**
+  This is the one robust crossover — past ~32 MB the identity's cost vanishes into
+  memory stalls and the columns fall within noise.
+- **AVX-512 shows no reliable difference at any size** — and, counterintuitively,
+  the bigger 64-byte constant does *not* make loading worse. On this Zen 4, AVX-512
+  is double-pumped over a 256-bit datapath, so each 512-bit background load already
+  costs ~2 load cycles and the loop saturates load throughput at a high absolute
+  cost (baseline ~10–45 clocks/iter vs ~6.6 at 256-bit). The identity's one extra
+  load — or its immediate uops — is a small marginal fraction either way, so the
+  effect visible at 256-bit is swamped. A machine with a *native* 512-bit datapath
+  (recent Intel Xeon, Zen 5) may well behave differently.
 
-So the "fastest" way to load an identity vector depends entirely on what the rest
-of the code is doing to the memory system. When the cache has better things to
-do, immediates win.
+So the "fastest" way to load an identity vector depends on what the rest of the
+code is doing to the memory system *and* on how wide the datapath is. At 256-bit,
+when the cache has better things to do, immediates win; at 512-bit on this Zen 4
+the question is moot — load and immediate cost the same.
 
 Note that results were gathered on a rather old AMD Ryzen CPU (their first AVX-512
 implementation), so YMMV on more recent microarchitectures.
