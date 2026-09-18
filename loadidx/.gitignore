@@ -1,0 +1,11 @@
+# Compiled binaries & object files
+a.out
+contention
+*.o
+
+# Assembly / preprocessor dumps
+*.s
+
+# Stray run logs
+out
+err
