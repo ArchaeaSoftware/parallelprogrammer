@@ -1,0 +1,10 @@
+# replicated 2026-09-14T22:13:58Z
+# cpu:    AMD Ryzen 7 7700X 8-Core Processor
+# cores:  8 logical
+# load:   1.35 1.49 1.40
+# os:     Linux 5.15.0-91-generic
+# cxx:    c++ (Ubuntu 9.4.0-1ubuntu1~20.04.2) 9.4.0
+# gpu:    NVIDIA GeForce RTX 3060, 580.95.05
+# power:  130.00 W, 170.00 W (limit, default)
+# clocks: 2160 MHz, 7501 MHz (max sm, max mem)
+# nvcc:   Cuda compilation tools, release 12.9, V12.9.86

@@ -1,0 +1,23 @@
+\documentclass[varwidth=6.2in,border=3pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,decorations.pathreplacing,positioning,calc,fit}
+\usepackage{amsmath}
+\usepackage{algpseudocode}
+\usepackage{newtxtext,newtxmath}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\truesum}{\code{truesum}}
+\begin{document}
+\begin{algorithmic}[1]
+\ForAll{rows $i$, eight at a time on AVX-512}
+  \State $(m, t, s) \gets$ odd mantissa, true-ulp exponent and sign of $x_i$ \Comment{skip if $x_i = 0$}
+  \State $\mathit{shift} \gets t - e$;\; $\mathit{off} \gets \lfloor \mathit{shift}/64 \rfloor$;\; $\mathit{bit} \gets \mathit{shift} \bmod 64$
+  \State flag \code{kBadExponent} if $\mathit{shift} < 0$; flag \code{kBadWidth} if the addend's top reaches the sign bit
+  \State $a_{\mathit{off}} \gets m \ll \mathit{bit}$;\; $a_{\mathit{off}+1} \gets m \gg (64 - \mathit{bit})$;\; negate the pair if $s$ \Comment{two-limb addend}
+  \For{$k = \mathit{off}$ \textbf{to} $L-1$} \Comment{carry chain, one vector op per limb}
+    \State $(\code{limbs}[k][i], \mathit{carry}) \gets \code{limbs}[k][i] + a_k + \mathit{carry}$
+    \If{$\mathit{carry} = 0$ and $k > \mathit{off}+1$} \textbf{break} \EndIf
+  \EndFor
+  \State flag \code{kBadOverflow} if the top limb's sign disagrees with both operands'
+\EndFor
+\end{algorithmic}
+\end{document}

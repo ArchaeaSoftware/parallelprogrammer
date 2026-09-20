@@ -1,0 +1,216 @@
+%% User manual for the truesum software component of the TOMS Algorithm
+%% submission. Build: latexmk -pdf userManual.tex
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+
+\lstset{basicstyle=\ttfamily\small,language=C++,columns=fullflexible,
+  keepspaces=true,breaklines=true,frame=single,framerule=0.3pt,
+  xleftmargin=1em,commentstyle=\color{black!60}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{\code{truesum} User Manual\\[4pt]\large Exact summation of floating-point matrices}
+\author{Nicholas Wilt\\Archaea Software, LLC\\\code{nicholas@archaeasoftware.com}}
+\date{Version 1.0, 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\section{Overview}
+
+\code{truesum} sums floating-point matrices elementwise and exactly. An \emph{accumulation matrix} holds one two's complement fixed-point integer per entry, wide enough that no addition rounds, so the result is independent of the order of submission, the number of worker threads, and whether the CPU or GPU implementation performed the work. Each column shares one exponent, set at the least significant bit of any value it has received, and is stored limb-major: one contiguous allocation per 64-bit limb position, holding that limb of every row.
+
+The library provides two classes with parallel interfaces:
+\begin{itemize}
+\item \code{truesum::AccumulationMatrix} (header \code{truesum/accumulation\_matrix.hpp}), the CPU implementation, with a scalar kernel and an AVX-512 kernel selected at run time;
+\item \code{truesum::CudaAccumulationMatrix} (header \code{truesum/cuda\_accumulation\_matrix.hpp}), which keeps the accumulation matrix in device memory and accumulates with CUDA kernels.
+\end{itemize}
+Both accept \emph{surveys} (\code{truesum/survey.hpp}), twelve-byte per-column summaries of an input matrix that let an accumulation matrix be sized before any data arrives.
+
+\section{Installation}
+
+\subsection{Dependencies}
+
+\begin{tabular}{ll}
+\toprule
+Component & Requirement \\
+\midrule
+C++ compiler & C++17; tested with GCC 13 and Clang 18 \\
+CMake & 3.13 or later \\
+AVX-512 kernels (optional) & a compiler accepting \code{-mavx512f -mavx512dq -mavx512vl -mavx512bw -mavx512cd -mavx512vpopcntdq}; used only on CPUs that report AVX-512 \\
+CUDA class (optional) & CUDA Toolkit 12.x; tested with 12.9; a device of compute capability 7.0 or later \\
+Threads & pthreads, found by CMake \\
+\bottomrule
+\end{tabular}
+
+\medskip
+The library has no other dependencies. The test suite and benchmarks are dependency-free as well.
+
+\subsection{Building}
+
+From the directory containing \code{CMakeLists.txt}:
+\begin{lstlisting}[language=bash]
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+./build/test_truesum          # CPU test suite
+./build/test_cuda             # CUDA test suite (if a toolkit was found)
+./build/demo                  # 4x4 demonstration
+\end{lstlisting}
+
+Three options control what is built:
+\begin{itemize}
+\item \code{-DTRUESUM\_ENABLE\_AVX512=OFF} omits the AVX-512 kernels, leaving the scalar kernel. The scalar build passes the full test suite and is the configuration for a machine without AVX-512, including Apple silicon.
+\item \code{-DTRUESUM\_ENABLE\_CUDA=OFF} skips the CUDA toolkit detection and the \code{CudaAccumulationMatrix} target.
+\item \code{-DTRUESUM\_BUILD\_BENCH=OFF} omits the benchmark drivers.
+\end{itemize}
+The library builds and its tests pass on Linux (x86-64) and, in the scalar configuration, on macOS.
+
+\subsection{Environment}
+
+\code{TRUESUM\_KERNEL=scalar} forces the portable kernel at run time even on a CPU with AVX-512, which is how the two kernels are cross-checked in testing. \code{AccumulationMatrix::describe()} reports which kernel is active.
+
+\section{Using the library}
+
+\subsection{A first example}
+
+\begin{lstlisting}
+#include "truesum/accumulation_matrix.hpp"
+
+truesum::AccumulationMatrix acc(rows, cols);
+
+// Optional: size every column from a representative matrix and the number
+// of matrices to come, so accumulation never rescales or widens.
+acc.reserve_for(first_batch.data(), n_batches);
+
+for (const auto &batch : batches) {
+    acc.add_matrix_col_major(batch.data());   // column-major: preferred
+    // acc.add_matrix(batch.data());          // row-major also works
+}
+
+double x = acc.to_double(i, j);                  // correctly rounded, once
+std::string s = acc.to_exact_decimal(i, j);      // every digit, never rounds
+double m = acc.to_double_mean(i, j, n_batches);  // mean, rounded once
+\end{lstlisting}
+
+\subsection{Surveys}
+
+A \code{Survey} is a plain struct of 12 bytes:
+\begin{lstlisting}
+struct Survey {
+    int  min_exponent;   // lowest true-ulp exponent among nonzero values
+    int  max_top;        // one past the highest occupied bit position
+    bool any;            // some value was nonzero
+    bool nonfinite;      // some value was Inf or NaN
+};
+Survey survey_column(const double *values, std::size_t rows);
+void   survey_matrix_col_major(Survey *out, const double *b, std::size_t rows,
+                               std::size_t cols, std::size_t col_stride = 0);
+void   survey_matrix(Survey *out, const double *b, std::size_t rows,
+                     std::size_t cols, std::size_t row_stride = 0);
+\end{lstlisting}
+A survey describes values, not their storage: the survey of a matrix and of any exact copy of it are identical. Surveys of several matrices reduce to one reservation by taking the minimum of \code{min\_exponent} and the maximum of \code{max\_top} per column.
+
+Surveys enter the library in three ways:
+\begin{itemize}
+\item at construction, \code{AccumulationMatrix(rows, cols, surveys)}, where \code{surveys[k][j]} describes matrix $k$'s column $j$. The matrix is then \emph{pre-sized}: no submission surveys, rescales or widens, and submitting more matrices than were described throws;
+\item \code{reserve\_for\_surveys(surveys)}, which grows the columns to cover the surveys given but keeps surveying each submission, for a caller that knows some of what is coming;
+\item per submission, \code{add\_matrix\_col\_major(b, surveys)}, which skips the survey pass for that matrix.
+\end{itemize}
+A supplied survey is checked, not trusted: the accumulate kernel tests every addend against the extents it was given and throws \code{std::runtime\_error} if a survey understated them.
+
+\section{Reference: \code{AccumulationMatrix}}
+
+All methods are in namespace \code{truesum}. Row and column indices are zero-based. ``Column-major'' means column $j$ begins at \code{b + j*col\_stride} with rows contiguous; ``row-major'' means row $i$ begins at \code{b + i*row\_stride} with columns contiguous. A stride of 0 means tightly packed.
+
+\subsection{Construction}
+\begin{description}
+\item[\code{AccumulationMatrix(rows, cols)}] a dense $\text{rows} \times \text{cols}$ accumulation matrix, every column one limb wide with no exponent yet; the first submission to each column sets its scale.
+\item[\code{AccumulationMatrix(n, Uplo uplo)}] a symmetric $n \times n$ matrix stored as one triangle, \code{Uplo::Lower} or \code{Uplo::Upper}. Inputs are assumed symmetric and only the stored triangle is read.
+\item[\code{AccumulationMatrix(rows, cols, surveys)}, \code{AccumulationMatrix(n, uplo, surveys)}] pre-sized from \code{std::vector<std::vector<Survey>>}, one inner vector per matrix to be submitted, one \code{Survey} per column.
+\end{description}
+The class is movable and not copyable.
+
+\subsection{Shape}
+\code{rows()}, \code{cols()}, \code{symmetric()}, \code{uplo()}; \code{column\_rows(j)} and \code{column\_first\_row(j)} give the stored length of column $j$ and the logical row its first stored entry corresponds to (always \code{rows()} and 0 unless symmetric).
+
+\subsection{Accumulation}
+\begin{description}
+\item[\code{add\_matrix(b, row\_stride = 0)}] $A \mathrel{+}= B$, $B$ row-major.
+\item[\code{add\_matrix\_scaled\_pow2(b, log2\_scale, row\_stride = 0)}] $A \mathrel{+}= 2^{\text{log2\_scale}} B$, exact for any integer scale.
+\item[\code{add\_matrix\_col\_major(b, surveys = nullptr, col\_stride = 0)}] $A \mathrel{+}= B$, $B$ column-major; the preferred entry point, since it needs no staging. \code{surveys}, if given, is one \code{Survey} per column of $B$.
+\item[\code{add\_matrix\_col\_major\_scaled\_pow2(b, log2\_scale, col\_stride = 0)}] as above with a power-of-two scale.
+\item[\code{add\_matrices\_col\_major(b, count, surveys = nullptr, col\_stride = 0)}] $A \mathrel{+}= B_0 + \cdots + B_{\text{count}-1}$ in one pass over the accumulation matrix; \code{b} is an array of \code{count} pointers to column-major matrices and \code{surveys}, if given, is indexed \code{surveys[k][j]}. Identical results to \code{count} separate calls; less traffic to the accumulation matrix.
+\item[\code{add\_column(j, v)}, \code{add\_column\_scaled\_pow2(j, v, log2\_scale)}] $A_{:,j} \mathrel{+}= v$ for \code{column\_rows(j)} contiguous values, so a caller can stream columns without holding a whole matrix.
+\item[\code{set\_zero()}] clears every entry but keeps each column's exponent and width, so a reused matrix does not pay again for rescaling.
+\end{description}
+Submitting an infinite or NaN value throws \code{std::domain\_error}; on a pre-sized matrix, a value outside a column's extents, or more matrices than were declared, throws \code{std::runtime\_error}. $-0.0$ accumulates as an exact zero.
+
+\subsection{Threads}
+\code{set\_threads(n)} spreads accumulation over \code{n} workers partitioned by column; results are bit-identical to the serial ones. \code{threads()} reports the count. The workers persist between calls. A single accumulation matrix must not be used from more than one caller thread at a time.
+
+\subsection{Readback}
+\begin{description}
+\item[\code{to\_double(i, j)}] entry $(i, j)$ correctly rounded to nearest, ties to even, over the full range; $\pm\infty$ on overflow, and rounded once into the denormal range.
+\item[\code{to\_double(\&residual, i, j)}] the same, also storing the exact difference between the stored value and the returned one, itself correctly rounded; the pair is a two-term expansion of about 106 bits.
+\item[\code{to\_matrix(out, row\_stride = 0)}, \code{to\_matrix\_with\_residual(out, residual, row\_stride = 0)}] bulk forms of the above, writing a row-major matrix.
+\item[\code{to\_double\_mean(i, j, count)}, \code{to\_double\_mean(\&residual, i, j, count)}, \code{to\_matrix\_mean(out, count, row\_stride = 0)}, \code{to\_matrix\_mean\_with\_residual(out, residual, count, row\_stride = 0)}] the stored sum divided by \code{count}, correctly rounded as a quotient. \code{count} is a \code{std::uint64\_t}; zero throws \code{std::domain\_error}.
+\item[\code{to\_exact\_decimal(i, j)}] the stored value as a decimal string, every digit exact.
+\item[\code{is\_exactly\_representable(i, j)}, \code{is\_zero(i, j)}] predicates on the stored value.
+\item[\code{entry\_limbs(i, j)}] the entry's limbs, least significant first, as \code{std::vector<limbs::limb\_t>}; for testing and interoperation.
+\end{description}
+
+\subsection{Column state and sizing}
+\begin{description}
+\item[\code{column\_exponent(j)}, \code{column\_limbs(j)}, \code{column\_bit\_width(j)}] the column's exponent (significance of bit 0 as a power of two), its limb count, and that count times 64.
+\item[\code{reserve\_column(j, exponent, bits)}] sets column $j$'s exponent (or rescales it down to \code{exponent} if already set) and widens it to hold \code{bits} bits.
+\item[\code{reserve\_for(b, count = 1, row\_stride = 0)}] sizes every column from a representative row-major matrix and the number of matrices to come, so that accumulating that many similar matrices never rescales or widens. Purely an optimization; results are identical without it.
+\item[\code{reserve\_for\_surveys(surveys)}] the same from surveys, without pre-sizing's promise (submissions are still surveyed).
+\item[\code{memory\_bytes()}] bytes allocated for limb storage.
+\item[\code{describe()}] a human-readable per-column report of exponent and width, and the active kernel.
+\end{description}
+
+\section{Reference: \code{CudaAccumulationMatrix}}
+
+The CUDA class mirrors the CPU class where the two share semantics, with these differences.
+
+\subsection{Construction and streams}
+Every constructor takes a trailing \code{CUstream\_st *stream = nullptr} (a \code{cudaStream\_t}). If given, every kernel launch, stream-ordered allocation and copy the class issues goes onto that stream; if not, the class creates a stream and destroys it with the matrix. \code{stream()} returns the stream in use. All submissions are asynchronous with respect to the host: they return when the work is queued. \code{synchronize()} waits for it. To wait for one submission only, record a CUDA event on \code{stream()} after it and wait on the event.
+
+\subsection{Reservation}
+A device column must be sized before it is accumulated into, by one of \code{reserve\_column(j, exponent, bits)}, \code{reserve\_for(b, count, col\_stride)} (surveying a host matrix on the CPU), \code{reserve\_for\_device(b, count, col\_stride)} (surveying a device-resident matrix with a kernel), \code{reserve\_for\_surveys(surveys)}, \code{reserve\_like(cpu)} (copying the column state of an \code{AccumulationMatrix}), or a constructor taking surveys. A column may be reserved once; after that the class adapts on its own, rescaling or widening a column when a submission's survey falls outside it. Both adjustments drain the stream, so a reservation that covers the data is what keeps the device pipeline full.
+
+\subsection{Input memory}
+\begin{description}
+\item[\code{add\_matrix\_col\_major(b, surveys = nullptr, col\_stride = 0)}] $b$ must be page-locked, device-mapped host memory: \code{cudaHostAlloc} with \code{cudaHostAllocMapped}, or \code{cudaHostRegister} with \code{cudaHostRegisterMapped}. Ordinary pageable memory is rejected with \code{std::invalid\_argument}. The kernel streams the matrix over the bus, so the buffer must not be modified until the submission has completed.
+\item[\code{acquire\_input()}] returns one of two mapped host buffers the class keeps in rotation, sized for one matrix, blocking until the kernel that last read it has finished. A producer that fills the returned buffer and submits it with \code{add\_matrix\_col\_major} never waits on the stream as a whole.
+\item[\code{add\_matrix\_col\_major\_device(b, surveys = nullptr, col\_stride = 0)}, \code{add\_matrices\_col\_major\_device(b, count, surveys = nullptr, col\_stride = 0)}] input already resident in device memory, singly or batched.
+\end{description}
+\code{survey\_matrix\_col\_major\_device(out, b, rows, cols, col\_stride, stream)} (in \code{cuda\_accumulation\_matrix.hpp}) surveys a device-resident matrix with a kernel on the given stream, writing \code{cols} surveys to \code{out}, which may be device memory or mapped host memory. It allocates nothing and is asynchronous.
+
+\subsection{Readback and inspection}
+\code{column\_exponent(j)}, \code{column\_limbs(j)}, \code{entry\_limbs(i, j)}, \code{download\_column(j)} (all limbs of one column), \code{column\_occupancy(j)} (the highest limb any entry of the column has reached), \code{column\_contradictions(j)} (the flags raised by supplied surveys that understated the data) and \code{memory\_bytes()}. Correctly rounded readback to \code{double} is done by downloading limbs and rounding on the host; see the test suite for the pattern.
+
+\section{Tests and benchmarks}
+
+\code{test\_truesum} (CPU) and \code{test\_cuda} (GPU) are dependency-free assertion runners; each prints a count of checks and failures and exits nonzero on any failure. Neither takes input. The suites cover exact decomposition of random bit patterns and every special value, catastrophic cancellation, correct rounding at ties including the denormal boundary, order independence over random permutations, agreement of every entry point and every kernel, and the means.
+
+The benchmark drivers replicate the tables in the accompanying article and take no interactive input:
+\begin{description}
+\item[\code{bench\_table\_cpu [threads]}] Table 1, CPU rows.
+\item[\code{bench\_table\_gpu}] Table 1, GPU rows.
+\item[\code{bench\_adjust\_cpu [rows] [cols] [steps]}] Table 2 and the widen/rescale costs.
+\item[\code{bench\_adjust\_gpu [rows] [cols] [steps]}] the device-side counterpart, including the allocation timing.
+\end{description}
+\code{bench/replicate.sh <build-dir>} runs all four and writes their output to \code{bench/output/}; the outputs recorded on the machine used for the article are in \code{bench/expected/}, with the hardware identified in each file's first line. Timings are hardware-dependent; the structural claims (widen cost flat in width, rescale cost growing with it) are what a replication should confirm.
+
+\section{License}
+
+\code{truesum} is distributed under the BSD 3-Clause License; the text is in \code{Doc/LICENSE}.
+
+\end{document}

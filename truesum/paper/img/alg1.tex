@@ -1,0 +1,26 @@
+\documentclass[varwidth=6.2in,border=3pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,decorations.pathreplacing,positioning,calc,fit}
+\usepackage{amsmath}
+\usepackage{algpseudocode}
+\usepackage{newtxtext,newtxmath}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\truesum}{\code{truesum}}
+\begin{document}
+\begin{algorithmic}[1]
+\State $\mathit{any} \gets \textbf{false}$;\; $\mathit{nonfinite} \gets \textbf{false}$;\; $b \gets +\infty$;\; $m \gets 0$
+\ForAll{$x_i$} \Comment{sweep 1: raw bits only}
+  \If{$x_i$ is infinite or NaN} $\mathit{nonfinite} \gets \textbf{true}$; \Return \EndIf
+  \If{$x_i \ne 0$}
+    \State $\mathit{any} \gets \textbf{true}$;\; $b \gets \min(b,\, \max(\mathrm{biased}(x_i), 1) - 1075)$;\; $m \gets \max(m,\, |x_i|)$
+  \EndIf
+\EndFor
+\If{not $\mathit{any}$} \Return \EndIf
+\State $\code{max\_top} \gets 1 + \lfloor \log_2 m \rfloor$ \Comment{exact, from the bit pattern of $m$}
+\If{$b \ge c$} $\code{min\_exponent} \gets b$; \Return \Comment{no rescale can be due} \EndIf
+\State $\code{min\_exponent} \gets +\infty$
+\ForAll{$x_i \ne 0$} \Comment{sweep 2: locate the least significant set bit}
+  \State $\code{min\_exponent} \gets \min(\code{min\_exponent},\, \mathrm{biased}(x_i) - 1075 + \mathrm{ctz}(\mathrm{significand}(x_i)))$
+\EndFor
+\end{algorithmic}
+\end{document}
