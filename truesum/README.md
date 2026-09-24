@@ -1,5 +1,7 @@
 # truesum
 
+[![truesum](https://github.com/ArchaeaSoftware/parallelprogrammer/actions/workflows/truesum.yml/badge.svg)](https://github.com/ArchaeaSoftware/parallelprogrammer/actions/workflows/truesum.yml)
+
 Exact accumulation of double-valued matrices into an arbitrary-precision
 fixed-point matrix. No intermediate precision is ever lost: summing a stream of
 `double` matrices produces the mathematically exact result, which is rounded
