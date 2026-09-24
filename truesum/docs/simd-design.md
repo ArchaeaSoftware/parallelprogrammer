@@ -444,6 +444,47 @@ the CPU is the *algorithm* — when to rescale, when to widen, how the exponent
 moves — not the memory. Unifying all three behind one dispatch table would
 produce exactly the leaky abstraction this design is trying to avoid.
 
+### The dispatch requires VPOPCNTDQ, which it does not strictly need
+
+`use_avx512()` demands five features: F, DQ, VL, CD **and VPOPCNTDQ**. The last
+one is the narrow gate -- it arrived with Ice Lake and Zen 4, so Skylake-SP and
+Cascade Lake, which have the other four, take the scalar path.
+
+Only one thing needs it. Both kernels compute a trailing-zero count as
+`popcount((m & -m) - 1)`. There is an exact equivalent in AVX512CD, which the
+kernel already uses a few lines earlier for `max_top`:
+
+```
+64 - lzcnt((m & -m) - 1)
+```
+
+**Verified equal, not argued equal.** 1.6M lanes over single-bit values, zero,
+all-ones and randoms: no mismatches. The `m == 0` case matters, because the
+kernel relies on the answer being 64 so that a shift by 64 zeroes the lane, and
+both forms return 64 with no special-casing. The library was built that way,
+with `-mavx512vpopcntdq` and the runtime check removed, and the suite passed.
+
+**It costs about 2% to give up**, medians of three, Zen 4:
+
+| case | popcnt | lzcnt |
+| --- | --- | --- |
+| 1 limb | 0.680 | 0.697 |
+| 2 limbs | 1.042 | 1.061 |
+| 8 limbs | 3.325 | 3.384 |
+| survey | 0.299 | 0.313 |
+
+**Kept as it is, for now.** The trade is ~2% on the accumulate and ~5% on the
+survey, paid on every machine that has VPOPCNTDQ, to reach machines that do not.
+Whether that reach is worth anything is the part this bench cannot answer:
+Skylake-SP and Cascade Lake throttle hard under 512-bit work, so the vector
+kernel may be neutral or worse there, and SDE models CPUID but not frequency.
+Reopening this should mean a measurement on one of those parts, not a re-reading
+of the table above.
+
+If it is ever reopened, note that the CI assertion inverts: the `sde` job
+currently requires `-skx` to *decline* to scalar, and on the CD-only form it
+would have to select AVX-512 instead.
+
 ## Templates: only in the kernels, never in the API
 
 Choosing 64-bit storage everywhere removed the case for templating the public class —

@@ -23,6 +23,9 @@ use_avx512()
            __builtin_cpu_supports("avx512vl") &&
            __builtin_cpu_supports("avx512cd") &&
            // _mm512_popcnt_epi64, used for the vector trailing-zero count.
+           // An AVX512CD-only form of that count exists and measures ~2%
+           // slower; requiring VPOPCNTDQ here is what keeps Skylake-SP and
+           // Cascade Lake on the scalar path. See docs/simd-design.md.
            __builtin_cpu_supports("avx512vpopcntdq");
 #else
     return false;
