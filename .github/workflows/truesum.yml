@@ -1,0 +1,78 @@
+# Builds truesum and gates ctest. The benchmark drivers are built too, with
+# TRUESUM_BUILD_BENCH left at its default of ON: a driver whose source has gone
+# missing is a configure error, not a build one, so nothing downstream of it
+# runs. This workflow exists partly to catch that.
+#
+# The runners have no CUDA toolkit, so check_language(CUDA) skips the device
+# target and its test; the CPU library, its tests and the CPU drivers are what
+# gets covered here. Whether a runner has AVX-512 varies, so the suite is run
+# twice: once letting the dispatch choose, and once with TRUESUM_KERNEL=scalar
+# to pin the portable path.
+name: truesum
+
+on:
+  push:
+    branches: [main]
+    paths: ['truesum/**', '.github/workflows/truesum.yml']
+  pull_request:
+    paths: ['truesum/**', '.github/workflows/truesum.yml']
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: truesum
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.cc }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cc: g++
+          - cc: clang++
+    env:
+      CXX: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report the CPU, since kernel selection depends on it
+        run: |
+          grep -m1 'model name' /proc/cpuinfo
+          grep -o 'avx512[a-z]*' /proc/cpuinfo | sort -u | tr '\n' ' '; echo
+          $CXX --version | head -1
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Test
+        working-directory: truesum/build
+        run: ctest --output-on-failure
+
+      - name: Test again on the portable kernel
+        working-directory: truesum/build
+        env:
+          TRUESUM_KERNEL: scalar
+        run: ctest --output-on-failure
+
+      - name: Smoke-test the demo
+        run: ./build/demo | head -8
+
+  # The benchmark drivers are optional; make sure turning them off still
+  # configures, since that is how a consumer who only wants the library builds.
+  without-benchmarks:
+    name: benches off
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure and build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTRUESUM_BUILD_BENCH=OFF
+          cmake --build build -j"$(nproc)"
+      - name: Test
+        working-directory: truesum/build
+        run: ctest --output-on-failure
