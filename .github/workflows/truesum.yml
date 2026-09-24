@@ -40,7 +40,10 @@ jobs:
       - name: Report the CPU, since kernel selection depends on it
         run: |
           grep -m1 'model name' /proc/cpuinfo
-          grep -o 'avx512[a-z]*' /proc/cpuinfo | sort -u | tr '\n' ' '; echo
+          # The flag names carry underscores (avx512_vpopcntdq), so [a-z] alone
+          # truncates the one the dispatch actually turns on.
+          grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -i avx512 | sort | tr '\n' ' '
+          echo
           $CXX --version | head -1
 
       - name: Configure
@@ -59,6 +62,14 @@ jobs:
           TRUESUM_KERNEL: scalar
         run: ctest --output-on-failure
 
+      - name: Which kernel did the dispatch pick?
+        run: |
+          # describe() names the selected kernel. On a runner without
+          # avx512_vpopcntdq this says "scalar" and the vector path is never
+          # executed here -- the sde job below is what guarantees it runs.
+          ./build/demo | head -1
+          TRUESUM_KERNEL=scalar ./build/demo | head -1
+
       - name: Smoke-test the demo
         run: ./build/demo | head -8
 
@@ -76,3 +87,49 @@ jobs:
       - name: Test
         working-directory: truesum/build
         run: ctest --output-on-failure
+
+  # Runner CPUs vary, and the dispatch needs avx512_vpopcntdq, which Ice Lake
+  # and Zen 4 have but Skylake-SP and Zen 3 do not. So whether the vector kernel
+  # executes on a hosted runner is luck. Emulation removes the luck: SDE models
+  # the CPUID the dispatch reads, so -icl must select AVX-512 and -skx, which
+  # has the other four flags but not VPOPCNTDQ, must decline to scalar. Both
+  # directions are asserted; a silent fallback would otherwise look like a pass.
+  avx512-under-sde:
+    name: AVX-512 (Intel SDE)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Intel SDE
+        uses: petarpetrovt/setup-sde@6d2773bc0ef3005fd52e0ae0bb91782321793aec # v6.0
+        with:
+          sdeVersion: 10.13.1
+
+      - name: Configure and build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(nproc)"
+
+      - name: Ice Lake -- the dispatch must select AVX-512
+        run: |
+          out=$("$SDE_PATH/sde64" -icl -- ./build/demo | head -1)
+          echo "$out"
+          case "$out" in
+            *"avx512 kernel"*) echo "ok: vector kernel selected" ;;
+            *) echo "::error::expected the AVX-512 kernel under -icl, got: $out"; exit 1 ;;
+          esac
+
+      - name: Ice Lake -- run the suite on the vector kernel
+        run: '"$SDE_PATH/sde64" -icl -- ./build/test_truesum'
+
+      - name: Skylake-X -- no VPOPCNTDQ, so the dispatch must decline
+        run: |
+          out=$("$SDE_PATH/sde64" -skx -- ./build/demo | head -1)
+          echo "$out"
+          case "$out" in
+            *"scalar kernel"*) echo "ok: declined to scalar, as it must" ;;
+            *) echo "::error::expected the scalar fallback under -skx, got: $out"; exit 1 ;;
+          esac
+
+      - name: Skylake-X -- the fallback must pass the suite too
+        run: '"$SDE_PATH/sde64" -skx -- ./build/test_truesum'
