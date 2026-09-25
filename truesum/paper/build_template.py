@@ -13,6 +13,7 @@ template demonstrates, alphabetically by first author.
 """
 import pathlib
 import re
+import sys
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -21,6 +22,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt
 
 HERE = pathlib.Path(__file__).parent
+sys.path.insert(0, str(HERE))
 IMG = HERE / "img"
 
 
@@ -206,7 +208,22 @@ styled("AuthNotes",
        "author to a personal newsletter; it has not been published or "
        "submitted elsewhere.")
 
-exec(open(HERE / "_body.py").read())
+import render_md  # noqa: E402  (imported after the builders above are defined)
+
+
+def equation(_doc, text):
+    """A centred, unindented display line, as the body used for Equation (1)."""
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.space_after = Pt(6)
+    p.paragraph_format.first_line_indent = Inches(0)
+    emit(p, text, size=10)
+    return p
+
+
+render_md.render(doc, (HERE / "body.md").read_text(),
+                 heading=heading, para=para, bullet=bullet,
+                 figure=figure, table=table, equation=equation)
 
 styled("ReferenceHead", "REFERENCES")
 for entry in [

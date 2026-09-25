@@ -16,3 +16,5 @@ userManual/*.fdb_latexmk
 userManual/*.toc
 bench/output/
 *.zip
+__pycache__/
+*.pyc
