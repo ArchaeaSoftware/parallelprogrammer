@@ -16,9 +16,9 @@ matrices. Each column is represented as block floating point, with a shared
 exponent and the mantissas held in a structure-of-arrays (SOA) layout of 64-bit
 *limbs*, GMP's term for the segments of a multi-precision number that each fit
 in a single machine word [Granlund and the GMP Development Team 2023]. Storage
-is per limb position rather than per element: one contiguous array holds limb
-*k* of every row, and we call such an array a *limb-column*, for want of a
-better term.
+is laid out in structure of arrays fashion, per limb position rather than per 
+element: one contiguous array holds limb *k* of every row, and for want of a
+better term, we refer to such array as *limb-columns*.
 
 A *survey* is a compact (12 bytes per column) characterization of an input
 matrix that may be used to pre-size an accumulation matrix to receive its
@@ -33,9 +33,9 @@ requiring the client to divide a readback by the number of accumulations.
 
 Both AVX-512 and CUDA implementations are provided, and both saturate the
 bandwidth on their respective platforms. Batched submissions conserve bandwidth
-to the accumulation matrix on both platforms, and the CUDA implementation
-optionally takes a stream parameter so API clients can coordinate concurrent
-data movement and accumulation.
+to the accumulation matrix, and the CUDA implementation optionally takes a
+stream parameter so API clients can coordinate concurrent data movement and 
+accumulation.
 
 ## 1.1 Prior Work
 
@@ -276,11 +276,12 @@ out on its own. The width does not depend on the second sweep, either:
 computes `max_top` exactly.
 
 A producer computing a survey to send elsewhere has no column to compare
-against, so the second sweep is always performed. Neither does the accumulation
-matrix when it surveys a column that has no exponent yet: that column will
-adopt whatever the survey reports, and since a column's exponent only ever
-moves down, a bound would leave its scale below what its values require, for
-good.
+against, so it always runs the second sweep. The accumulation matrix does the
+same on a column that has no exponent yet, because such a column adopts
+whatever the survey reports as its exponent. The first sweep yields only a
+lower bound on the true ulp, so a column sized from that bound would sit at a
+lower exponent than its values need; and because a column's exponent only ever
+decreases, it would stay there, carrying low bits that no value ever occupies.
 
 Functions to update the accumulation matrix include an entry point for a single
 column, for a column-major matrix, and for a row-major one, which stages each
@@ -301,13 +302,13 @@ limb-columns, each initialized with a sign extension, and leaves the existing
 values unchanged. A `min_exponent` below the column's `exponent` calls for a
 rescale: a fresh set of limb-columns is allocated, every stored value is
 shifted left by the difference with zeros filling the least significant bits,
-and `max_addend_bits` is increased by that same shift. The exponent specifies
-the significance of the lowest bit position the column can hold, so increasing
-it would right-shift every stored value, dropping bits already accumulated; it
-only ever decreases. An all-zero column is the exception: `max_addend_bits` and
-`add_count` reset to zero, since the total they bound is zero, and the exponent
-reaches its new value with nothing to reallocate and nothing to shift. It still
-only decreases, and the number of limb-columns allocated is not changed.
+and `max_addend_bits` is increased by that same shift. The exponent gives the
+significance of the lowest bit position the column can hold. Raising it would
+right-shift every stored value and drop bits already accumulated, so the
+exponent only ever falls. An all-zero column obeys that rule too, but reaches
+its new exponent for free: there is nothing to shift and nothing to reallocate,
+and `max_addend_bits` and `add_count` reset to zero because the total they
+bound is zero. The number of limb-columns does not change.
 
 The separation of concerns between matrices and their surveys enables the work
 to be done by different constituencies (Figure 5). In a data center, the nodes
