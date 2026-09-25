@@ -4,7 +4,7 @@ Copyright © 2026 by Nicholas Wilt. All rights reserved.
 
 Floating-point operations notoriously are not associative. In particular, (a+b)+c ≠ a+(b+c), introducing a degree of uncertainty about the accuracy of workloads that rely on floating-point summation.
 
-To eliminate that uncertainty, our library `truesum` provides an *accumulation matrix* that can perform fast, elementwise exact summation of floating-point matrices. Each column is represented as block floating point, with a shared exponent and the mantissas held in an SOA layout of 64-bit *limbs*[^limb], the segments of a multi-precision number that each fit in a single machine word.
+To eliminate that uncertainty, our library `truesum` provides an *accumulation matrix* that can perform fast, elementwise exact summation of floating-point matrices. Each column is represented as block floating point, with a shared exponent and the mantissas held in an SOA layout of 64-bit *limbs*[^limb], the segments of a multi-precision number that each fit in a single machine word. Storage is per limb position rather than per element: one contiguous array holds limb *k* of every row, and we call such an array a *limb-column*, for want of a better term.
 
 A *survey* is a compact (12B per column) characterization of an input matrix that may be used to pre-size an accumulation matrix to receive its contents without overflow, rescaling, or the allocation of new limb-columns during the accumulation. Extending this idea, an accumulation matrix can be pre-configured for multiple input matrices by supplying one survey for each prospective input matrix.
 
@@ -20,7 +20,7 @@ Kulisch, Neal and ExBLAS share an accumulator whose width is a property of the f
 
 The SOA layout enables both AVX-512 and CUDA implementations to process summations at the speed of memory bandwidth.
 
-Within the matrix, a single element is stored as a two's complement integer spanning several 64-bit limbs. Written the usual way (most significant first), it reads `[ limb 2 | limb 1 | limb 0 ]`. The SOA layout provides for a separate, contiguous allocation per limb position, so limbs 0, 1 and 2 for a given element are stored at the same offset into three different arrays. For want of a better term, we refer to these arrays as *limb-columns*.
+Within the matrix, a single element is stored as a two's complement integer spanning several 64-bit limbs. Written the usual way (most significant first), it reads `[ limb 2 | limb 1 | limb 0 ]`. Each limb position has its own separate, contiguous allocation, so limbs 0, 1 and 2 for a given element are stored at the same offset into three different limb-columns.
 
 Due to the dynamic range of `double`, with its 11-bit exponent, the worst-case space requirement for a single column of `double` is an eye-popping 33 limbs, or 264 bytes per entry. At risk of stating the obvious, the library was designed with an eye toward better-conditioned inputs that drive more modest requirements.
 

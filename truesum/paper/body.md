@@ -14,12 +14,11 @@ To eliminate that uncertainty, our library `truesum` provides an *accumulation
 matrix* that can perform fast, elementwise exact summation of floating-point
 matrices. Each column is represented as block floating point, with a shared
 exponent and the mantissas held in a structure-of-arrays (SOA) layout of 64-bit
-*limbs*, the segments of a multi-precision number that each fit in a single
-machine word. The term appears to have been coined by the authors of GMP, whose
-manual defines a limb as “the part of a multi-precision number that fits in a
-single machine word” and explains the choice: “a limb of the human body is
-analogous to a digit, only larger, and containing several digits” [Granlund and
-the GMP Development Team 2023]. GMP allows 32 or 64 bits; `truesum` uses 64.
+*limbs*, GMP's term for the segments of a multi-precision number that each fit
+in a single machine word [Granlund and the GMP Development Team 2023]. Storage
+is per limb position rather than per element: one contiguous array holds limb
+*k* of every row, and we call such an array a *limb-column*, for want of a
+better term.
 
 A *survey* is a compact (12 bytes per column) characterization of an input
 matrix that may be used to pre-size an accumulation matrix to receive its
@@ -83,10 +82,9 @@ summations at the speed of memory bandwidth.
 
 Within the matrix, a single element is stored as a two's complement integer
 spanning several 64-bit limbs. Written the usual way (most significant first),
-it reads `[ limb 2 | limb 1 | limb 0 ]`. The SOA layout provides for a
-separate, contiguous allocation per limb position, so limbs 0, 1 and 2 for a
-given element are stored at the same offset into three different arrays. For
-want of a better term, we refer to these arrays as *limb-columns* (Figure 1).
+it reads `[ limb 2 | limb 1 | limb 0 ]`. Each limb position has its own
+separate, contiguous allocation, so limbs 0, 1 and 2 for a given element are
+stored at the same offset into three different limb-columns (Figure 1).
 
 Due to the dynamic range of `double`, with its 11-bit exponent, the worst-case
 space requirement for a single column of `double` is an eye-popping 33 limbs,
